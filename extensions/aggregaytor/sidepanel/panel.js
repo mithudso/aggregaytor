@@ -654,6 +654,17 @@ function renderMessages(messages) {
 
   if (isGlobalChat) {
     container.innerHTML = sorted.map(msg => renderGlobalChatMessage(msg)).join('');
+    // Click avatar in global chat to open that sender's profile
+    container.querySelectorAll('.msg-global-avatar[data-profile-id]').forEach(el => {
+      el.addEventListener('click', () => {
+        const pid = el.dataset.profileId;
+        if (pid && pid.length > 5) {
+          chrome.runtime.sendMessage({
+            type: 'NAVIGATE_TO_CONVERSATION', platform: 'sniffies', contactId: `sniffies:${pid}`,
+          }).catch(() => {});
+        }
+      });
+    });
   } else {
     let lastDate = '';
     container.innerHTML = sorted.map(msg => {
@@ -703,28 +714,35 @@ function isMultiSenderThread(messages) {
 
 function renderGlobalChatMessage(msg) {
   const md = msg.metadata || {};
-  const senderName = md.displayName || md.author || md.username || md.senderId || stripPrefix(msg.contactId || '');
+  const senderId = md.profileId || md.senderId || '';
+
+  // Use the full attributes string from scraper if available, otherwise build from parts
+  let attrStr = md.attrs || '';
+  if (!attrStr) {
+    const parts = [];
+    if (md.age) parts.push(md.age);
+    if (md.height) parts.push(md.height);
+    if (md.weight) parts.push(md.weight);
+    if (md.bodyType || md.body) parts.push(String(md.bodyType || md.body));
+    if (md.attitude || md.position) parts.push(String(md.attitude || md.position));
+    if (md.ethnicity) parts.push(String(md.ethnicity));
+    attrStr = parts.filter(Boolean).join(', ');
+  }
+
   const avatar = md.avatarUrl || md.avatar || '';
-  const attrs = [];
-  if (md.age) attrs.push(md.age);
-  if (md.height) attrs.push(md.height);
-  if (md.weight) attrs.push(md.weight);
-  if (md.bodyType || md.body) attrs.push(String(md.bodyType || md.body));
-  if (md.attitude || md.position) attrs.push(String(md.attitude || md.position));
-  if (md.ethnicity) attrs.push(String(md.ethnicity));
-  const attrStr = attrs.filter(Boolean).join(', ');
-  const time = formatTime(msg.timestamp);
+  const time = md.timeText || formatTime(msg.timestamp);
   const distance = md.distance || '';
+  const senderName = md.displayName || attrStr || senderId.slice(0, 10);
 
   return `
-    <div class="msg-global" data-sender-id="${esc(md.profileId || md.senderId || '')}">
-      <div class="msg-global-avatar">
-        ${avatar ? `<img src="${esc(avatar)}" alt="">` : `<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#6b7280;font-size:14px">${esc(senderName.charAt(0).toUpperCase())}</div>`}
+    <div class="msg-global" data-sender-id="${esc(senderId)}">
+      <div class="msg-global-avatar" style="cursor:pointer" title="Open profile" data-profile-id="${esc(senderId)}">
+        ${avatar ? `<img src="${esc(avatar)}" alt="">` : `<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#6b7280;font-size:14px">?</div>`}
       </div>
       <div class="msg-global-content">
         <div class="msg-global-header">
           <span class="msg-global-attrs">${esc(attrStr || senderName)}</span>
-          <span class="msg-global-meta">${time}${distance ? ', ' + esc(distance) : ''}</span>
+          <span class="msg-global-meta">${esc(time)}${distance ? ', ' + esc(distance) : ''}</span>
         </div>
         <div class="msg-global-body">${esc(msg.body || '')}</div>
       </div>

@@ -37,7 +37,11 @@ function safeNotify(id: string, opts: chrome.notifications.NotificationOptions):
 }
 
 const PLATFORM_URLS: Record<string, (contactId: string) => string> = {
-  sniffies: (id) => `https://sniffies.com/profile/${id.replace('sniffies:', '')}/chat`,
+  sniffies: (id) => {
+    const stripped = id.replace('sniffies:', '');
+    if (stripped === 'global-chat') return 'https://sniffies.com/global-chat';
+    return `https://sniffies.com/profile/${stripped}/chat`;
+  },
   grindr: (id) => `https://web.grindr.com/chat/${id.replace('grindr:', '')}`,
   doublelist: () => `https://doublelist.com/inbox/`,
   adam4adam: (id) => `https://www.adam4adam.com/mailbox`,
@@ -77,7 +81,20 @@ async function handleMessage(msg: any): Promise<any> {
         .slice(0, msg.limit || 50);
       return { ok: true, messages: matches };
     }
-    case 'NAVIGATE_TO_CONVERSATION': { await navigateToConversation(msg.platform, msg.contactId); return { ok: true }; }
+    case 'NAVIGATE_TO_CONVERSATION': {
+      await navigateToConversation(msg.platform, msg.contactId);
+      // If navigating to global chat, scrape after page loads
+      if (msg.contactId === 'sniffies:global-chat') {
+        setTimeout(async () => {
+          const tabs = await chrome.tabs.query({});
+          const gcTab = tabs.find(t => t.url?.includes('sniffies.com/global-chat'));
+          if (gcTab?.id) {
+            chrome.tabs.sendMessage(gcTab.id, { type: 'SCRAPE_GLOBAL_CHAT' }).catch(() => {});
+          }
+        }, 3000);
+      }
+      return { ok: true };
+    }
     case 'OPEN_ALL_SITES': { await openAllSites(); return { ok: true }; }
     case 'SYNC_PROFILE_PICS': {
       // Send scrape request to all platform tabs
@@ -617,6 +634,18 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({ id: 'toggle-autorespond', title: 'Toggle auto-respond all', contexts: ['action'] });
   chrome.contextMenus.create({ id: 'sep2', type: 'separator', contexts: ['action'] });
   chrome.contextMenus.create({ id: 'open-archive', title: 'View archive', contexts: ['action'] });
+
+  // Seed the Global Chat contact so it always appears in the inbox
+  upsertContact({
+    id: 'sniffies:global-chat',
+    platform: 'sniffies',
+    platformUserId: 'global-chat',
+    displayName: '🌐 Global Chat',
+    profileUrl: 'https://sniffies.com/global-chat',
+    avatarUrl: '',
+    lastSeen: new Date().toISOString(),
+    metadata: { isGlobalChat: true },
+  }).catch(() => {});
 });
 
 chrome.contextMenus.onClicked.addListener(async (info) => {

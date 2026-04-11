@@ -84,6 +84,103 @@ try {
       sendResponse({ ok: true, count });
       return true;
     }
+    if (message.type === 'SCRAPE_GLOBAL_CHAT') {
+      // Scrape all visible global chat messages from the DOM
+      const messages: any[] = [];
+      const contacts: any[] = [];
+
+      // Global chat messages are in scrollable containers with profile info + body
+      // Each message block has: avatar, attributes line, timestamp/distance, message bubbles
+      document.querySelectorAll('[class*="cruising-update"], [class*="global-chat-message"], [class*="feed-item"], [class*="post"]').forEach(el => {
+        try {
+          // Get avatar
+          const avatarEl = el.querySelector('img') as HTMLImageElement;
+          const avatarUrl = avatarEl?.src || '';
+          const bgEl = el.querySelector('[style*="background-image"]') as HTMLElement;
+          const bgMatch = bgEl?.style?.backgroundImage?.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/);
+          const bgAvatar = bgMatch?.[1] || '';
+
+          // Get profile attributes line (e.g., "30m, 6'1", 185lb, 8", bi, vers top")
+          // This is typically in a small text element before the message body
+          const allText = el.textContent || '';
+          const attrMatch = allText.match(/(\d+m?,\s*\d+['"]\d*"?,\s*\d+lb.*?)(?:\d+\s*(?:minute|second|hour))/i);
+          const attrs = attrMatch?.[1]?.trim() || '';
+
+          // Get timestamp and distance
+          const timeMatch = allText.match(/(\d+\s*(?:minutes?|seconds?|hours?)\s*ago)/i);
+          const distMatch = allText.match(/([\d.]+\s*miles?)/i);
+          const timeText = timeMatch?.[1] || '';
+          const distance = distMatch?.[1] || '';
+
+          // Get message body — the actual content bubbles
+          const bodyEls = el.querySelectorAll('[class*="message"], [class*="body"], [class*="content"], [class*="text"], p');
+          const bodyParts: string[] = [];
+          bodyEls.forEach(b => {
+            const t = b.textContent?.trim();
+            if (t && t.length > 1 && !t.match(/^\d+m,/) && !t.includes('ago') && !t.includes('miles')) {
+              bodyParts.push(t);
+            }
+          });
+          // Fallback: if no body elements found, use the main text minus the attributes
+          let body = bodyParts.join('\n').trim();
+          if (!body) {
+            body = allText.replace(attrs, '').replace(timeText, '').replace(distance, '').trim();
+            // Clean up — remove very short or attribute-like content
+            body = body.split('\n').filter(l => l.trim().length > 3).join('\n').trim();
+          }
+          if (!body || body.length < 3) return;
+
+          // Extract a pseudo profile ID from the avatar URL or attributes hash
+          let profileId = '';
+          const idFromAvatar = (avatarUrl || bgAvatar).match(/\/([0-9a-f]{6,})\//i);
+          if (idFromAvatar) profileId = idFromAvatar[1].toLowerCase();
+          else profileId = `gc-${btoa(attrs.slice(0, 30)).slice(0, 12)}`;
+
+          messages.push({
+            id: `sniffies:gc-${profileId}-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+            platform: 'sniffies',
+            threadId: 'sniffies:global-chat',
+            contactId: 'sniffies:global-chat',
+            direction: 'in',
+            body,
+            timestamp: new Date().toISOString(),
+            read: true,
+            metadata: {
+              senderId: profileId,
+              avatarUrl: avatarUrl || bgAvatar,
+              displayName: attrs || profileId.slice(0, 10),
+              bodyType: '', position: '', age: '',
+              distance, timeText, attrs,
+              source: 'global-chat-scrape',
+            },
+          });
+
+          if (profileId && (avatarUrl || bgAvatar)) {
+            contacts.push({
+              id: `sniffies:${profileId}`,
+              platform: 'sniffies',
+              platformUserId: profileId,
+              displayName: attrs || profileId.slice(0, 10),
+              profileUrl: `https://sniffies.com/profile/${profileId}`,
+              avatarUrl: avatarUrl || bgAvatar,
+              lastSeen: new Date().toISOString(),
+              metadata: { distance, attrs },
+            });
+          }
+        } catch {}
+      });
+
+      // Send to service worker
+      if (messages.length) {
+        chrome.runtime.sendMessage({ type: 'ADAPTER_MESSAGES', platform: 'sniffies', payload: messages }).catch(() => {});
+      }
+      if (contacts.length) {
+        chrome.runtime.sendMessage({ type: 'ADAPTER_CONTACTS', platform: 'sniffies', payload: contacts }).catch(() => {});
+      }
+
+      sendResponse({ ok: true, count: messages.length });
+      return true;
+    }
     return false;
   });
 } catch {
