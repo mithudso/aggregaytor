@@ -104,18 +104,35 @@ export class GrindrAdapter extends BaseAdapter {
           });
         }
 
-        // Extract contact info
-        const displayName = String(obj.displayName || obj.name || obj.username || '').trim();
-        if (profileId && displayName) {
+        // Extract contact info — from any object with a profile ID
+        if (profileId) {
+          const displayName = String(obj.displayName || obj.name || obj.username || '').trim();
+          const photoHash = String(obj.photoHash || obj.profileImageMediaHash || obj.mediahash || obj.primaryPhotoHash || '');
+          // Grindr CDN: https://cdns.grindr.com/images/profile/1024x1024/{hash}
+          const avatarUrl = photoHash
+            ? `https://cdns.grindr.com/images/profile/1024x1024/${photoHash}`
+            : String(obj.avatar || obj.avatarUrl || obj.photoUrl || '');
+          const md: Record<string, unknown> = {};
+          for (const [key, value] of Object.entries(obj)) {
+            const k = key.toLowerCase();
+            if (typeof value === 'string' && value.length < 100) {
+              if (/bodytype|build/.test(k)) md.bodyType = value;
+              if (/position|tribe/.test(k)) md.position = value;
+              if (k === 'age' || k === 'showage') md.age = value;
+              if (/ethnicity/.test(k)) md.ethnicity = value;
+              if (/height/.test(k)) md.height = value;
+              if (/distance/.test(k)) md.distance = value;
+            }
+          }
           contacts.push({
             id: `grindr:${profileId}`,
             platform: 'grindr',
             platformUserId: profileId,
             displayName,
             profileUrl: `https://web.grindr.com/chat/${conversationId || profileId}`,
-            avatarUrl: String(obj.photoHash || obj.avatar || obj.avatarUrl || obj.profileImageMediaHash || ''),
+            avatarUrl,
             lastSeen: ts ? new Date(ts).toISOString() : new Date().toISOString(),
-            metadata: {},
+            metadata: md,
           });
         }
       },

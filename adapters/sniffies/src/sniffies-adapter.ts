@@ -187,24 +187,61 @@ export class SniffiesAdapter extends BaseAdapter {
     const contacts: UnifiedContact[] = [];
     const contextId = this.getContextProfileId();
 
+    const seenContacts = new Set<string>();
+
     walkPayload(payload, contextId, {
       onObject: (obj, ctx, _depth) => {
         this.selfIds.detectFromPayload(obj);
         this.detectSelfIdsFromObj(obj);
 
-        // Only process objects that look like messages
+        const profileId = findLikelyProfileId(obj, ctx || '');
+
+        // ── Extract contact/profile info from ANY object with a profile ID ──
+        if (profileId && !seenContacts.has(profileId)) {
+          const avatarUrl = this.resolveAvatarUrl(obj, profileId);
+          const displayName = String(obj.displayName || obj.username || obj.name || obj.label || obj.nickname || '').trim();
+          const md: Record<string, unknown> = {};
+
+          // Capture all profile attributes into metadata
+          for (const [key, value] of Object.entries(obj)) {
+            const k = normalizeKey(key);
+            if (typeof value === 'string' && value.length < 100) {
+              if (/bodytype|body|build/.test(k)) md.bodyType = value;
+              if (/attitude|position|role/.test(k)) md.position = value;
+              if (/^age$/.test(k)) md.age = value;
+              if (/ethnicity|race/.test(k)) md.ethnicity = value;
+              if (/height/.test(k)) md.height = value;
+              if (/distance|miles|km/.test(k)) md.distance = value;
+              if (/hosting|host/.test(k)) md.hosting = value;
+            }
+            if (Array.isArray(value) && /photo|image|pic/.test(k)) {
+              md.photos = value.filter(v => typeof v === 'string').slice(0, 10);
+            }
+          }
+
+          if (avatarUrl || displayName || Object.keys(md).length > 0) {
+            seenContacts.add(profileId);
+            contacts.push({
+              id: `sniffies:${profileId}`,
+              platform: 'sniffies',
+              platformUserId: profileId,
+              displayName: displayName || '',
+              profileUrl: `https://sniffies.com/profile/${profileId}`,
+              avatarUrl,
+              lastSeen: new Date().toISOString(),
+              metadata: md,
+            });
+          }
+        }
+
+        // ── Extract messages only from message-like objects ──
         if (!isLikelyMessage(obj)) return;
 
         const body = extractBody(obj);
         if (!body) return;
-
-        // Reject if body looks like a profile attribute
         if (PROFILE_ATTRIBUTE_VALUES.has(body.toLowerCase())) return;
 
         const ts = extractTimestampFromObj(obj);
-        const profileId = findLikelyProfileId(obj, ctx || '');
-
-        // Require BOTH timestamp AND profileId for a valid message
         if (!ts || !profileId) return;
 
         const direction = detectDirection(obj, this.selfIds.ids);
@@ -221,21 +258,6 @@ export class SniffiesAdapter extends BaseAdapter {
           read: direction === 'out',
           metadata: { profileId, url },
         });
-
-        // Extract contact info
-        const displayName = String(obj.displayName || obj.username || obj.name || obj.label || '').trim();
-        if (profileId && displayName && displayName.length > 2 && !PROFILE_ATTRIBUTE_VALUES.has(displayName.toLowerCase())) {
-          contacts.push({
-            id: `sniffies:${profileId}`,
-            platform: 'sniffies',
-            platformUserId: profileId,
-            displayName,
-            profileUrl: `https://sniffies.com/profile/${profileId}`,
-            avatarUrl: String(obj.avatar || obj.avatarUrl || obj.photo || obj.image || ''),
-            lastSeen: new Date(ts).toISOString(),
-            metadata: {},
-          });
-        }
       },
     });
 
@@ -291,6 +313,34 @@ export class SniffiesAdapter extends BaseAdapter {
       const id = normalizeProfileId(String(obj.id || obj._id || obj.profileId || obj.userId || ''));
       if (id) this.selfIds.ids.add(id);
     }
+  }
+
+  /**
+   * Resolve avatar URL from an API object.
+   * Sniffies stores photos at profile.sniffiesassets.com/{id}/
+   * and may also include direct URLs in various fields.
+   */
+  private resolveAvatarUrl(obj: Record<string, unknown>, profileId: string): string {
+    // Check explicit avatar/photo fields
+    for (const key of ['avatar', 'avatarUrl', 'photo', 'image', 'profilePhoto', 'profileImage', 'thumbnail', 'thumbUrl', 'photoUrl', 'imageUrl', 'pictureUrl']) {
+      const val = obj[key];
+      if (typeof val === 'string' && (val.startsWith('http') || val.startsWith('data:'))) return val;
+    }
+    // Check nested photo objects
+    if (obj.photos && Array.isArray(obj.photos)) {
+      const first = obj.photos[0];
+      if (typeof first === 'string' && first.startsWith('http')) return first;
+      if (first && typeof first === 'object' && typeof (first as any).url === 'string') return (first as any).url;
+    }
+    // Check for Sniffies CDN pattern in any string value
+    for (const val of Object.values(obj)) {
+      if (typeof val === 'string' && val.includes('sniffiesassets.com') && val.includes(profileId)) return val;
+    }
+    // Construct CDN URL from profile ID (Sniffies pattern)
+    if (profileId) {
+      return `https://profile.sniffiesassets.com/${profileId}/0`;
+    }
+    return '';
   }
 
   private scanStorage(): void {
