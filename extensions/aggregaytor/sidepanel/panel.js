@@ -109,6 +109,7 @@ function renderThreads(summaries) {
           <span class="action-icon" data-action="greet" title="Send greeting">👋</span>
           <span class="action-icon${meta.autoRespondEnabled ? ' active' : ''}" data-action="autorespond" title="Auto-respond">${meta.autoRespondEnabled ? '🤖' : '🤖'}</span>
         </div>
+        <div class="hover-preview" data-preview-for="${esc(t.contactId)}"></div>
       </div>`;
   }).join('');
 
@@ -132,6 +133,97 @@ function renderThreads(summaries) {
       handleAction(icon.dataset.action, contactId, platform);
     });
   });
+
+  // Hover preview handlers
+  let hoverTimer = null;
+  let activePreview = null;
+  container.querySelectorAll('.thread-item').forEach(el => {
+    el.addEventListener('mouseenter', () => {
+      clearTimeout(hoverTimer);
+      hoverTimer = setTimeout(() => {
+        const contactId = el.dataset.contactId;
+        const platform = el.dataset.platform;
+        const preview = el.querySelector('.hover-preview');
+        if (preview && preview !== activePreview) {
+          // Close any other open preview
+          if (activePreview) { activePreview.classList.remove('active'); activePreview.innerHTML = ''; }
+          activePreview = preview;
+          loadHoverPreview(contactId, platform, preview, el);
+        }
+      }, 300); // 300ms delay before loading
+    });
+    el.addEventListener('mouseleave', () => {
+      clearTimeout(hoverTimer);
+      // Small delay before closing to allow moving mouse into preview
+      hoverTimer = setTimeout(() => {
+        if (activePreview && !activePreview.matches(':hover') && !activePreview.closest('.thread-item:hover')) {
+          activePreview.classList.remove('active');
+          activePreview.innerHTML = '';
+          activePreview = null;
+        }
+      }, 200);
+    });
+  });
+}
+
+async function loadHoverPreview(contactId, platform, previewEl, threadEl) {
+  previewEl.innerHTML = '<div class="hp-loading">Loading...</div>';
+  previewEl.classList.add('active');
+
+  try {
+    const [msgRes, summaryRes] = await Promise.all([
+      chrome.runtime.sendMessage({ type: 'GET_MESSAGES_BY_CONTACT', contactId, limit: 6 }),
+      chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} }),
+    ]);
+
+    const messages = msgRes?.messages || [];
+    const thread = summaryRes?.summaries?.find(s => s.contactId === contactId);
+    const contact = thread?.contact;
+    const meta = allThreadMeta.get(contactId) || {};
+    const md = contact?.metadata || {};
+
+    // Profile section
+    const avatar = contact?.avatarUrl;
+    const name = meta.alias || contact?.displayName || stripPrefix(contactId);
+    const attrs = [];
+    if (md.bodyType || md.body) attrs.push(String(md.bodyType || md.body));
+    if (md.attitude || md.position) attrs.push(String(md.attitude || md.position));
+    if (md.age) attrs.push(md.age + 'yo');
+    if (md.height) attrs.push(String(md.height));
+    if (md.distance) attrs.push(String(md.distance));
+
+    const pics = [];
+    if (avatar) pics.push(avatar);
+    if (Array.isArray(md.photos)) pics.push(...md.photos.slice(0, 4));
+
+    // Last few messages (chronological)
+    const sorted = [...messages].sort((a, b) =>
+      new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    ).slice(-5);
+
+    previewEl.innerHTML = `
+      <div class="hp-profile">
+        ${avatar ? `<img class="hp-avatar" src="${esc(avatar)}" alt="">` : ''}
+        <div class="hp-info">
+          <div class="hp-name">${esc(name)}</div>
+          ${attrs.length ? `<div class="hp-attrs">${attrs.map(a => `<span class="hp-attr">${esc(a)}</span>`).join('')}</div>` : ''}
+        </div>
+      </div>
+      ${pics.length > 1 ? `<div class="hp-pics">${pics.slice(0, 4).map(p => `<img class="hp-pic" src="${esc(p)}" alt="">`).join('')}</div>` : ''}
+      ${meta.notes ? `<div class="hp-notes">${esc(truncate(meta.notes, 80))}</div>` : ''}
+      <div class="hp-messages">
+        ${sorted.length ? sorted.map(m => `
+          <div class="hp-msg ${m.direction}">
+            <span class="hp-msg-dir">${m.direction === 'out' ? 'You' : 'Them'}:</span>
+            ${esc(truncate(m.body, 60))}
+            <span class="hp-msg-time">${formatMsgTime(m.timestamp)}</span>
+          </div>
+        `).join('') : '<div class="hp-empty">No messages</div>'}
+      </div>
+    `;
+  } catch (err) {
+    previewEl.innerHTML = '<div class="hp-loading">Preview unavailable</div>';
+  }
 }
 
 async function handleAction(action, contactId, platform) {
