@@ -24,6 +24,18 @@ import { handleDebugCommand } from './debug-bridge.js';
 const LOG = '[Aggregaytor:SW]';
 console.log(`${LOG} Service worker starting...`);
 
+function safeNotify(id: string, opts: chrome.notifications.NotificationOptions): void {
+  try {
+    chrome.notifications.create(id, opts, () => {
+      if (chrome.runtime.lastError) {
+        console.warn(`${LOG} Notification failed:`, chrome.runtime.lastError.message);
+      }
+    });
+  } catch (e) {
+    console.warn(`${LOG} Notification error:`, e);
+  }
+}
+
 const PLATFORM_URLS: Record<string, (contactId: string) => string> = {
   sniffies: (id) => `https://sniffies.com/profile/${id.replace('sniffies:', '')}/chat`,
   grindr: (id) => `https://web.grindr.com/chat/${id.replace('grindr:', '')}`,
@@ -251,7 +263,7 @@ async function handleMessage(msg: any): Promise<any> {
 
       // Check if commitment opportunity — flash alert if so
       if (sentiment.commitment > 0.6 || summary.commitments.length > 0) {
-        chrome.notifications.create(`commit-alert-${msg.contactId}`, {
+        safeNotify(`commit-alert-${msg.contactId}`, {
           type: 'basic', iconUrl: 'icons/icon-128.png',
           title: 'Commitment opportunity!',
           message: `${msg.contactName} seems ready to commit. ${summary.commitments[0] || 'Check the conversation.'}`,
@@ -402,7 +414,7 @@ async function processAutoResponds(): Promise<void> {
           suggestedPictureTag: result.sendPicture?.tag || '',
         });
         // Notify user
-        chrome.notifications.create(`draft-${entry._id}`, {
+        safeNotify(`draft-${entry._id}`, {
           type: 'basic', iconUrl: 'icons/icon-128.png',
           title: result.tier === 'high' ? 'Review required' : 'Draft response ready',
           message: `${contactName}: "${result.response.slice(0, 100)}"`,
@@ -520,11 +532,11 @@ async function processReminders(): Promise<void> {
   for (const r of reminders) {
     const due = new Date(r.dueAt).getTime();
     if (!r.notifiedApproach && (due - now) <= 20 * 60_000 && (due - now) > 0) {
-      chrome.notifications.create(`rem-a-${r._id}`, { type: 'basic', iconUrl: 'icons/icon-128.png', title: 'Reminder approaching', message: `${r.note} — ${Math.round((due - now) / 60_000)} min` });
+      safeNotify(`rem-a-${r._id}`, { type: 'basic', iconUrl: 'icons/icon-128.png', title: 'Reminder approaching', message: `${r.note} — ${Math.round((due - now) / 60_000)} min` });
       await markReminderNotified(r._id, 'approach');
     }
     if (!r.notifiedDue && due <= now) {
-      chrome.notifications.create(`rem-d-${r._id}`, { type: 'basic', iconUrl: 'icons/icon-128.png', title: 'Reminder', message: r.note });
+      safeNotify(`rem-d-${r._id}`, { type: 'basic', iconUrl: 'icons/icon-128.png', title: 'Reminder', message: r.note });
       await markReminderNotified(r._id, 'due');
     }
   }
@@ -585,7 +597,7 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
       for (const s of summRes) {
         await upsertThreadMeta(s.contactId, s.platform, { autoRespondEnabled: newState });
       }
-      chrome.notifications.create('ar-toggle', {
+      safeNotify('ar-toggle', {
         type: 'basic', iconUrl: 'icons/icon-128.png',
         title: 'Auto-respond', message: newState ? 'Enabled for all conversations' : 'Disabled',
       });
@@ -648,7 +660,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
     if (result?.result?.isLoginPage) {
       console.log(`${LOG} Grindr logged out detected, attempting relogin...`);
-      chrome.notifications.create('grindr-relogin', {
+      safeNotify('grindr-relogin', {
         type: 'basic', iconUrl: 'icons/icon-128.png',
         title: 'Grindr logged out',
         message: 'Attempting to log back in via Apple Sign-In...',
