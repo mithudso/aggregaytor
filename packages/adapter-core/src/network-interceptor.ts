@@ -6,6 +6,7 @@
  */
 
 import type { InterceptorOptions } from './types.js';
+import { captureAuthHeaders } from './api-sender.js';
 
 const PATCH_FLAG = '__aggregaytorPatched';
 
@@ -18,6 +19,24 @@ export function installFetchInterceptor(
   if ((originalFetch as any)[PATCH_FLAG]) return () => {};
 
   const wrappedFetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
+    // Capture auth headers from the request for API replay
+    try {
+      const req = args[0];
+      if (req instanceof Request) {
+        const headers: Record<string, string> = {};
+        req.headers.forEach((v, k) => { headers[k] = v; });
+        const host = new URL(req.url).hostname.split('.').slice(-2).join('.');
+        captureAuthHeaders(host, headers);
+      } else if (args[1] && typeof args[1] === 'object' && (args[1] as any).headers) {
+        const h = (args[1] as any).headers;
+        const headers: Record<string, string> = {};
+        if (h instanceof Headers) h.forEach((v: string, k: string) => { headers[k] = v; });
+        else if (typeof h === 'object') Object.entries(h).forEach(([k, v]) => { headers[k] = String(v); });
+        const url = String((req as any)?.url || req || '');
+        try { const host = new URL(url).hostname.split('.').slice(-2).join('.'); captureAuthHeaders(host, headers); } catch {}
+      }
+    } catch {}
+
     const res = await originalFetch.apply(target, args);
     try {
       const url = String((args[0] as any)?.url || args[0] || '');

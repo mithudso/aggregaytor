@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Aggregaytor",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Unified message inbox across platforms",
   "permissions": [
     "storage",
@@ -38,6 +38,16 @@
       "matches": ["https://web.grindr.com/*"],
       "js": ["content/grindr-bridge.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://doublelist.com/*"],
+      "js": ["content/doublelist-bridge.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.adam4adam.com/*", "https://m.adam4adam.com/*"],
+      "js": ["content/adam4adam-bridge.js"],
+      "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
@@ -48,6 +58,14 @@
     {
       "resources": ["content/grindr.js"],
       "matches": ["https://web.grindr.com/*"]
+    },
+    {
+      "resources": ["content/doublelist.js"],
+      "matches": ["https://doublelist.com/*"]
+    },
+    {
+      "resources": ["content/adam4adam.js"],
+      "matches": ["https://www.adam4adam.com/*", "https://m.adam4adam.com/*"]
     }
   ],
   "action": {

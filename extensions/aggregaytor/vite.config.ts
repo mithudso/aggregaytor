@@ -40,6 +40,8 @@ function buildContentScriptsIIFE(): Plugin {
       const contentScripts = [
         { name: 'sniffies', entry: resolve(__dirname, 'content/sniffies.ts') },
         { name: 'grindr', entry: resolve(__dirname, 'content/grindr.ts') },
+        { name: 'doublelist', entry: resolve(__dirname, 'content/doublelist.ts') },
+        { name: 'adam4adam', entry: resolve(__dirname, 'content/adam4adam.ts') },
       ];
 
       for (const { name, entry } of contentScripts) {
@@ -69,6 +71,8 @@ function buildContentScriptsIIFE(): Plugin {
               '@aggregaytor/adapter-core': resolve(__dirname, '../../packages/adapter-core/src/index.ts'),
               '@aggregaytor/adapter-sniffies': resolve(__dirname, '../../adapters/sniffies/src/index.ts'),
               '@aggregaytor/adapter-grindr': resolve(__dirname, '../../adapters/grindr/src/index.ts'),
+              '@aggregaytor/adapter-doublelist': resolve(__dirname, '../../adapters/doublelist/src/index.ts'),
+              '@aggregaytor/adapter-adam4adam': resolve(__dirname, '../../adapters/adam4adam/src/index.ts'),
             },
           },
           logLevel: 'warn',
@@ -94,6 +98,8 @@ export default defineConfig({
         'content/sniffies-bridge': resolve(__dirname, 'content/sniffies-bridge.ts'),
         'content/sniffies-migrate': resolve(__dirname, 'content/sniffies-migrate.ts'),
         'content/grindr-bridge': resolve(__dirname, 'content/grindr-bridge.ts'),
+        'content/doublelist-bridge': resolve(__dirname, 'content/doublelist-bridge.ts'),
+        'content/adam4adam-bridge': resolve(__dirname, 'content/adam4adam-bridge.ts'),
       },
       output: {
         entryFileNames: '[name].js',
@@ -110,6 +116,8 @@ export default defineConfig({
       '@aggregaytor/store': resolve(__dirname, '../../packages/store/src/index.ts'),
       '@aggregaytor/adapter-sniffies': resolve(__dirname, '../../adapters/sniffies/src/index.ts'),
       '@aggregaytor/adapter-grindr': resolve(__dirname, '../../adapters/grindr/src/index.ts'),
+      '@aggregaytor/adapter-doublelist': resolve(__dirname, '../../adapters/doublelist/src/index.ts'),
+      '@aggregaytor/adapter-adam4adam': resolve(__dirname, '../../adapters/adam4adam/src/index.ts'),
     },
   },
   ssr: {

@@ -1,85 +1,166 @@
 /**
  * doublelist-adapter.ts — DoubleList platform adapter.
  *
- * DoubleList (doublelist.com) is a server-rendered site with some JS.
- * Messages are in the DOM with class "notification-in-app-message".
- * Uses DOM-based extraction as primary, fetch interception as secondary.
+ * DoubleList uses server-rendered HTML with jQuery + Pusher for real-time.
+ * Messages have data-mess-id, data-mess-channel, data-receiver-id attributes.
+ * Notifications in .notification-in-app-message-popup elements.
  */
 
-import { BaseAdapter, createDOMExtractor } from '@aggregaytor/adapter-core';
-import type { Platform, UnifiedMessage } from '@aggregaytor/adapter-core';
+import { BaseAdapter, createDOMExtractor, walkPayload, extractTimestamp, extractMessageText } from '@aggregaytor/adapter-core';
+import type { Platform, UnifiedMessage, UnifiedContact } from '@aggregaytor/adapter-core';
+
+const LOG = '[Aggregaytor:DList]';
 
 export class DoubleListAdapter extends BaseAdapter {
   readonly platform: Platform = 'doublelist';
 
   async init(): Promise<void> {
-    // DOM observation for server-rendered messages
-    if (this.config.observeDOM) {
-      const cleanup = createDOMExtractor(document, {
-        rootSelector: '.notification-in-app-message, .inbox-messages, .message-list',
-        messageSelector: '.message, .notification-in-app-message',
-        onNewElements: (elements) => {
-          const messages = elements.map(el => this.parseMessageElement(el)).filter(Boolean) as UnifiedMessage[];
-          if (messages.length) this.emit({ type: 'messages', payload: messages });
-        },
-      });
-      this.addCleanup(cleanup);
-    }
+    console.log(`${LOG} Initializing...`);
 
-    // Also intercept any fetch/XHR API calls
+    // DOM observation for server-rendered messages
+    const cleanup = createDOMExtractor(document, {
+      rootSelector: 'body',
+      messageSelector: '[data-mess-id], .notification-in-app-message-popup, .view_message',
+      onNewElements: (elements) => {
+        const messages: UnifiedMessage[] = [];
+        const contacts: UnifiedContact[] = [];
+        for (const el of elements) {
+          const result = this.parseMessageElement(el);
+          if (result?.message) messages.push(result.message);
+          if (result?.contact) contacts.push(result.contact);
+        }
+        if (messages.length) this.emit({ type: 'messages', payload: messages });
+        if (contacts.length) this.emit({ type: 'contacts', payload: contacts });
+      },
+    });
+    this.addCleanup(cleanup);
+
+    // Also scan existing notifications on page load
+    this.scanExistingMessages();
+
+    // Intercept any fetch/XHR API calls
     this.setupNetworkInterception(window as Window & typeof globalThis);
+
+    console.log(`${LOG} Initialized`);
   }
 
   protected shouldInterceptUrl(url: string): boolean {
     const s = String(url).toLowerCase();
-    return s.includes('doublelist.com') && (s.includes('/api/') || s.includes('/message') || s.includes('/inbox'));
+    return s.includes('doublelist.com') && (s.includes('/user_notifications') || s.includes('/messages') || s.includes('/api/'));
   }
 
   protected parseApiResponse(url: string, payload: unknown): UnifiedMessage[] {
-    // DoubleList may use fetch for message loading — parse if JSON
     if (!payload || typeof payload !== 'object') return [];
     const messages: UnifiedMessage[] = [];
-    const arr = Array.isArray(payload) ? payload : [payload];
-    for (const item of arr) {
-      if (!item || typeof item !== 'object') continue;
-      const obj = item as Record<string, unknown>;
-      const body = String(obj.body || obj.message || obj.text || '').trim();
-      if (!body) continue;
-      messages.push({
-        id: `doublelist:${obj.id || obj.message_id || Date.now()}`,
-        platform: 'doublelist',
-        threadId: `doublelist:${obj.thread_id || obj.conversation_id || obj.sender_id || 'unknown'}`,
-        contactId: `doublelist:${obj.sender_id || obj.from_id || obj.user_id || 'unknown'}`,
-        direction: obj.is_mine || obj.isMine ? 'out' : 'in',
-        body,
-        timestamp: new Date(String(obj.created_at || obj.timestamp || '')).toISOString() || new Date().toISOString(),
-        read: !!obj.read,
-        metadata: { url },
-      });
-    }
+
+    walkPayload(payload, null, {
+      onObject: (obj) => {
+        const body = extractMessageText(obj);
+        if (!body) return;
+        const ts = extractTimestamp(obj);
+        const senderId = String(obj.sender_id || obj.senderId || obj.from_id || obj.userId || '');
+        const receiverId = String(obj.receiver_id || obj.receiverId || obj.to_id || '');
+        const msgId = String(obj.id || obj.message_id || obj.mess_id || '');
+        const channel = String(obj.mess_channel || obj.channel || obj.conversation_id || '');
+
+        if (!senderId && !channel) return;
+
+        messages.push({
+          id: `doublelist:${msgId || `${channel}:${Date.now()}`}`,
+          platform: 'doublelist',
+          threadId: `doublelist:${channel || senderId}`,
+          contactId: `doublelist:${senderId || channel}`,
+          direction: receiverId && this.selfIds.has(receiverId) ? 'in' : 'out',
+          body,
+          timestamp: ts || new Date().toISOString(),
+          read: false,
+          metadata: { url, channel, senderId, receiverId },
+        });
+      },
+    });
+
     return messages;
   }
 
-  protected parseWebSocketFrame(): UnifiedMessage[] {
-    return []; // DoubleList doesn't use WebSocket
+  protected parseWebSocketFrame(data: string | ArrayBuffer): UnifiedMessage[] {
+    if (typeof data !== 'string') return [];
+    try {
+      const parsed = JSON.parse(data);
+      if (parsed && typeof parsed === 'object') {
+        return this.parseApiResponse('[pusher]', parsed);
+      }
+    } catch {}
+    return [];
   }
 
-  private parseMessageElement(el: Element): UnifiedMessage | null {
-    const body = el.textContent?.trim();
+  private scanExistingMessages(): void {
+    const elements = document.querySelectorAll('[data-mess-id], .notification-in-app-message-popup');
+    const messages: UnifiedMessage[] = [];
+    const contacts: UnifiedContact[] = [];
+    for (const el of elements) {
+      const result = this.parseMessageElement(el as Element);
+      if (result?.message) messages.push(result.message);
+      if (result?.contact) contacts.push(result.contact);
+    }
+    if (messages.length) {
+      console.log(`${LOG} Scanned ${messages.length} existing messages`);
+      this.emit({ type: 'messages', payload: messages });
+    }
+    if (contacts.length) this.emit({ type: 'contacts', payload: contacts });
+  }
+
+  private parseMessageElement(el: Element): { message?: UnifiedMessage; contact?: UnifiedContact } | null {
+    const messId = el.getAttribute('data-mess-id');
+    const channel = el.getAttribute('data-mess-channel') || '';
+    const receiverId = el.getAttribute('data-receiver-id') || '';
+
+    // Extract username from h5.m-0 text like "New message (Robert)"
+    const h5 = el.querySelector('h5.m-0, h5');
+    let username = '';
+    if (h5) {
+      const match = h5.textContent?.match(/\(([^)]+)\)/);
+      username = match ? match[1].trim() : h5.textContent?.trim() || '';
+    }
+
+    // Extract message body from <p> sibling
+    const bodyEl = el.querySelector('p') || el.querySelector('.notification-list-div p');
+    const body = bodyEl?.textContent?.trim() || '';
+
+    // Extract timestamp
+    const timeEl = el.querySelector('.notification-time, .time-dropdown');
+    const timeText = timeEl?.textContent?.trim() || '';
+
+    // Extract avatar
+    const avatarEl = el.querySelector('.notificationUser-img, img') as HTMLImageElement;
+    const avatarUrl = avatarEl?.src || '';
+
     if (!body || body.length < 2) return null;
 
-    const id = el.getAttribute('data-message-id') || el.getAttribute('data-id') || `dom-${Date.now()}-${Math.random()}`;
+    const contactId = channel ? `doublelist:${channel}` : `doublelist:${receiverId || messId || 'unknown'}`;
 
-    return {
-      id: `doublelist:${id}`,
+    const message: UnifiedMessage = {
+      id: `doublelist:${messId || `dom-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`}`,
       platform: 'doublelist',
-      threadId: `doublelist:dom-thread`,
-      contactId: `doublelist:dom-contact`,
-      direction: 'in',
-      body: body.slice(0, 2000),
-      timestamp: new Date().toISOString(),
+      threadId: contactId,
+      contactId,
+      direction: 'in', // notifications are always incoming
+      body,
+      timestamp: new Date().toISOString(), // DoubleList shows relative times
       read: false,
-      metadata: { source: 'dom' },
+      metadata: { channel, receiverId, timeText },
     };
+
+    const contact: UnifiedContact | undefined = username ? {
+      id: contactId,
+      platform: 'doublelist',
+      platformUserId: channel || receiverId || messId || '',
+      displayName: username,
+      profileUrl: `https://doublelist.com/messages?lastMessageKey=${channel}`,
+      avatarUrl,
+      lastSeen: new Date().toISOString(),
+      metadata: {},
+    } : undefined;
+
+    return { message, contact };
   }
 }

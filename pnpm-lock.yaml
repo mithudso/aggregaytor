@@ -98,9 +98,15 @@ importers:
 
   extensions/aggregaytor:
     dependencies:
+      '@aggregaytor/adapter-adam4adam':
+        specifier: workspace:*
+        version: link:../../adapters/adam4adam
       '@aggregaytor/adapter-core':
         specifier: workspace:*
         version: link:../../packages/adapter-core
+      '@aggregaytor/adapter-doublelist':
+        specifier: workspace:*
+        version: link:../../adapters/doublelist
       '@aggregaytor/adapter-grindr':
         specifier: workspace:*
         version: link:../../adapters/grindr

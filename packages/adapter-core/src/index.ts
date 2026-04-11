@@ -46,3 +46,6 @@ export { SelfIdTracker } from './self-id-tracker.js';
 
 // DOM observation
 export { createDOMExtractor } from './dom-observer.js';
+
+// API replay sender
+export { captureAuthHeaders, getCapturedAuth, sendViaApi } from './api-sender.js';
