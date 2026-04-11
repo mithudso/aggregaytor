@@ -19,6 +19,7 @@ import {
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
 import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus } from './llm.js';
 import { getDossier, upsertDossier, setAutoExtractedField } from '@aggregaytor/store';
+import { handleDebugCommand } from './debug-bridge.js';
 
 const LOG = '[Aggregaytor:SW]';
 console.log(`${LOG} Service worker starting...`);
@@ -267,6 +268,9 @@ async function handleMessage(msg: any): Promise<any> {
       }
       return { ok: true, extracted, fieldCount: Object.keys(extracted).length };
     }
+
+    // Debug commands (from MCP server or dev tools)
+    case 'DEBUG_COMMAND': return { ok: true, result: await handleDebugCommand(msg.command, msg.params) };
 
     default: return { ok: false, error: `Unknown: ${msg.type}` };
   }

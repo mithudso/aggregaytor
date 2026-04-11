@@ -10,7 +10,7 @@
 
 const LOG = '[Aggregaytor:LLM]';
 
-export type LLMProvider = 'gemini' | 'openai' | 'anthropic' | 'local';
+export type LLMProvider = 'gemini' | 'openai' | 'anthropic' | 'groq' | 'perplexity' | 'mistral' | 'copilot' | 'local';
 
 interface LLMConfig {
   provider: LLMProvider;
@@ -37,8 +37,79 @@ const DEFAULT_MODELS: Record<LLMProvider, string> = {
   gemini: 'gemini-2.0-flash',
   openai: 'gpt-4o-mini',
   anthropic: 'claude-haiku-4-5-20251001',
+  groq: 'llama-3.1-8b-instant',
+  perplexity: 'llama-3.1-sonar-small-128k-online',
+  mistral: 'mistral-small-latest',
+  copilot: 'gpt-4o-mini',
   local: 'local',
 };
+
+// Known rate limits per provider (requests per minute on free/tier-1)
+const PROVIDER_RPM: Record<string, number> = {
+  gemini: 15,       // Free tier: 15 RPM
+  openai: 60,       // Tier 1: ~60 RPM for gpt-4o-mini
+  anthropic: 50,    // Tier 1: ~50 RPM
+  groq: 30,         // Free: 30 RPM
+  perplexity: 20,   // ~20 RPM
+  mistral: 60,      // ~60 RPM
+  copilot: 10,      // Conservative estimate
+};
+
+// Per-provider request tracking for proactive cycling
+const providerRequestCounts = new Map<string, number[]>();
+
+function getProviderRPMUsed(provider: string): number {
+  const now = Date.now();
+  const timestamps = providerRequestCounts.get(provider) || [];
+  const recent = timestamps.filter(t => now - t < 60_000);
+  providerRequestCounts.set(provider, recent);
+  return recent.length;
+}
+
+function recordProviderRequest(provider: string): void {
+  const timestamps = providerRequestCounts.get(provider) || [];
+  timestamps.push(Date.now());
+  providerRequestCounts.set(provider, timestamps);
+}
+
+function isProviderNearLimit(provider: string): boolean {
+  const limit = PROVIDER_RPM[provider] || 10;
+  const used = getProviderRPMUsed(provider);
+  return used >= limit - 1; // leave 1 request buffer
+}
+
+/**
+ * Get the best available provider — cycles proactively before hitting rate limits.
+ */
+async function getBestProvider(): Promise<LLMConfig> {
+  const primary = await getLLMConfig();
+  if (primary.provider === 'local' || !primary.apiKey) return primary;
+
+  // If primary is near its limit, try alternatives
+  if (!isProviderNearLimit(primary.provider)) return primary;
+
+  console.log(`${LOG} ${primary.provider} near rate limit (${getProviderRPMUsed(primary.provider)}/${PROVIDER_RPM[primary.provider] || '?'} RPM), cycling...`);
+
+  const keys = await getAllProviderKeys();
+  // Also include the primary key
+  keys[primary.provider] = primary.apiKey;
+
+  // Try providers in order of remaining capacity
+  const candidates = Object.entries(keys)
+    .filter(([p, k]) => k && p !== 'local')
+    .map(([p, k]) => ({ provider: p as LLMProvider, apiKey: k, headroom: (PROVIDER_RPM[p] || 10) - getProviderRPMUsed(p) }))
+    .filter(c => c.headroom > 0)
+    .sort((a, b) => b.headroom - a.headroom);
+
+  if (candidates.length) {
+    const best = candidates[0];
+    console.log(`${LOG} Cycling to ${best.provider} (${best.headroom} RPM headroom)`);
+    return { provider: best.provider, apiKey: best.apiKey, model: '' };
+  }
+
+  // All providers near limit — return primary anyway
+  return primary;
+}
 
 // ── Rate limiting + backoff ─────────────────────────────────────────────────
 
@@ -257,12 +328,17 @@ async function getConfigWithFailover(rateLimitedProvider?: string): Promise<LLMC
   return primary;
 }
 
-export function getLLMQueueStatus(): { queueLength: number; requestsLastMinute: number; backoffUntil: number } {
+export function getLLMQueueStatus() {
   const now = Date.now();
+  const providerUsage: Record<string, { used: number; limit: number }> = {};
+  for (const [provider, limit] of Object.entries(PROVIDER_RPM)) {
+    providerUsage[provider] = { used: getProviderRPMUsed(provider), limit };
+  }
   return {
     queueLength: requestQueue.length,
     requestsLastMinute: requestTimestamps.filter(t => now - t < 60_000).length,
     backoffUntil: Math.max(0, backoffUntil - now),
+    providerUsage,
   };
 }
 
@@ -360,6 +436,64 @@ async function callProvider(
       };
       break;
     }
+    case 'groq': {
+      // Groq uses OpenAI-compatible API
+      const model = config.model || DEFAULT_MODELS.groq;
+      url = 'https://api.groq.com/openai/v1/chat/completions';
+      const msgs: any[] = [];
+      if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
+      msgs.push({ role: 'user', content: userPrompt });
+      init = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
+        body: JSON.stringify({ model, messages: msgs, temperature: temp, max_tokens: maxTokens }),
+      };
+      break;
+    }
+    case 'perplexity': {
+      const model = config.model || DEFAULT_MODELS.perplexity;
+      url = 'https://api.perplexity.ai/chat/completions';
+      const msgs: any[] = [];
+      if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
+      msgs.push({ role: 'user', content: userPrompt });
+      init = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
+        body: JSON.stringify({ model, messages: msgs, temperature: temp, max_tokens: maxTokens }),
+      };
+      break;
+    }
+    case 'mistral': {
+      const model = config.model || DEFAULT_MODELS.mistral;
+      url = 'https://api.mistral.ai/v1/chat/completions';
+      const msgs: any[] = [];
+      if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
+      msgs.push({ role: 'user', content: userPrompt });
+      init = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
+        body: JSON.stringify({ model, messages: msgs, temperature: temp, max_tokens: maxTokens }),
+      };
+      break;
+    }
+    case 'copilot': {
+      // GitHub Copilot uses OpenAI-compatible endpoint
+      const model = config.model || DEFAULT_MODELS.copilot;
+      url = 'https://api.githubcopilot.com/chat/completions';
+      const msgs: any[] = [];
+      if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
+      msgs.push({ role: 'user', content: userPrompt });
+      init = {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.apiKey}`,
+          'Editor-Version': 'aggregaytor/0.19.1',
+        },
+        body: JSON.stringify({ model, messages: msgs, temperature: temp, max_tokens: maxTokens }),
+      };
+      break;
+    }
     default:
       throw new Error(`Unknown provider: ${config.provider}`);
   }
@@ -379,11 +513,16 @@ async function callProvider(
     throw new Error(`${config.provider} ${res.status}: ${err.slice(0, 200)}`);
   }
 
+  // Record this successful request for rate tracking
+  recordProviderRequest(config.provider);
+
   const data = await res.json();
   switch (config.provider) {
     case 'gemini': return data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    case 'openai': return data?.choices?.[0]?.message?.content || '';
     case 'anthropic': return data?.content?.[0]?.text || '';
+    // OpenAI-compatible: openai, groq, perplexity, mistral, copilot
+    case 'openai': case 'groq': case 'perplexity': case 'mistral': case 'copilot':
+      return data?.choices?.[0]?.message?.content || '';
     default: return '';
   }
 }
@@ -457,7 +596,7 @@ export async function generateSuggestions(
   contactName: string,
   platform: string,
 ): Promise<SuggestionResult> {
-  const config = await getLLMConfig();
+  const config = await getBestProvider();
   const systemPrompt = buildSystemPrompt(contactName, platform);
   const conversation = buildConversationContext(messages, contactName);
 
@@ -567,7 +706,7 @@ export async function generateAutoResponse(
   platform: string,
   settings?: AutoRespondSettings,
 ): Promise<AutoRespondResult> {
-  const config = await getLLMConfig();
+  const config = await getBestProvider();
   const systemPrompt = buildAutoRespondPrompt(contactName, platform, settings);
   const conversation = buildConversationContext(messages, contactName);
   const userPrompt = `Here is the conversation:\n\n${conversation}\n\nGenerate your JSON response:`;
@@ -619,7 +758,7 @@ function parseAutoRespondJson(text: string): { response: string; tier: 'low' | '
 export async function generateGreeting(
   platform: string,
 ): Promise<AutoRespondResult> {
-  const config = await getLLMConfig();
+  const config = await getBestProvider();
   const prompt = buildGreetingPrompt(platform);
 
   if (config.provider === 'local' || !config.apiKey) {
@@ -656,7 +795,7 @@ export async function generateNickname(
   lastMessageBody: string,
   platform: string,
 ): Promise<string> {
-  const config = await getLLMConfig();
+  const config = await getBestProvider();
 
   // Build context clues
   const clues: string[] = [];
@@ -697,7 +836,7 @@ export async function extractDossierFields(
   contactName: string,
   existingDossier: Record<string, unknown>,
 ): Promise<Record<string, string>> {
-  const config = await getLLMConfig();
+  const config = await getBestProvider();
   if (config.provider === 'local' || !config.apiKey) {
     return localDossierExtraction(messages);
   }
@@ -796,7 +935,7 @@ export async function generateConversationSummary(
   contactName: string,
   platform: string,
 ): Promise<{ text: string; commitments: string[] }> {
-  const config = await getLLMConfig();
+  const config = await getBestProvider();
   if (config.provider === 'local' || !config.apiKey) {
     return localSummary(messages);
   }

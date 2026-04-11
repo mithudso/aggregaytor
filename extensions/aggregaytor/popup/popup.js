@@ -4,9 +4,13 @@
 
 const PROVIDER_INFO = {
   local: 'Pattern-based suggestions, no API key needed.',
-  anthropic: 'Claude Haiku. Get key at console.anthropic.com',
-  gemini: 'Gemini Flash (free tier). Get key at aistudio.google.com',
-  openai: 'GPT-4o-mini. Get key at platform.openai.com',
+  anthropic: 'Claude Haiku (50 RPM). Get key at console.anthropic.com',
+  gemini: 'Gemini Flash (15 RPM free). Get key at aistudio.google.com',
+  openai: 'GPT-4o-mini (60 RPM). Get key at platform.openai.com',
+  groq: 'Llama 3.1 8B (30 RPM free, very fast). Get key at console.groq.com',
+  perplexity: 'Sonar Small (20 RPM). Get key at perplexity.ai/settings/api',
+  mistral: 'Mistral Small (60 RPM). Get key at console.mistral.ai',
+  copilot: 'GPT-4o-mini via Copilot (10 RPM). Requires Copilot subscription.',
 };
 
 // ── Sync profile pics ───────────────────────────────────────────────────────
