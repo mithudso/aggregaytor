@@ -64,7 +64,7 @@
   </div>
 
   <!-- Draft review bar -->
-  <div id="draft-bar" class="draft-bar" style="display:none" onclick="toggleDraftPanel()">
+  <div id="draft-bar" class="draft-bar" style="display:none">
     <span>Drafts pending review</span>
     <span id="draft-count" class="unread-badge">0</span>
   </div>
@@ -90,6 +90,9 @@
       </div>
       <div id="reminder-list" class="reminder-list"></div>
     </div>
+    <!-- Profile info -->
+    <div id="profile-info" class="profile-info"></div>
+
     <!-- Conversation summary sidebar -->
     <div id="thread-summary" class="thread-summary">
       <div class="summary-section">
@@ -100,8 +103,8 @@
         <div class="summary-label">Preference</div>
         <div id="preference-display" class="preference-display"></div>
         <div class="pref-actions">
-          <button class="pref-btn like" onclick="recordPref(true)" title="Like">👍</button>
-          <button class="pref-btn dislike" onclick="recordPref(false)" title="Pass">👎</button>
+          <button class="pref-btn like" id="pref-like" title="Like">👍</button>
+          <button class="pref-btn dislike" id="pref-dislike" title="Pass">👎</button>
         </div>
       </div>
       <div class="summary-section">

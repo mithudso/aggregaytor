@@ -9,10 +9,13 @@ const PROVIDER_INFO = {
   openai: 'GPT-4o-mini. Get key at platform.openai.com',
 };
 
-window.toggle = function(id) {
-  const el = document.getElementById(id);
-  el.classList.toggle('open');
-};
+// Section toggle handlers (no inline onclick — CSP disallows it in MV3)
+document.querySelectorAll('[data-toggle]').forEach(el => {
+  el.addEventListener('click', () => {
+    const target = document.getElementById(el.dataset.toggle);
+    if (target) target.classList.toggle('open');
+  });
+});
 
 // ── Stats ───────────────────────────────────────────────────────────────────
 
@@ -79,9 +82,16 @@ async function loadPictures() {
         ${p.thumbnail ? `<img src="${p.thumbnail}" alt="${p.label || p.tag}">` : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#6b7280">${p.tag}</div>`}
         <span class="pic-tag">${p.tag}</span>
         <span class="pic-stats">${p.sentCount}s ${p.responseCount}r ${p.likeCount}l</span>
-        <button class="pic-del" onclick="deletePic('${p._id}')">&times;</button>
+        <button class="pic-del" data-delete-pic="${p._id}">&times;</button>
       </div>
     `).join('');
+    // Attach delete handlers
+    grid.querySelectorAll('[data-delete-pic]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        await chrome.runtime.sendMessage({ type: 'DELETE_PICTURE', id: btn.dataset.deletePic });
+        loadPictures();
+      });
+    });
   } catch {}
 }
 
@@ -119,10 +129,7 @@ document.getElementById('pic-upload').addEventListener('change', async (e) => {
   reader.readAsDataURL(file);
 });
 
-window.deletePic = async function(id) {
-  await chrome.runtime.sendMessage({ type: 'DELETE_PICTURE', id });
-  loadPictures();
-};
+// deletePic is now handled via data attributes above
 
 // ── Block rules ─────────────────────────────────────────────────────────────
 
@@ -141,11 +148,24 @@ async function loadRules() {
         <span class="rule-name">${r.name} ${r.enabled ? '' : '(off)'}</span>
         <span class="rule-count">${r.executedCount}x</span>
         <div class="rule-actions">
-          <button class="btn btn-sm" onclick="toggleRule('${r._id}', ${!r.enabled})">${r.enabled ? 'Disable' : 'Enable'}</button>
-          <button class="btn btn-sm btn-danger" onclick="deleteRule('${r._id}')">Del</button>
+          <button class="btn btn-sm" data-toggle-rule="${r._id}" data-enabled="${!r.enabled}">${r.enabled ? 'Disable' : 'Enable'}</button>
+          <button class="btn btn-sm btn-danger" data-delete-rule="${r._id}">Del</button>
         </div>
       </div>
     `).join('');
+    // Attach handlers
+    list.querySelectorAll('[data-toggle-rule]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        await chrome.runtime.sendMessage({ type: 'UPDATE_BLOCK_RULE', id: btn.dataset.toggleRule, updates: { enabled: btn.dataset.enabled === 'true' } });
+        loadRules();
+      });
+    });
+    list.querySelectorAll('[data-delete-rule]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        await chrome.runtime.sendMessage({ type: 'DELETE_BLOCK_RULE', id: btn.dataset.deleteRule });
+        loadRules();
+      });
+    });
   } catch {}
 }
 
@@ -174,14 +194,7 @@ document.getElementById('add-rule').addEventListener('click', async () => {
   loadRules();
 });
 
-window.toggleRule = async function(id, enabled) {
-  await chrome.runtime.sendMessage({ type: 'UPDATE_BLOCK_RULE', id, updates: { enabled } });
-  loadRules();
-};
-
-window.deleteRule = async function(id) {
-  await chrome.runtime.sendMessage({ type: 'DELETE_BLOCK_RULE', id });
-  loadRules();
+// toggleRule and deleteRule are now handled via data attributes above
 };
 
 // ── Open panel ──────────────────────────────────────────────────────────────

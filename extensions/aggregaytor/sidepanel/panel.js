@@ -210,6 +210,9 @@ async function openThread(contactId, platform, displayName) {
   document.getElementById('reminder-section').style.display = 'none';
   loadReminders();
 
+  // Load profile info
+  loadProfileInfo(contactId);
+
   // Navigate parent tab
   chrome.runtime.sendMessage({ type: 'NAVIGATE_TO_CONVERSATION', platform, contactId }).catch(() => {});
   chrome.runtime.sendMessage({ type: 'MARK_THREAD_READ', threadId: contactId }).catch(() => {});
@@ -219,6 +222,56 @@ async function openThread(contactId, platform, displayName) {
     const res = await chrome.runtime.sendMessage({ type: 'GET_MESSAGES_BY_CONTACT', contactId, limit: 500 });
     if (res?.ok) { currentMessages = res.messages || []; renderMessages(currentMessages); loadThreadAnalysis(); }
   } catch (err) { console.error('[Panel] Message load error:', err); }
+}
+
+async function loadProfileInfo(contactId) {
+  const el = document.getElementById('profile-info');
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId });
+    // Also get contact doc for profile data
+    const summaries = await chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} });
+    const thread = summaries?.summaries?.find(s => s.contactId === contactId);
+    const contact = thread?.contact;
+    const meta = res?.meta || {};
+
+    if (!contact && !meta.alias) { el.classList.remove('active'); return; }
+    el.classList.add('active');
+
+    const name = meta.alias || contact?.displayName || stripPrefix(contactId);
+    const avatar = contact?.avatarUrl;
+    const md = contact?.metadata || {};
+
+    // Build attribute chips from metadata
+    const attrs = [];
+    if (md.bodyType || md.body) attrs.push(String(md.bodyType || md.body));
+    if (md.attitude || md.position) attrs.push(String(md.attitude || md.position));
+    if (md.age) attrs.push(`${md.age}yo`);
+    if (md.ethnicity) attrs.push(String(md.ethnicity));
+    if (md.height) attrs.push(String(md.height));
+    if (md.distance) attrs.push(String(md.distance));
+    if (md.hosting) attrs.push(`Host: ${md.hosting}`);
+
+    // Collect any pictures from metadata
+    const pics = [];
+    if (avatar) pics.push(avatar);
+    if (Array.isArray(md.photos)) pics.push(...md.photos.slice(0, 5));
+    if (md.photoUrl) pics.push(String(md.photoUrl));
+
+    el.innerHTML = `
+      <div class="profile-header">
+        <div class="profile-avatar">${avatar ? `<img src="${esc(avatar)}" alt="">` : `<span style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:20px;color:#6b7280">${esc(name.charAt(0).toUpperCase())}</span>`}</div>
+        <div class="profile-details">
+          <div class="profile-name">${esc(name)}</div>
+          ${contact?.profileUrl ? `<div style="font-size:10px;color:#6b7280">${esc(contact.platform)}</div>` : ''}
+          ${attrs.length ? `<div class="profile-attrs">${attrs.map(a => `<span class="profile-attr">${esc(a)}</span>`).join('')}</div>` : ''}
+        </div>
+      </div>
+      ${pics.length > 1 ? `<div class="profile-pics">${pics.map(p => `<div class="profile-pic"><img src="${esc(p)}" alt=""></div>`).join('')}</div>` : ''}
+      ${meta.notes ? `<div style="font-size:11px;color:#9ca3af;margin-top:4px;border-top:1px solid rgba(255,255,255,0.06);padding-top:4px">${esc(meta.notes)}</div>` : ''}
+    `;
+  } catch {
+    el.classList.remove('active');
+  }
 }
 
 async function loadThreadAnalysis() {
@@ -285,7 +338,11 @@ function renderSummary(summary) {
   }
 }
 
-window.recordPref = async function(liked) {
+// Preference buttons (no inline onclick)
+document.getElementById('pref-like').addEventListener('click', () => recordPrefAction(true));
+document.getElementById('pref-dislike').addEventListener('click', () => recordPrefAction(false));
+
+async function recordPrefAction(liked) {
   if (!currentThread) return;
   await chrome.runtime.sendMessage({
     type: 'RECORD_PREFERENCE',
@@ -294,7 +351,7 @@ window.recordPref = async function(liked) {
     liked,
   });
   loadThreadAnalysis();
-};
+}
 
 function renderHeaderActions() {
   const container = document.getElementById('header-actions');
@@ -361,7 +418,10 @@ async function loadDrafts() {
   } catch { return []; }
 }
 
-window.toggleDraftPanel = async function() {
+// Draft bar click handler
+document.getElementById('draft-bar').addEventListener('click', toggleDraftPanel);
+
+async function toggleDraftPanel() {
   const panel = document.getElementById('draft-panel');
   if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
   const drafts = await loadDrafts();
@@ -377,25 +437,28 @@ window.toggleDraftPanel = async function() {
         <div class="draft-body" contenteditable="true" data-id="${d._id}">${esc(d.generatedResponse)}</div>
         ${d.suggestedPictureTag ? `<div style="font-size:10px;color:#6b7280">Picture: ${esc(d.suggestedPictureTag)}</div>` : ''}
         <div class="draft-actions">
-          <button class="draft-btn approve" onclick="approveDraft('${d._id}', this)">Approve & Send</button>
-          <button class="draft-btn reject" onclick="rejectDraft('${d._id}')">Reject</button>
+          <button class="draft-btn approve" data-approve-draft="${d._id}">Approve & Send</button>
+          <button class="draft-btn reject" data-reject-draft="${d._id}">Reject</button>
         </div>
       </div>`;
   }).join('');
   panel.style.display = '';
-};
-
-window.approveDraft = async function(id, btn) {
-  const body = btn.closest('.draft-item').querySelector('.draft-body');
-  const editedResponse = body?.textContent?.trim();
-  await chrome.runtime.sendMessage({ type: 'APPROVE_DRAFT', id, editedResponse });
-  loadDrafts();
-};
-
-window.rejectDraft = async function(id) {
-  await chrome.runtime.sendMessage({ type: 'REJECT_DRAFT', id });
-  loadDrafts();
-};
+  // Attach approve/reject handlers
+  panel.querySelectorAll('[data-approve-draft]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const body = btn.closest('.draft-item').querySelector('.draft-body');
+      const editedResponse = body?.textContent?.trim();
+      await chrome.runtime.sendMessage({ type: 'APPROVE_DRAFT', id: btn.dataset.approveDraft, editedResponse });
+      loadDrafts();
+    });
+  });
+  panel.querySelectorAll('[data-reject-draft]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      await chrome.runtime.sendMessage({ type: 'REJECT_DRAFT', id: btn.dataset.rejectDraft });
+      loadDrafts();
+    });
+  });
+}
 
 function goBack() {
   currentThread = null; currentMessages = []; currentMeta = null;

@@ -45,7 +45,7 @@
   <div id="stats"></div>
   <button class="btn" id="open-panel">Open Inbox</button>
 
-  <h2 onclick="toggle('llm-section')">AI Settings</h2>
+  <h2 data-toggle="llm-section">AI Settings</h2>
   <div id="llm-section" class="section">
     <label for="provider">Provider</label>
     <select id="provider">
@@ -67,7 +67,7 @@
     <div class="saved" id="llm-saved">Saved</div>
   </div>
 
-  <h2 onclick="toggle('pic-section')">Picture Library</h2>
+  <h2 data-toggle="pic-section">Picture Library</h2>
   <div id="pic-section" class="section">
     <div class="info">Upload pictures to send in conversations. Tag them for smart auto-selection.</div>
     <div style="display:flex;gap:6px;margin-bottom:6px">
@@ -81,7 +81,7 @@
     <div id="pic-grid" class="pic-grid"></div>
   </div>
 
-  <h2 onclick="toggle('rules-section')">Block Rules</h2>
+  <h2 data-toggle="rules-section">Block Rules</h2>
   <div id="rules-section" class="section">
     <div class="info">Auto-archive or hide profiles based on conversation patterns.</div>
     <div id="rule-list"></div>
