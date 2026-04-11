@@ -1,6 +1,6 @@
 {
   "name": "@aggregaytor/extension",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,6 +12,7 @@
     "@aggregaytor/adapter-adam4adam": "workspace:*",
     "@aggregaytor/adapter-core": "workspace:*",
     "@aggregaytor/adapter-doublelist": "workspace:*",
+    "@aggregaytor/adapter-gmail": "workspace:*",
     "@aggregaytor/adapter-grindr": "workspace:*",
     "@aggregaytor/adapter-sniffies": "workspace:*",
     "@aggregaytor/context-engine": "workspace:*",

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Aggregaytor",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Unified message inbox across platforms",
   "permissions": [
     "storage",
@@ -48,6 +48,11 @@
       "matches": ["https://www.adam4adam.com/*", "https://m.adam4adam.com/*"],
       "js": ["content/adam4adam-bridge.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://mail.google.com/*"],
+      "js": ["content/gmail-bridge.js"],
+      "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
@@ -66,6 +71,10 @@
     {
       "resources": ["content/adam4adam.js"],
       "matches": ["https://www.adam4adam.com/*", "https://m.adam4adam.com/*"]
+    },
+    {
+      "resources": ["content/gmail.js"],
+      "matches": ["https://mail.google.com/*"]
     }
   ],
   "action": {

@@ -60,6 +60,21 @@ importers:
         specifier: ^3.1.0
         version: 3.2.4(@types/debug@4.1.13)
 
+  adapters/gmail:
+    devDependencies:
+      '@aggregaytor/adapter-core':
+        specifier: workspace:*
+        version: link:../../packages/adapter-core
+      tsup:
+        specifier: ^8.4.0
+        version: 8.5.1(postcss@8.5.9)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.1.0
+        version: 3.2.4(@types/debug@4.1.13)
+
   adapters/grindr:
     devDependencies:
       '@aggregaytor/adapter-core':
@@ -107,6 +122,9 @@ importers:
       '@aggregaytor/adapter-doublelist':
         specifier: workspace:*
         version: link:../../adapters/doublelist
+      '@aggregaytor/adapter-gmail':
+        specifier: workspace:*
+        version: link:../../adapters/gmail
       '@aggregaytor/adapter-grindr':
         specifier: workspace:*
         version: link:../../adapters/grindr

@@ -1,5 +1,5 @@
 {
-  "name": "@aggregaytor/adapter-doublelist",
+  "name": "@aggregaytor/adapter-gmail",
   "version": "0.13.0",
   "type": "module",
   "main": "./dist/index.cjs",
