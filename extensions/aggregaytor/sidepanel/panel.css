@@ -282,6 +282,31 @@ body {
 .draft-btn.reject { border-color: rgba(239,68,68,0.3); background: rgba(239,68,68,0.1); color: #f87171; }
 .draft-btn:hover { filter: brightness(1.2); }
 
+/* ── Dossier ── */
+.dossier-section {
+  padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,0.06); flex-shrink: 0; max-height: 300px; overflow-y: auto;
+}
+.dossier-header {
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;
+  font-size: 12px; font-weight: 600; color: #9ca3af;
+}
+.dossier-extract-btn {
+  font-size: 10px; padding: 2px 8px; border-radius: 4px; cursor: pointer;
+  border: 1px solid rgba(124,58,237,0.3); background: rgba(124,58,237,0.1); color: #c4b5fd;
+}
+.dossier-extract-btn:hover { background: rgba(124,58,237,0.2); }
+.dossier-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; }
+.dossier-field { margin-bottom: 2px; }
+.dossier-field label { font-size: 9px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.3px; display: block; }
+.dossier-field input, .dossier-field select, .dossier-field textarea {
+  width: 100%; padding: 3px 6px; border-radius: 4px; font-size: 11px;
+  border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.04); color: #e7e9ea; font-family: inherit;
+}
+.dossier-field textarea { resize: vertical; min-height: 24px; }
+.dossier-field input:focus, .dossier-field textarea:focus { border-color: rgba(59,130,246,0.4); outline: none; }
+.dossier-field .auto-badge { font-size: 8px; color: #7c3aed; margin-left: 3px; }
+.dossier-field.full-width { grid-column: 1 / -1; }
+
 /* ── Profile info ── */
 .profile-info {
   padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,0.06);

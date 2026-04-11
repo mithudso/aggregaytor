@@ -23,5 +23,8 @@ export { getCalendarSettings, saveCalendarSettings, getCalendarToken, saveCalend
 export type { CalendarSettings, CalendarToken } from './calendar.js';
 export { recordFeedback, predictPreference, getModelStats, getAllFeedback, retrainModel, extractFeatures } from './preference-ml.js';
 export { analyzeConversationSentiment, formatSentimentSummary } from './sentiment.js';
+export { getDossier, upsertDossier, setAutoExtractedField } from './dossier.js';
+export type { ContactDossierDoc } from './types.js';
+export { DEFAULT_DOSSIER } from './types.js';
 export { startSync, stopSync } from './sync.js';
 export type { SyncConfig } from './sync.js';

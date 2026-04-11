@@ -347,8 +347,9 @@ async function openThread(contactId, platform, displayName) {
   document.getElementById('reminder-section').style.display = 'none';
   loadReminders();
 
-  // Load profile info
+  // Load profile info + dossier
   loadProfileInfo(contactId);
+  loadDossier();
 
   // Navigate parent tab
   chrome.runtime.sendMessage({ type: 'NAVIGATE_TO_CONVERSATION', platform, contactId }).catch(() => {});
@@ -496,6 +497,7 @@ function renderHeaderActions() {
   container.innerHTML = `
     <span class="action-icon${m.bookmarked ? ' active' : ''}" data-action="bookmark" title="Bookmark">${m.bookmarked ? '★' : '☆'}</span>
     <span class="action-icon" data-action="notes" title="Notes">📝</span>
+    <span class="action-icon" data-action="dossier" title="Dossier">📋</span>
     <span class="action-icon" data-action="reminder" title="Reminder">⏰</span>
     <span class="action-icon" data-action="archive" title="Archive">📦</span>
     <span class="action-icon" data-action="hide" title="Hide until reply">🙈</span>
@@ -511,6 +513,9 @@ function renderHeaderActions() {
         if (sec.style.display !== 'none') document.getElementById('notes-input').focus();
       } else if (action === 'reminder') {
         const sec = document.getElementById('reminder-section');
+        sec.style.display = sec.style.display === 'none' ? '' : 'none';
+      } else if (action === 'dossier') {
+        const sec = document.getElementById('dossier-section');
         sec.style.display = sec.style.display === 'none' ? '' : 'none';
       } else {
         handleAction(action, currentThread.contactId, currentThread.platform);
@@ -627,6 +632,121 @@ async function saveNotes() {
     updates: { notes },
   });
 }
+
+// ── Dossier ─────────────────────────────────────────────────────────────────
+
+const DOSSIER_FIELDS = [
+  { key: 'realName', label: 'Real Name', type: 'text' },
+  { key: 'birthYear', label: 'Birth Year', type: 'text' },
+  { key: 'phone', label: 'Phone', type: 'text' },
+  { key: 'address', label: 'Address', type: 'text', full: true },
+  { key: 'hometown', label: 'From', type: 'text' },
+  { key: 'employer', label: 'Work', type: 'text' },
+  { key: 'schedule', label: 'Schedule', type: 'text', full: true },
+  { key: 'relationshipStatus', label: 'Status', type: 'text' },
+  { key: 'position', label: 'Position', type: 'text' },
+  { key: 'kinks', label: 'Kinks', type: 'text', full: true, isArray: true },
+  { key: 'metInPerson', label: 'Met IRL', type: 'select', options: ['', 'Yes', 'No'] },
+  { key: 'meetingNotes', label: 'Meeting Notes', type: 'textarea', full: true },
+  { key: 'wouldMeetAgain', label: 'Meet Again?', type: 'select', options: ['', 'Yes', 'No', 'Maybe'] },
+  { key: 'wouldDate', label: 'Date?', type: 'select', options: ['', 'Yes', 'No', 'Maybe'] },
+  { key: 'hasTransportation', label: 'Transport', type: 'select', options: ['', 'Yes', 'No'] },
+  { key: 'hasDog', label: 'Has Dog', type: 'select', options: ['', 'Yes', 'No'] },
+  { key: 'isInHotel', label: 'Hotel', type: 'select', options: ['', 'Yes', 'No'] },
+  { key: 'sentAddressToThem', label: 'Sent Addr', type: 'select', options: ['', 'Yes', 'No'] },
+  { key: 'owesMeMoney', label: 'Owes $', type: 'number' },
+  { key: 'paidForAnything', label: 'Paid For', type: 'text', full: true },
+  { key: 'isRealOrBot', label: 'Real/Bot', type: 'select', options: ['unknown', 'real', 'bot', 'suspicious'] },
+  { key: 'ghostCount', label: 'Ghosted', type: 'number' },
+  { key: 'otherProfileLinks', label: 'Other Profiles', type: 'textarea', full: true, isArray: true },
+  { key: 'partnerNames', label: 'Partners', type: 'text', isArray: true },
+];
+
+async function loadDossier() {
+  if (!currentThread) return;
+  const section = document.getElementById('dossier-section');
+  const container = document.getElementById('dossier-fields');
+
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_DOSSIER', contactId: currentThread.contactId });
+    const d = res?.dossier || {};
+
+    section.style.display = '';
+    container.innerHTML = DOSSIER_FIELDS.map(f => {
+      const val = d[f.key];
+      const displayVal = f.isArray ? (Array.isArray(val) ? val.join(', ') : String(val || '')) : String(val ?? '');
+      const autoInfo = d.autoExtracted?.[f.key];
+      const badge = autoInfo ? `<span class="auto-badge" title="Auto-extracted ${autoInfo.extractedAt}">⚡</span>` : '';
+
+      if (f.type === 'select') {
+        const options = f.options.map(o => `<option value="${o}"${displayVal === o || (displayVal === 'true' && o === 'Yes') || (displayVal === 'false' && o === 'No') ? ' selected' : ''}>${o || '—'}</option>`).join('');
+        return `<div class="dossier-field${f.full ? ' full-width' : ''}"><label>${f.label}${badge}</label><select data-dossier-field="${f.key}">${options}</select></div>`;
+      }
+      if (f.type === 'textarea') {
+        return `<div class="dossier-field${f.full ? ' full-width' : ''}"><label>${f.label}${badge}</label><textarea data-dossier-field="${f.key}" rows="2">${esc(displayVal)}</textarea></div>`;
+      }
+      if (f.type === 'number') {
+        return `<div class="dossier-field"><label>${f.label}${badge}</label><input type="number" data-dossier-field="${f.key}" value="${esc(displayVal)}"></div>`;
+      }
+      return `<div class="dossier-field${f.full ? ' full-width' : ''}"><label>${f.label}${badge}</label><input type="text" data-dossier-field="${f.key}" value="${esc(displayVal)}"></div>`;
+    }).join('');
+
+    // Auto-save on change
+    container.querySelectorAll('[data-dossier-field]').forEach(el => {
+      el.addEventListener('change', saveDossierField);
+      el.addEventListener('blur', saveDossierField);
+    });
+  } catch {
+    section.style.display = 'none';
+  }
+}
+
+async function saveDossierField(e) {
+  if (!currentThread) return;
+  const el = e.target;
+  const field = el.dataset.dossierField;
+  const fieldDef = DOSSIER_FIELDS.find(f => f.key === field);
+  let value = el.value;
+
+  // Convert arrays
+  if (fieldDef?.isArray) {
+    value = value.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  // Convert booleans
+  if (value === 'Yes') value = true;
+  if (value === 'No') value = false;
+
+  await chrome.runtime.sendMessage({
+    type: 'UPSERT_DOSSIER',
+    contactId: currentThread.contactId,
+    platform: currentThread.platform,
+    updates: { [field]: value },
+  });
+}
+
+document.getElementById('dossier-extract').addEventListener('click', async () => {
+  if (!currentThread) return;
+  const btn = document.getElementById('dossier-extract');
+  btn.textContent = 'Extracting...';
+  btn.disabled = true;
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'EXTRACT_DOSSIER',
+      contactId: currentThread.contactId,
+      platform: currentThread.platform,
+      contactName: currentThread.displayName,
+    });
+    if (res?.ok) {
+      btn.textContent = `Found ${res.fieldCount} fields`;
+      loadDossier(); // refresh
+    } else {
+      btn.textContent = 'Failed';
+    }
+  } catch {
+    btn.textContent = 'Error';
+  }
+  setTimeout(() => { btn.textContent = 'Auto-fill from chat'; btn.disabled = false; }, 2000);
+});
 
 // ── Reminders ───────────────────────────────────────────────────────────────
 

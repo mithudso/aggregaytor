@@ -238,6 +238,77 @@ export interface TimeSlot {
   label: string;            // human-readable: "7:00 PM - 9:00 PM"
 }
 
+// ── Contact Dossier ─────────────────────────────────────────────────────────
+
+export interface ContactDossierDoc {
+  _id: string;              // 'dossier:{contactId}'
+  _rev?: string;
+  docType: 'dossier';
+  contactId: string;
+  platform: Platform;
+
+  // Identity
+  realName: string;
+  birthYear: string;
+  phone: string;
+  address: string;
+  hometown: string;
+  employer: string;
+  schedule: string;         // e.g., "works 9-5 M-F, free weekends"
+
+  // Relationship
+  relationshipStatus: string; // single, partnered, married, etc.
+  partnerNames: string[];
+  partnerLinks: string[];
+
+  // Cross-platform links
+  otherProfileLinks: string[];  // URLs to their profiles on other platforms
+
+  // Meeting history
+  metInPerson: boolean;
+  meetingDates: string[];    // ISO dates
+  meetingNotes: string;      // how was it
+  wouldMeetAgain: boolean | null;
+  wouldDate: boolean | null;
+
+  // Logistics
+  hasTransportation: boolean | null;
+  hasDog: boolean | null;
+  isInHotel: boolean | null;
+  sentAddressToThem: boolean;
+  owesMeMoney: number;       // dollar amount, 0 = none
+  paidForAnything: string;   // what you had to pay for
+
+  // Profile / sexual
+  position: string;
+  kinks: string[];
+  bodyType: string;
+
+  // Trust signals
+  isRealOrBot: 'real' | 'bot' | 'suspicious' | 'unknown';
+  ghostCount: number;        // times they've ghosted
+  deletedChatCount: number;  // inherited from ThreadMetaDoc
+
+  // Auto-extracted flags (LLM fills these)
+  autoExtracted: Record<string, { value: string; source: string; extractedAt: string }>;
+
+  // Timestamps
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const DEFAULT_DOSSIER: Omit<ContactDossierDoc, '_id' | '_rev' | 'contactId' | 'platform' | 'createdAt' | 'updatedAt'> = {
+  docType: 'dossier',
+  realName: '', birthYear: '', phone: '', address: '', hometown: '', employer: '', schedule: '',
+  relationshipStatus: '', partnerNames: [], partnerLinks: [],
+  otherProfileLinks: [],
+  metInPerson: false, meetingDates: [], meetingNotes: '', wouldMeetAgain: null, wouldDate: null,
+  hasTransportation: null, hasDog: null, isInHotel: null, sentAddressToThem: false, owesMeMoney: 0, paidForAnything: '',
+  position: '', kinks: [], bodyType: '',
+  isRealOrBot: 'unknown', ghostCount: 0, deletedChatCount: 0,
+  autoExtracted: {},
+};
+
 export interface ThreadSummary {
   threadId: string;
   contactId: string;

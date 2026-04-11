@@ -17,7 +17,8 @@ import {
   getContact,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
-import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, getLLMConfig, saveLLMConfig } from './llm.js';
+import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, getLLMConfig, saveLLMConfig } from './llm.js';
+import { getDossier, upsertDossier, setAutoExtractedField } from '@aggregaytor/store';
 
 const LOG = '[Aggregaytor:SW]';
 console.log(`${LOG} Service worker starting...`);
@@ -48,12 +49,12 @@ async function handleMessage(msg: any): Promise<any> {
     case 'PROFILE_BLOCKED': {
       console.log(`${LOG} Block detected: ${msg.contactId}`);
       await upsertThreadMeta(msg.contactId, msg.platform, { blockedByThem: true, archived: true });
-      try { chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform: msg.platform, count: 0 }); } catch {}
+      chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform: msg.platform, count: 0 }).catch(() => {})
       return { ok: true };
     }
     case 'ACTIVE_PROFILE_CHANGED': {
       // Relay to side panel so it can highlight the active conversation
-      try { chrome.runtime.sendMessage({ type: 'ACTIVE_PROFILE_CHANGED', contactId: msg.contactId, platform: msg.platform }); } catch {}
+      chrome.runtime.sendMessage({ type: 'ACTIVE_PROFILE_CHANGED', contactId: msg.contactId, platform: msg.platform }).catch(() => {})
       return { ok: true };
     }
 
@@ -196,10 +197,28 @@ async function handleMessage(msg: any): Promise<any> {
           requireInteraction: true, priority: 2,
         });
         // Flash the side panel
-        try { chrome.runtime.sendMessage({ type: 'COMMITMENT_ALERT', contactId: msg.contactId, contactName: msg.contactName }); } catch {}
+        chrome.runtime.sendMessage({ type: 'COMMITMENT_ALERT', contactId: msg.contactId, contactName: msg.contactName }).catch(() => {})
       }
 
       return { ok: true, sentiment, preference, summary };
+    }
+
+    // Dossier
+    case 'GET_DOSSIER': return { ok: true, dossier: await getDossier(msg.contactId) };
+    case 'UPSERT_DOSSIER': return { ok: true, dossier: await upsertDossier(msg.contactId, msg.platform, msg.updates) };
+    case 'EXTRACT_DOSSIER': {
+      const messages = await getMessagesByContact(msg.contactId, { limit: 100 });
+      const existing = await getDossier(msg.contactId) || {};
+      const extracted = await extractDossierFields(
+        messages.map(m => ({ direction: m.direction, body: m.body, timestamp: m.timestamp })),
+        msg.contactName || msg.contactId.replace(/^[a-z]+:/, '').slice(0, 10),
+        existing,
+      );
+      // Save each extracted field with source attribution
+      for (const [field, value] of Object.entries(extracted)) {
+        await setAutoExtractedField(msg.contactId, msg.platform, field, value, 'llm-extraction');
+      }
+      return { ok: true, extracted, fieldCount: Object.keys(extracted).length };
     }
 
     default: return { ok: false, error: `Unknown: ${msg.type}` };
@@ -211,7 +230,7 @@ async function handleMessage(msg: any): Promise<any> {
 async function handleIncomingMessages(messages: UnifiedMessage[], platform: Platform): Promise<any> {
   const result = await upsertMessages(messages);
   await updateBadgeCount();
-  try { chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform, count: result.created }); } catch {}
+  chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform, count: result.created }).catch(() => {})
 
   if (result.created > 0) {
     for (const msg of messages) {
@@ -232,9 +251,50 @@ async function handleIncomingMessages(messages: UnifiedMessage[], platform: Plat
     }
     // Run block rules
     await runBlockRules(messages).catch(e => console.warn(`${LOG} Block rules error:`, e));
+
+    // Queue dossier auto-extraction (debounced — only run every 5 min per contact)
+    const contactIds = new Set(messages.filter(m => m.direction === 'in').map(m => m.contactId));
+    for (const cid of contactIds) {
+      dossierExtractionQueue.add(`${cid}:${messages[0]?.platform || platform}`);
+    }
+    if (dossierExtractionQueue.size > 0 && !dossierExtractionTimer) {
+      dossierExtractionTimer = setTimeout(processDossierExtractions, 30_000); // 30s debounce
+    }
   }
 
   return { ok: true, ...result };
+}
+
+// Debounced dossier extraction
+const dossierExtractionQueue = new Set<string>();
+let dossierExtractionTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function processDossierExtractions(): Promise<void> {
+  dossierExtractionTimer = null;
+  const queue = [...dossierExtractionQueue];
+  dossierExtractionQueue.clear();
+
+  for (const entry of queue) {
+    const [contactId, platform] = [entry.substring(0, entry.lastIndexOf(':')), entry.substring(entry.lastIndexOf(':') + 1)];
+    try {
+      const messages = await getMessagesByContact(contactId, { limit: 50 });
+      if (messages.length < 3) continue; // need at least a few messages
+      const existing = await getDossier(contactId) || {};
+      const contactName = contactId.replace(/^[a-z]+:/, '').slice(0, 10);
+      const extracted = await extractDossierFields(
+        messages.map(m => ({ direction: m.direction, body: m.body, timestamp: m.timestamp })),
+        contactName, existing,
+      );
+      for (const [field, value] of Object.entries(extracted)) {
+        await setAutoExtractedField(contactId, platform as Platform, field, value, 'auto-extraction');
+      }
+      if (Object.keys(extracted).length) {
+        console.log(`${LOG} Auto-extracted ${Object.keys(extracted).length} dossier fields for ${contactId}`);
+      }
+    } catch (err) {
+      console.warn(`${LOG} Dossier extraction failed for ${contactId}:`, err);
+    }
+  }
 }
 
 async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void> {
@@ -284,7 +344,7 @@ async function processAutoResponds(): Promise<void> {
           message: `${contactName}: "${result.response.slice(0, 100)}"`,
           requireInteraction: result.tier === 'high',
         });
-        try { chrome.runtime.sendMessage({ type: 'DRAFTS_UPDATED' }); } catch {}
+        chrome.runtime.sendMessage({ type: 'DRAFTS_UPDATED' }).catch(() => {})
         console.log(`${LOG} Draft created (${result.tier} tier): "${result.response.slice(0, 40)}..."`);
       }
     } catch (err) {

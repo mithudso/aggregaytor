@@ -530,6 +530,131 @@ Return ONLY the nickname, nothing else.`;
   }
 }
 
+// ── Dossier auto-extraction ─────────────────────────────────────────────────
+
+export async function extractDossierFields(
+  messages: Message[],
+  contactName: string,
+  existingDossier: Record<string, unknown>,
+): Promise<Record<string, string>> {
+  const config = await getLLMConfig();
+  if (config.provider === 'local' || !config.apiKey) {
+    return localDossierExtraction(messages);
+  }
+
+  const recent = messages.slice(-50);
+  const conversation = recent.map(m =>
+    `${m.direction === 'out' ? 'You' : contactName}: ${m.body}`
+  ).join('\n');
+
+  const alreadyKnown = Object.entries(existingDossier)
+    .filter(([k, v]) => v && typeof v === 'string' && v.length > 0 && k !== 'docType' && k !== '_id')
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('\n');
+
+  const prompt = `Analyze this conversation and extract any personal information mentioned by "${contactName}" (the other person, NOT "You").
+
+Already known:
+${alreadyKnown || 'Nothing yet'}
+
+Conversation:
+${conversation}
+
+Extract ANY of these fields IF they are mentioned or can be inferred from what ${contactName} said:
+- realName: their actual name
+- birthYear: year born or age (convert to year)
+- phone: phone number
+- address: where they live (any specificity)
+- hometown: where they're from originally
+- employer: where they work or what they do
+- schedule: when they're free/busy
+- relationshipStatus: single, partnered, married, etc.
+- partnerNames: names of partners
+- position: sexual position preference
+- kinks: any mentioned kinks/preferences
+- hasTransportation: can they drive/get there
+- isInHotel: are they staying in a hotel
+- hasDog: do they have a dog or pets
+- isRealOrBot: any signs of being a bot (scripted responses, no specifics, too generic)
+
+Return ONLY a JSON object with the fields you found new info for. Omit fields with no new info. Example: {"realName":"Mike","position":"vers top","hasTransportation":"true"}`;
+
+  try {
+    let text = '';
+    switch (config.provider) {
+      case 'gemini': {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${config.model || 'gemini-2.0-flash'}:generateContent?key=${config.apiKey}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.2, maxOutputTokens: 512, responseMimeType: 'application/json' } }),
+        });
+        if (res.ok) text = (await res.json())?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        break;
+      }
+      case 'openai': {
+        const res = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
+          body: JSON.stringify({ model: config.model || 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }], temperature: 0.2, max_tokens: 512, response_format: { type: 'json_object' } }),
+        });
+        if (res.ok) text = (await res.json())?.choices?.[0]?.message?.content || '';
+        break;
+      }
+      case 'anthropic': {
+        const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+          body: JSON.stringify({ model: config.model || 'claude-haiku-4-5-20251001', max_tokens: 512, messages: [{ role: 'user', content: prompt }] }),
+        });
+        if (res.ok) text = (await res.json())?.content?.[0]?.text || '';
+        break;
+      }
+    }
+    try {
+      const parsed = JSON.parse(text);
+      const result: Record<string, string> = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        if (v !== null && v !== undefined && String(v).trim()) {
+          result[k] = String(v).trim();
+        }
+      }
+      console.log(`${LOG} Dossier extraction found ${Object.keys(result).length} fields`);
+      return result;
+    } catch { return {}; }
+  } catch (err) {
+    console.error(`${LOG} Dossier extraction failed:`, err);
+    return localDossierExtraction(messages);
+  }
+}
+
+function localDossierExtraction(messages: Message[]): Record<string, string> {
+  const result: Record<string, string> = {};
+  const inbound = messages.filter(m => m.direction === 'in').map(m => m.body.toLowerCase());
+  const allText = inbound.join(' ');
+
+  // Phone number
+  const phoneMatch = allText.match(/\b(\d{3}[-.]?\d{3}[-.]?\d{4})\b/);
+  if (phoneMatch) result.phone = phoneMatch[1];
+
+  // Age/birth year
+  const ageMatch = allText.match(/\bi(?:'m|m)\s+(\d{2})\b/) || allText.match(/\b(\d{2})\s*(?:yo|y\/o|years?\s*old)\b/);
+  if (ageMatch) result.birthYear = String(new Date().getFullYear() - parseInt(ageMatch[1]));
+
+  // Position
+  if (/\b(top|bottom|vers|versatile|side)\b/i.test(allText)) {
+    const match = allText.match(/\b(vers top|vers bottom|power bottom|top|bottom|vers|versatile|side)\b/i);
+    if (match) result.position = match[1];
+  }
+
+  // Hosting/transportation
+  if (/\bcan host\b/i.test(allText)) result.hasTransportation = 'true';
+  if (/\bcan'?t host\b/i.test(allText) || /\bno car\b/i.test(allText)) result.hasTransportation = 'false';
+  if (/\bhotel\b/i.test(allText)) result.isInHotel = 'true';
+
+  // Name
+  const nameMatch = allText.match(/\b(?:my name(?:'s| is))\s+([A-Z][a-z]+)\b/i) || allText.match(/\b(?:i'm|im|i am)\s+([A-Z][a-z]{2,})\b/);
+  if (nameMatch) result.realName = nameMatch[1];
+
+  return result;
+}
+
 // ── Conversation summary ────────────────────────────────────────────────────
 
 export async function generateConversationSummary(
