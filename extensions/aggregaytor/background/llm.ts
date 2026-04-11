@@ -1058,9 +1058,9 @@ export async function generateSuggestions(
   const systemPrompt = await getCachedSystemPrompt(contactName, platform);
   const conversation = buildConversationContext(messages, contactName, "suggestions");
 
-  console.log(`${LOG} Generating suggestions via ${routedConfig.provider} (${messages.length} msgs, ~${estimateTokens(systemPrompt + conversation)} tokens)`);
+  console.log(`${LOG} Generating suggestions via ${config.provider} (${messages.length} msgs, ~${estimateTokens(systemPrompt + conversation)} tokens)`);
 
-  if (routedConfig.provider === 'local' || !routedConfig.apiKey) {
+  if (config.provider === 'local' || !config.apiKey) {
     return { suggestions: localSuggestions(messages), provider: 'local' };
   }
 
@@ -1072,10 +1072,10 @@ export async function generateSuggestions(
     if (!suggestions.length) {
       suggestions = localSuggestions(messages);
     }
-    console.log(`${LOG} Got ${suggestions.length} suggestions from ${routedConfig.provider}`);
-    return { suggestions, provider: routedConfig.provider };
+    console.log(`${LOG} Got ${suggestions.length} suggestions from ${config.provider}`);
+    return { suggestions, provider: config.provider };
   } catch (err) {
-    console.error(`${LOG} ${routedConfig.provider} failed, falling back to local:`, err);
+    console.error(`${LOG} ${config.provider} failed, falling back to local:`, err);
     return {
       suggestions: localSuggestions(messages),
       provider: 'local',
@@ -1171,16 +1171,16 @@ export async function generateAutoResponse(
   const conversation = buildConversationContext(messages, contactName, "auto-respond");
   const userPrompt = `Here is the conversation:\n\n${conversation}\n\nGenerate your JSON response:`;
 
-  console.log(`${LOG} Auto-responding via ${routedConfig.provider} (${messages.length} messages, ${settings?.aggressiveness || 'normal'})`);
+  console.log(`${LOG} Auto-responding via ${config.provider} (${messages.length} messages, ${settings?.aggressiveness || 'normal'})`);
 
-  if (routedConfig.provider === 'local' || !routedConfig.apiKey) {
+  if (config.provider === 'local' || !config.apiKey) {
     const suggestions = localSuggestions(messages);
     return { response: suggestions[0] || 'Hey', tier: 'low', reason: 'local fallback', sendPicture: null, provider: 'local' };
   }
 
   try {
     let text: string;
-    if (routedConfig.provider === 'local') {
+    if (config.provider === 'local') {
       text = localSuggestions(messages)[0] || 'Hey';
     } else {
       text = (await callProvider(config, systemPrompt, userPrompt, 'auto-respond', { maxTokens: 128 })).trim();
@@ -1189,7 +1189,7 @@ export async function generateAutoResponse(
     // Parse the JSON response to extract tier + picture suggestion
     const parsed = parseAutoRespondJson(text);
     console.log(`${LOG} Auto-response: tier=${parsed.tier}, response="${parsed.response.slice(0, 50)}..."`);
-    return { ...parsed, provider: routedConfig.provider };
+    return { ...parsed, provider: config.provider };
   } catch (err) {
     console.error(`${LOG} Auto-respond failed:`, err);
     return { response: localSuggestions(messages)[0] || 'Hey', tier: 'low', reason: 'fallback', sendPicture: null, provider: 'local', error: (err as Error).message };
@@ -1221,7 +1221,7 @@ export async function generateGreeting(
   const config = await getBestProvider();
   const prompt = buildGreetingPrompt(platform);
 
-  if (routedConfig.provider === 'local' || !routedConfig.apiKey) {
+  if (config.provider === 'local' || !config.apiKey) {
     const hour = new Date().getHours();
     const greetings = hour < 12
       ? ['Good morning!', 'Morning, how are you?']
@@ -1265,7 +1265,7 @@ export async function generateNickname(
   if (metadata.ethnicity) clues.push(`Ethnicity: ${metadata.ethnicity}`);
   if (lastMessageBody) clues.push(`Last message: "${lastMessageBody.slice(0, 60)}"`);
 
-  if (routedConfig.provider === 'local' || !routedConfig.apiKey) {
+  if (config.provider === 'local' || !config.apiKey) {
     // Generate a simple descriptive nickname locally
     const parts: string[] = [];
     if (metadata.bodyType || metadata.body) parts.push(String(metadata.bodyType || metadata.body));
@@ -1297,7 +1297,7 @@ export async function extractDossierFields(
   existingDossier: Record<string, unknown>,
 ): Promise<Record<string, string>> {
   const config = await getBestProvider();
-  if (routedConfig.provider === 'local' || !routedConfig.apiKey) {
+  if (config.provider === 'local' || !config.apiKey) {
     return localDossierExtraction(messages);
   }
 
@@ -1396,7 +1396,7 @@ export async function generateConversationSummary(
   platform: string,
 ): Promise<{ text: string; commitments: string[] }> {
   const config = await getBestProvider();
-  if (routedConfig.provider === 'local' || !routedConfig.apiKey) {
+  if (config.provider === 'local' || !config.apiKey) {
     return localSummary(messages);
   }
 
