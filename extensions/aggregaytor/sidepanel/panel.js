@@ -93,7 +93,7 @@ function renderThreads(summaries) {
     return `
       <div class="thread-item${unread ? ' unread' : ''}"
            data-contact-id="${esc(t.contactId)}" data-platform="${esc(t.platform)}" data-name="${esc(name)}">
-        <div class="avatar">${esc(initial)}<span class="platform-dot ${esc(t.platform)}"></span></div>
+        <div class="avatar">${esc(initial)}<span class="platform-dot ${esc(t.platform)}"></span></div>${platformIcon(t.platform)}
         <div class="thread-content">
           <div class="thread-header">
             <span class="thread-name">${esc(name)}</span>
@@ -204,6 +204,7 @@ async function loadHoverPreview(contactId, platform, previewEl, threadEl) {
     previewEl.innerHTML = `
       <div class="hp-profile">
         ${avatar ? `<img class="hp-avatar" src="${esc(avatar)}" alt="">` : ''}
+        ${platformIcon(platform)}
         <div class="hp-info">
           <div class="hp-name">${esc(name)}</div>
           ${attrs.length ? `<div class="hp-attrs">${attrs.map(a => `<span class="hp-attr">${esc(a)}</span>`).join('')}</div>` : ''}
@@ -734,7 +735,43 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
+// ── Global auto-respond ─────────────────────────────────────────────────────
+
+const globalARCheckbox = document.getElementById('global-ar-checkbox');
+globalARCheckbox.addEventListener('change', async () => {
+  const enabled = globalARCheckbox.checked;
+  // Toggle auto-respond on ALL threads
+  const metaRes = await chrome.runtime.sendMessage({ type: 'GET_ALL_THREAD_META' });
+  const summRes = await chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} });
+  const allContacts = new Set();
+  for (const s of summRes?.summaries || []) allContacts.add(s.contactId + ':' + s.platform);
+  for (const m of metaRes?.metas || []) allContacts.add(m.contactId + ':' + m.platform);
+
+  for (const key of allContacts) {
+    const [contactId, platform] = [key.substring(0, key.lastIndexOf(':')), key.substring(key.lastIndexOf(':') + 1)];
+    await chrome.runtime.sendMessage({
+      type: 'TOGGLE_AUTO_RESPOND', contactId, platform, enabled,
+    });
+  }
+  // Also save as global default so new conversations pick it up
+  await chrome.storage.local.set({ aggregaytor_global_autorespond: enabled });
+  loadThreads();
+});
+
+// Load global AR state
+chrome.storage.local.get('aggregaytor_global_autorespond').then(data => {
+  globalARCheckbox.checked = !!data.aggregaytor_global_autorespond;
+});
+
 // ── Utilities ───────────────────────────────────────────────────────────────
+
+const PLATFORM_LABELS = {
+  sniffies: 'S', grindr: 'G', doublelist: 'DL', adam4adam: 'A4A', gmail: 'GM', yahoo: 'Y',
+};
+function platformIcon(platform) {
+  const label = PLATFORM_LABELS[platform] || platform?.charAt(0)?.toUpperCase() || '?';
+  return `<span class="platform-icon ${esc(platform)}">${label}</span>`;
+}
 
 function stripPrefix(id) { return String(id || '').replace(/^[a-z]+:/, ''); }
 function truncate(str, len) { return !str ? '' : str.length > len ? str.slice(0, len) + '...' : str; }

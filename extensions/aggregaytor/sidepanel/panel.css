@@ -22,11 +22,50 @@ body {
 .action-icon.active { background: rgba(59,130,246,0.2); }
 .action-icon[title]:hover::after { content: attr(title); }
 
-/* ── Platform filters ── */
-.platform-filters {
-  display: flex; gap: 6px; padding: 6px 12px; overflow-x: auto;
+/* ── Global controls ── */
+.global-controls {
   border-bottom: 1px solid rgba(255,255,255,0.06); flex-shrink: 0;
 }
+.platform-filters {
+  display: flex; gap: 6px; padding: 6px 12px; overflow-x: auto;
+}
+.global-ar {
+  padding: 4px 12px 6px; display: flex; align-items: center;
+}
+.global-ar-toggle {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  font-size: 11px; color: #9ca3af; user-select: none;
+}
+.global-ar-toggle input { display: none; }
+.toggle-slider {
+  position: relative; width: 32px; height: 18px; border-radius: 9px;
+  background: rgba(255,255,255,0.15); transition: background 0.2s;
+}
+.toggle-slider::before {
+  content: ''; position: absolute; width: 14px; height: 14px;
+  left: 2px; top: 2px; border-radius: 50%; background: #fff;
+  transition: transform 0.2s;
+}
+.global-ar-toggle input:checked + .toggle-slider {
+  background: rgba(59,130,246,0.6);
+}
+.global-ar-toggle input:checked + .toggle-slider::before {
+  transform: translateX(14px);
+}
+.global-ar-label { font-weight: 500; }
+
+/* ── Platform icons ── */
+.platform-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 4px; font-size: 8px;
+  font-weight: 700; color: white; flex-shrink: 0; letter-spacing: -0.5px;
+}
+.platform-icon.sniffies { background: #7c3aed; }
+.platform-icon.grindr { background: #fbbf24; color: #000; }
+.platform-icon.doublelist { background: #10b981; }
+.platform-icon.adam4adam { background: #ef4444; }
+.platform-icon.gmail { background: #f97316; }
+.platform-icon.yahoo { background: #6366f1; }
 .platform-chip {
   padding: 3px 10px; border-radius: 16px; font-size: 11px;
   border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05);
@@ -333,7 +372,7 @@ body {
 .view-inbox .thread-detail, .view-inbox .response-bar, .view-inbox .suggestions,
 .view-inbox .notes-section, .view-inbox .reminder-section { display: none; }
 .view-inbox .header-actions { display: none; }
-.view-thread .thread-list, .view-thread .platform-filters, .view-thread .filter-bar { display: none; }
+.view-thread .thread-list, .view-thread .global-controls, .view-thread .filter-bar { display: none; }
 .view-thread .thread-detail { display: flex; }
 .view-thread .response-bar { display: flex; }
 .view-thread .header-back { display: inline; }
