@@ -39,6 +39,26 @@ window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
 // Listen for auto-send requests from the service worker
 try {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message.type === 'SPA_NAVIGATE') {
+      // Navigate without full page reload — use pushState + popstate for React SPA
+      try {
+        const path = message.path || new URL(message.url).pathname;
+        window.history.pushState({}, '', path);
+        window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+        // Also dispatch a custom navigation event that React routers listen to
+        window.dispatchEvent(new Event('popstate'));
+        // Fallback: if the SPA doesn't react to popstate, try clicking a link
+        setTimeout(() => {
+          const link = document.querySelector(`a[href="${path}"], a[href*="${path}"]`) as HTMLAnchorElement;
+          if (link) link.click();
+        }, 500);
+      } catch {
+        // If SPA navigation fails, fall back to location change
+        window.location.href = message.url;
+      }
+      sendResponse({ ok: true });
+      return true;
+    }
     if (message.type === 'SET_LOG_LEVEL') {
       // Forward to MAIN world
       window.dispatchEvent(new CustomEvent('__aggregaytor_set_log_level', { detail: message.level }));

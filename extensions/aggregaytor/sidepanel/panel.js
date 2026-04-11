@@ -170,7 +170,7 @@ function renderThreads(summaries) {
     const isFav = meta.favorited || false;
     const distance = t.contact?.metadata?.distance || meta.distance || '';
     const lastDir = t.lastMessage?.direction;
-    const dirArrow = lastDir === 'out' ? '<span class="dir-arrow out">↗</span>' : lastDir === 'in' ? '<span class="dir-arrow in">↙</span>' : '';
+    const dirArrow = lastDir === 'out' ? '<span class="dir-arrow out">▶</span>' : lastDir === 'in' ? '<span class="dir-arrow in">◀</span>' : '';
 
     return `
       <div class="thread-item${unread ? ' unread' : ''}${isActiveSite ? ' active-on-site' : ''}${isBlocked ? ' blocked' : ''}"

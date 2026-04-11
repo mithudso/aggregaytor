@@ -562,8 +562,22 @@ async function navigateToConversation(platform: string, contactId: string): Prom
   const tabs = await chrome.tabs.query({});
   const host = new URL(url).hostname;
   const tab = tabs.find(t => { try { return t.url && new URL(t.url).hostname === host; } catch { return false; } });
-  if (tab?.id) { await chrome.tabs.update(tab.id, { url, active: true }); if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true }); }
-  else await chrome.tabs.create({ url });
+
+  if (tab?.id) {
+    // SPA navigation: send message to content script to navigate internally
+    // This avoids a full page refresh on SPAs like Sniffies and Grindr
+    const path = new URL(url).pathname + new URL(url).search;
+    try {
+      await chrome.tabs.sendMessage(tab.id, { type: 'SPA_NAVIGATE', url, path });
+    } catch {
+      // Content script not ready — fall back to full navigation
+      await chrome.tabs.update(tab.id, { url });
+    }
+    await chrome.tabs.update(tab.id, { active: true });
+    if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true });
+  } else {
+    await chrome.tabs.create({ url });
+  }
 }
 
 async function sendMessageToTab(platform: string, contactId: string, text: string): Promise<void> {

@@ -20,6 +20,19 @@ window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
 
 try {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message.type === 'SPA_NAVIGATE') {
+      try {
+        const path = message.path || new URL(message.url).pathname;
+        window.history.pushState({}, '', path);
+        window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+        setTimeout(() => {
+          const link = document.querySelector(`a[href="${path}"], a[href*="${path}"]`) as HTMLAnchorElement;
+          if (link) link.click();
+        }, 500);
+      } catch { window.location.href = message.url; }
+      sendResponse({ ok: true });
+      return true;
+    }
     if (message.type === 'SEND_AUTO_RESPONSE') {
       window.dispatchEvent(new CustomEvent('__aggregaytor_send_message', {
         detail: { text: message.text, contactId: message.contactId },
