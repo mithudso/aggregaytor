@@ -193,8 +193,21 @@ async function processQueue(): Promise<void> {
 
     // Check rate limit
     if (isRateLimited(rateSettings.maxRequestsPerMinute)) {
-      console.log(`${LOG} Rate limited (${rateSettings.maxRequestsPerMinute}/min), waiting 5s`);
-      await new Promise(r => setTimeout(r, 5000));
+      // Drop background requests that have been queued — they can retry later
+      const beforeCount = requestQueue.length;
+      const dropped = requestQueue.filter(r => FEATURE_PRIORITY[r.feature] !== 'interactive');
+      for (const d of dropped) {
+        requestQueue.splice(requestQueue.indexOf(d), 1);
+        d.reject(new Error('Rate limited — background request dropped'));
+      }
+
+      if (requestQueue.length === 0) {
+        console.log(`${LOG} Rate limited (${rateSettings.maxRequestsPerMinute}/min), dropped ${dropped.length} background requests, queue empty`);
+        break;
+      }
+
+      console.log(`${LOG} Rate limited (${rateSettings.maxRequestsPerMinute}/min), dropped ${dropped.length} background, waiting 2min for ${requestQueue.length} interactive`);
+      await new Promise(r => setTimeout(r, 120_000)); // 2 minutes
       continue;
     }
 
