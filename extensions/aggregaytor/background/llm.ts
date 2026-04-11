@@ -629,30 +629,68 @@ function markDossierExtracted(contactId: string, messages: Message[]): void {
   }
 }
 
-// 5. Model routing — use cheapest model for simple tasks
-const TASK_COMPLEXITY: Record<string, 'simple' | 'medium' | 'complex'> = {
-  nickname: 'simple',
-  greeting: 'simple',
-  suggestions: 'medium',
-  'auto-respond': 'medium',
-  dossier: 'medium',
-  summary: 'complex',
+// 5. Model routing — best models for interactive, cheapest for background
+//    premium: user-facing responses that need quality (suggestions, auto-respond)
+//    standard: analytical tasks that need accuracy but not style (summary, dossier)
+//    economy: trivial tasks where any output works (nickname, greeting)
+const TASK_TIER: Record<string, 'premium' | 'standard' | 'economy'> = {
+  suggestions: 'premium',
+  'auto-respond': 'premium',
+  summary: 'standard',
+  dossier: 'standard',
+  nickname: 'economy',
+  greeting: 'economy',
 };
 
-// Simple tasks can use the smallest model available
+// Best model per provider per tier
+const TIERED_MODELS: Record<string, Record<string, string>> = {
+  openai: {
+    premium: 'gpt-4o',            // best quality for responses
+    standard: 'gpt-4o-mini',      // good enough for analysis
+    economy: 'gpt-4o-mini',       // cheapest
+  },
+  anthropic: {
+    premium: 'claude-sonnet-4-20250514',   // best for natural conversation
+    standard: 'claude-haiku-4-5-20251001', // fast + cheap for analysis
+    economy: 'claude-haiku-4-5-20251001',
+  },
+  gemini: {
+    premium: 'gemini-2.5-flash',     // best free model
+    standard: 'gemini-2.5-flash-lite', // cheaper
+    economy: 'gemini-2.5-flash-lite',
+  },
+  groq: {
+    premium: 'llama-3.3-70b-versatile',  // best quality on Groq
+    standard: 'llama-3.1-8b-instant',    // fast + cheap
+    economy: 'llama-3.1-8b-instant',
+  },
+  perplexity: {
+    premium: 'sonar',
+    standard: 'sonar',
+    economy: 'sonar',
+  },
+  mistral: {
+    premium: 'mistral-medium-latest',
+    standard: 'mistral-small-latest',
+    economy: 'mistral-small-latest',
+  },
+  copilot: {
+    premium: 'gpt-4o',
+    standard: 'gpt-4o-mini',
+    economy: 'gpt-4o-mini',
+  },
+};
+
 function getModelForTask(config: LLMConfig, feature: string): string {
-  const complexity = TASK_COMPLEXITY[feature] || 'medium';
-  if (complexity === 'simple') {
-    // Use the cheapest model for the provider
-    switch (config.provider) {
-      case 'openai': return 'gpt-4o-mini';
-      case 'anthropic': return 'claude-haiku-4-5-20251001';
-      case 'gemini': return 'gemini-2.5-flash-lite';
-      case 'groq': return 'llama-3.1-8b-instant';
-      default: return config.model || DEFAULT_MODELS[config.provider] || '';
-    }
+  // If user explicitly set a model, always use it
+  if (config.model) return config.model;
+
+  const tier = TASK_TIER[feature] || 'standard';
+  const providerModels = TIERED_MODELS[config.provider];
+  if (providerModels) {
+    return providerModels[tier] || providerModels.standard || DEFAULT_MODELS[config.provider] || '';
   }
-  return config.model || DEFAULT_MODELS[config.provider] || '';
+  return DEFAULT_MODELS[config.provider] || '';
 }
 
 // 6. Token estimation — rough estimate to track usage
