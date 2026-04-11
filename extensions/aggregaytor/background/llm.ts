@@ -262,6 +262,149 @@ export async function generateSuggestions(
   }
 }
 
+// ── Auto-respond ────────────────────────────────────────────────────────────
+
+function buildAutoRespondPrompt(contactName: string, platform: string): string {
+  return `You are composing a response in a dating/hookup chat on ${platform}. You ARE the user — write a single response, not options or suggestions.
+
+Based on the conversation below, write one natural, casual response as the user.
+Match the user's tone and style from their previous messages ("You:" lines).
+Keep it short (1-2 sentences). Be direct and confident.
+If they asked a question, answer it naturally.
+If they sent a greeting, respond warmly.
+If the conversation is going well, keep the momentum.
+
+Return ONLY the response text, nothing else. No quotes, no JSON, just the message.`;
+}
+
+function buildGreetingPrompt(platform: string): string {
+  const hour = new Date().getHours();
+  const timeOfDay = hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : hour < 21 ? 'evening' : 'night';
+  return `Write a single casual, friendly greeting for a ${timeOfDay} chat on ${platform}.
+Be natural and confident, not desperate or overly eager. One short sentence.
+Return ONLY the greeting text, nothing else.`;
+}
+
+export interface AutoRespondResult {
+  response: string;
+  provider: LLMProvider;
+  error?: string;
+}
+
+export async function generateAutoResponse(
+  messages: Message[],
+  contactName: string,
+  platform: string,
+): Promise<AutoRespondResult> {
+  const config = await getLLMConfig();
+  const systemPrompt = buildAutoRespondPrompt(contactName, platform);
+  const conversation = buildConversationContext(messages, contactName);
+  const userPrompt = `Here is the conversation:\n\n${conversation}\n\nWrite your response:`;
+
+  console.log(`${LOG} Auto-responding via ${config.provider} (${messages.length} messages)`);
+
+  if (config.provider === 'local' || !config.apiKey) {
+    const suggestions = localSuggestions(messages);
+    return { response: suggestions[0] || 'Hey', provider: 'local' };
+  }
+
+  try {
+    let text: string;
+    switch (config.provider) {
+      case 'gemini': {
+        const model = config.model || DEFAULT_MODELS.gemini;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.apiKey}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            system_instruction: { parts: [{ text: systemPrompt }] },
+            contents: [{ parts: [{ text: userPrompt }] }],
+            generationConfig: { temperature: 0.9, maxOutputTokens: 128 },
+          }),
+        });
+        if (!res.ok) throw new Error(`Gemini ${res.status}`);
+        const data = await res.json();
+        text = (data?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
+        break;
+      }
+      case 'openai': {
+        const model = config.model || DEFAULT_MODELS.openai;
+        const res = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
+          body: JSON.stringify({
+            model, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+            temperature: 0.9, max_tokens: 128,
+          }),
+        });
+        if (!res.ok) throw new Error(`OpenAI ${res.status}`);
+        const data = await res.json();
+        text = (data?.choices?.[0]?.message?.content || '').trim();
+        break;
+      }
+      case 'anthropic': {
+        const model = config.model || DEFAULT_MODELS.anthropic;
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json', 'x-api-key': config.apiKey,
+            'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true',
+          },
+          body: JSON.stringify({ model, max_tokens: 128, system: systemPrompt, messages: [{ role: 'user', content: userPrompt }] }),
+        });
+        if (!res.ok) throw new Error(`Anthropic ${res.status}`);
+        const data = await res.json();
+        text = (data?.content?.[0]?.text || '').trim();
+        break;
+      }
+      default:
+        text = localSuggestions(messages)[0] || 'Hey';
+    }
+
+    // Clean up: remove quotes, JSON wrapping
+    text = text.replace(/^["']|["']$/g, '').trim();
+    console.log(`${LOG} Auto-response generated: "${text.slice(0, 50)}..."`);
+    return { response: text, provider: config.provider };
+  } catch (err) {
+    console.error(`${LOG} Auto-respond failed:`, err);
+    return { response: localSuggestions(messages)[0] || 'Hey', provider: 'local', error: (err as Error).message };
+  }
+}
+
+export async function generateGreeting(
+  platform: string,
+): Promise<AutoRespondResult> {
+  const config = await getLLMConfig();
+  const prompt = buildGreetingPrompt(platform);
+
+  if (config.provider === 'local' || !config.apiKey) {
+    const hour = new Date().getHours();
+    const greetings = hour < 12
+      ? ['Good morning!', 'Morning, how are you?']
+      : hour < 17
+      ? ['Hey, how\'s your afternoon?', 'Hey there']
+      : ['Hey, how\'s your evening going?', 'What\'s up tonight?'];
+    return { response: greetings[Math.floor(Math.random() * greetings.length)], provider: 'local' };
+  }
+
+  try {
+    // Reuse the auto-respond path with no conversation context
+    const result = await generateAutoResponse(
+      [],
+      'someone new',
+      platform,
+    );
+    // Override with greeting prompt if we got a generic response
+    if (result.response.length < 3) {
+      return { response: 'Hey, how\'s it going?', provider: 'local' };
+    }
+    return result;
+  } catch {
+    return { response: 'Hey, how\'s it going?', provider: 'local' };
+  }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 function parseJsonArray(text: string): string[] {

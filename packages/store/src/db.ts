@@ -16,6 +16,9 @@ async function ensureIndexes(db: PouchDB.Database): Promise<void> {
     db.createIndex({ index: { fields: ['docType', 'threadId'] } }),
     db.createIndex({ index: { fields: ['docType', 'platform'] } }),
     db.createIndex({ index: { fields: ['docType', 'read', 'timestamp'] } }),
+    db.createIndex({ index: { fields: ['docType', 'contactId'] } }),
+    db.createIndex({ index: { fields: ['docType', 'dueAt'] } }),
+    db.createIndex({ index: { fields: ['docType', 'status', 'scheduledAt'] } }),
   ]);
 }
 

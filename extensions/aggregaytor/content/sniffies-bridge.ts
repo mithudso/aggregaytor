@@ -28,6 +28,20 @@ window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
 }) as EventListener);
 
 // Inject MAIN world script
+// Listen for auto-send requests from the service worker
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === 'SEND_AUTO_RESPONSE') {
+    console.log(`${LOG} Auto-send request:`, message.text?.slice(0, 30));
+    // Dispatch to MAIN world to interact with the DOM
+    window.dispatchEvent(new CustomEvent('__aggregaytor_send_message', {
+      detail: { text: message.text, contactId: message.contactId },
+    }));
+    sendResponse({ ok: true });
+    return true;
+  }
+  return false;
+});
+
 console.log(`${LOG} Injecting MAIN world script...`);
 const script = document.createElement('script');
 script.src = chrome.runtime.getURL('content/sniffies.js');

@@ -38,6 +38,52 @@ export interface ContactDoc {
   updatedAt: string;
 }
 
+export interface ThreadMetaDoc {
+  _id: string;              // 'meta:{contactId}'
+  _rev?: string;
+  docType: 'thread_meta';
+  contactId: string;
+  platform: Platform;
+  archived: boolean;
+  hidden: boolean;
+  hiddenUntilResponse: boolean;
+  bookmarked: boolean;
+  alias: string;
+  tags: string[];
+  notes: string;
+  deletedChatCount: number;
+  autoRespondEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReminderDoc {
+  _id: string;              // 'reminder:{uuid}'
+  _rev?: string;
+  docType: 'reminder';
+  contactId: string;
+  platform: Platform;
+  note: string;
+  dueAt: string;
+  notifiedApproach: boolean;
+  notifiedDue: boolean;
+  createdAt: string;
+}
+
+export interface AutoRespondDoc {
+  _id: string;              // 'autoresp:{contactId}:{timestamp}'
+  _rev?: string;
+  docType: 'auto_respond';
+  contactId: string;
+  platform: Platform;
+  triggerMessageId: string;
+  scheduledAt: string;
+  status: 'pending' | 'generating' | 'sending' | 'sent' | 'failed';
+  generatedResponse: string;
+  error: string;
+  createdAt: string;
+}
+
 export interface ThreadSummary {
   threadId: string;
   contactId: string;
