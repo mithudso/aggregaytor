@@ -182,7 +182,40 @@ export class SniffiesAdapter extends BaseAdapter {
     return s.includes('sniffies.com');
   }
 
+  /**
+   * Detect if a profile/conversation is blocked or deleted.
+   * Override the base parseApiResponse to also check for block signals.
+   */
+  private detectBlockSignals(url: string, payload: unknown): void {
+    if (!payload || typeof payload !== 'object') return;
+    const obj = payload as Record<string, unknown>;
+
+    // Error responses that indicate blocking
+    const status = obj.status || obj.statusCode || obj.code;
+    const error = String(obj.error || obj.message || obj.detail || '').toLowerCase();
+
+    if (status === 403 || status === 404 || status === 410 ||
+        error.includes('blocked') || error.includes('not found') ||
+        error.includes('deleted') || error.includes('unavailable') ||
+        error.includes('no longer available')) {
+
+      // Try to extract the profile ID from the URL
+      const match = url.match(/\/profile\/([0-9a-f]{6,})/i) || url.match(/\/([0-9a-f]{6,})/i);
+      if (match) {
+        const profileId = match[1].toLowerCase();
+        console.log(`${LOG} Block detected for ${profileId}: ${error || status}`);
+        this.emit({
+          type: 'error',
+          payload: new Error(`BLOCKED:${profileId}`),
+        });
+      }
+    }
+  }
+
   protected parseApiResponse(url: string, payload: unknown): UnifiedMessage[] {
+    // Check for block/error responses first
+    this.detectBlockSignals(url, payload);
+
     const messages: UnifiedMessage[] = [];
     const contacts: UnifiedContact[] = [];
     const contextId = this.getContextProfileId();

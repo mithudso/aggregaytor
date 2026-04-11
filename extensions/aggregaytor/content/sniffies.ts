@@ -37,6 +37,15 @@ adapter.on('contacts', (event) => {
   });
 });
 
+adapter.on('error', (event) => {
+  const err = event.payload as Error;
+  sendToBridge({
+    type: 'ADAPTER_ERROR',
+    platform: 'sniffies',
+    error: err?.message || String(err),
+  });
+});
+
 adapter.init().catch((err) => {
   console.error('[Aggregaytor] Sniffies adapter init failed:', err);
 });

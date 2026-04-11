@@ -14,6 +14,7 @@ let activeOnSiteContactId = null; // which conversation is open on the actual si
 
 let filters = {
   searchText: '', bodyType: [], position: [], minDeleteCount: 0,
+  maxDistance: 0, unreadOnly: false, newChatsOnly: false,
   hasResponded: false, engagedRecently: false, bookmarked: false,
 };
 
@@ -56,13 +57,22 @@ function applyFilters(summaries) {
       if (!filters.position.some(p => pos.includes(p))) return false;
     }
     if (filters.minDeleteCount > 0 && (meta.deletedChatCount || 0) < filters.minDeleteCount) return false;
+    if (filters.maxDistance > 0) {
+      const dist = parseFloat(String(t.contact?.metadata?.distance || meta.distance || '')) || 0;
+      if (dist > filters.maxDistance) return false;
+    }
+    if (filters.unreadOnly && !t.unreadCount) return false;
+    if (filters.newChatsOnly) {
+      // "New" = created in last 24h (first message timestamp)
+      const firstTs = new Date(t.lastMessage?.timestamp || 0).getTime(); // approximation
+      if (Date.now() - firstTs > 24 * 3600_000) return false;
+    }
     if (filters.hasResponded) {
-      // Must have at least one inbound message
       if (t.lastMessage?.direction !== 'in' && !t.unreadCount) return false;
     }
     if (filters.engagedRecently) {
       const lastTs = new Date(t.lastMessage?.timestamp || 0).getTime();
-      if (Date.now() - lastTs > 24 * 60 * 60 * 1000) return false;
+      if (Date.now() - lastTs > 24 * 3600_000) return false;
     }
     if (filters.bookmarked && !meta.bookmarked) return false;
     return true;
@@ -105,16 +115,21 @@ function renderThreads(summaries) {
       : `<div class="avatar">${esc(initial)}<span class="platform-dot ${esc(t.platform)}"></span></div>`;
 
     const isActiveSite = activeOnSiteContactId === t.contactId;
+    const isBlocked = meta.blockedByThem || false;
+    const distance = t.contact?.metadata?.distance || meta.distance || '';
+    const lastDir = t.lastMessage?.direction;
+    const dirArrow = lastDir === 'out' ? '<span class="dir-arrow out">↗</span>' : lastDir === 'in' ? '<span class="dir-arrow in">↙</span>' : '';
+
     return `
-      <div class="thread-item${unread ? ' unread' : ''}${isActiveSite ? ' active-on-site' : ''}"
+      <div class="thread-item${unread ? ' unread' : ''}${isActiveSite ? ' active-on-site' : ''}${isBlocked ? ' blocked' : ''}"
            data-contact-id="${esc(t.contactId)}" data-platform="${esc(t.platform)}" data-name="${esc(name)}">
         ${avatarHtml}${platformIcon(t.platform)}
         <div class="thread-content">
           <div class="thread-header">
-            <span class="thread-name">${esc(name)}</span>
+            <span class="thread-name${isBlocked ? ' strikethrough' : ''}">${esc(name)}</span>${distance ? `<span class="thread-distance">${esc(distance)}</span>` : ''}
             <span class="thread-time">${time}${badges ? ' <span class="meta-badges">' + badges + '</span>' : ''}${unread ? ` <span class="unread-badge">${unread}</span>` : ''}</span>
           </div>
-          <div class="thread-preview">${esc(truncate(preview, 70))}</div>
+          <div class="thread-preview">${dirArrow}${esc(truncate(preview, 65))}</div>
         </div>
         <div class="thread-actions">
           <span class="action-icon" data-action="like" title="Like">👍</span>
@@ -697,23 +712,28 @@ function readFilters() {
   filters.bodyType = Array.from(document.getElementById('filter-body').selectedOptions).map(o => o.value);
   filters.position = Array.from(document.getElementById('filter-position').selectedOptions).map(o => o.value);
   filters.minDeleteCount = parseInt(document.getElementById('filter-deletes').value) || 0;
+  filters.maxDistance = parseInt(document.getElementById('filter-distance').value) || 0;
+  filters.unreadOnly = document.getElementById('filter-unread').checked;
+  filters.newChatsOnly = document.getElementById('filter-newchats').checked;
   filters.hasResponded = document.getElementById('filter-responded').checked;
   filters.engagedRecently = document.getElementById('filter-recent').checked;
   filters.bookmarked = document.getElementById('filter-bookmarked').checked;
 
   const count = (filters.searchText ? 1 : 0) + filters.bodyType.length + filters.position.length +
-    (filters.minDeleteCount ? 1 : 0) + (filters.hasResponded ? 1 : 0) + (filters.engagedRecently ? 1 : 0) + (filters.bookmarked ? 1 : 0);
+    (filters.minDeleteCount ? 1 : 0) + (filters.maxDistance ? 1 : 0) +
+    (filters.unreadOnly ? 1 : 0) + (filters.newChatsOnly ? 1 : 0) +
+    (filters.hasResponded ? 1 : 0) + (filters.engagedRecently ? 1 : 0) + (filters.bookmarked ? 1 : 0);
   const badge = document.getElementById('filter-count');
   if (count) { badge.textContent = count; badge.style.display = ''; } else { badge.style.display = 'none'; }
 
   loadThreads();
 }
 
-for (const id of ['filter-search', 'filter-body', 'filter-position', 'filter-deletes']) {
+for (const id of ['filter-search', 'filter-body', 'filter-position', 'filter-deletes', 'filter-distance']) {
   document.getElementById(id).addEventListener('change', readFilters);
 }
 document.getElementById('filter-search').addEventListener('input', readFilters);
-for (const id of ['filter-responded', 'filter-recent', 'filter-bookmarked']) {
+for (const id of ['filter-responded', 'filter-recent', 'filter-bookmarked', 'filter-unread', 'filter-newchats']) {
   document.getElementById(id).addEventListener('change', readFilters);
 }
 document.getElementById('filter-clear').addEventListener('click', () => {
@@ -721,6 +741,9 @@ document.getElementById('filter-clear').addEventListener('click', () => {
   document.getElementById('filter-body').selectedIndex = -1;
   document.getElementById('filter-position').selectedIndex = -1;
   document.getElementById('filter-deletes').value = '0';
+  document.getElementById('filter-distance').value = '0';
+  document.getElementById('filter-unread').checked = false;
+  document.getElementById('filter-newchats').checked = false;
   document.getElementById('filter-responded').checked = false;
   document.getElementById('filter-recent').checked = false;
   document.getElementById('filter-bookmarked').checked = false;
@@ -757,10 +780,12 @@ chrome.runtime.onMessage.addListener((message) => {
   }
   if (message.type === 'DRAFTS_UPDATED') loadDrafts();
   if (message.type === 'ACTIVE_PROFILE_CHANGED') {
-    // A profile/conversation was opened on the actual site
     activeOnSiteContactId = message.contactId || null;
+    // Mark as read since user is looking at it on the site
+    if (message.contactId) {
+      chrome.runtime.sendMessage({ type: 'MARK_THREAD_READ', threadId: message.contactId }).catch(() => {});
+    }
     if (document.body.classList.contains('view-inbox')) loadThreads();
-    // Scroll the active item into view
     setTimeout(() => {
       const active = document.querySelector('.thread-item.active-on-site');
       if (active) active.scrollIntoView({ behavior: 'smooth', block: 'nearest' });

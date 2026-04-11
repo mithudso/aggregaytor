@@ -24,6 +24,8 @@ const DEFAULTS: Omit<ThreadMetaDoc, '_id' | '_rev' | 'contactId' | 'platform' | 
   autoRespondEnabled: false,
   autoRespondSettings: { ...DEFAULT_AUTO_RESPOND_SETTINGS },
   generatedNickname: '',
+  blockedByThem: false,
+  distance: '',
   sentiment: null,
   preferenceScore: null,
 };

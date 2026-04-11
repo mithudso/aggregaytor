@@ -74,7 +74,9 @@ export interface ThreadMetaDoc {
   deletedChatCount: number;
   autoRespondEnabled: boolean;
   autoRespondSettings: AutoRespondSettings;
-  generatedNickname: string;       // LLM-generated nickname when no username
+  generatedNickname: string;
+  blockedByThem: boolean;         // they blocked us
+  distance: string;               // cached distance       // LLM-generated nickname when no username
   sentiment: SentimentScore | null;
   preferenceScore: number | null;
   createdAt: string;

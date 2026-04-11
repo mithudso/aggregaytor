@@ -45,6 +45,12 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_MESSAGES_BY_CONTACT': return { ok: true, messages: await getMessagesByContact(msg.contactId, { limit: msg.limit || 200 }) };
     case 'MARK_THREAD_READ': { const c = await markThreadRead(msg.threadId); await updateBadgeCount(); return { ok: true, count: c }; }
     case 'NAVIGATE_TO_CONVERSATION': { await navigateToConversation(msg.platform, msg.contactId); return { ok: true }; }
+    case 'PROFILE_BLOCKED': {
+      console.log(`${LOG} Block detected: ${msg.contactId}`);
+      await upsertThreadMeta(msg.contactId, msg.platform, { blockedByThem: true, archived: true });
+      try { chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform: msg.platform, count: 0 }); } catch {}
+      return { ok: true };
+    }
     case 'ACTIVE_PROFILE_CHANGED': {
       // Relay to side panel so it can highlight the active conversation
       try { chrome.runtime.sendMessage({ type: 'ACTIVE_PROFILE_CHANGED', contactId: msg.contactId, platform: msg.platform }); } catch {}

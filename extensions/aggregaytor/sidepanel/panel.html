@@ -90,7 +90,17 @@
           <option value="3">3+</option><option value="5">5+</option>
         </select>
       </div>
+      <div class="filter-row">
+        <label>Distance</label>
+        <select id="filter-distance" class="filter-select">
+          <option value="0">Any</option><option value="1">1 mi</option>
+          <option value="5">5 mi</option><option value="10">10 mi</option>
+          <option value="25">25 mi</option><option value="50">50 mi</option>
+        </select>
+      </div>
       <div class="filter-row filter-toggles">
+        <label><input type="checkbox" id="filter-unread"> Unread only</label>
+        <label><input type="checkbox" id="filter-newchats"> New chats</label>
         <label><input type="checkbox" id="filter-responded"> Has responded</label>
         <label><input type="checkbox" id="filter-recent"> Active 24h</label>
         <label><input type="checkbox" id="filter-bookmarked"> Bookmarked</label>

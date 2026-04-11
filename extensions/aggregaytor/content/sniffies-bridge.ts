@@ -52,6 +52,23 @@ try {
   contextValid = false;
 }
 
+// Also forward error events (block detection)
+window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
+  if (!contextValid || !checkContext()) return;
+  const detail = event.detail;
+  // Handle block detection from adapter error events
+  if (detail?.type === 'ADAPTER_ERROR' && detail?.error?.startsWith?.('BLOCKED:')) {
+    const profileId = detail.error.replace('BLOCKED:', '');
+    try {
+      chrome.runtime.sendMessage({
+        type: 'PROFILE_BLOCKED',
+        contactId: `sniffies:${profileId}`,
+        platform: 'sniffies',
+      }).catch(() => {});
+    } catch {}
+  }
+}) as EventListener);
+
 // Watch for URL changes (user opening profiles/conversations on the site)
 let lastUrl = location.href;
 function checkUrlChange() {
