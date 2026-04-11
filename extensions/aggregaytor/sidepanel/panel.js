@@ -504,7 +504,9 @@ async function loadProfileInfo(contactId) {
         setTimeout(async () => {
           try {
             await chrome.runtime.sendMessage({ type: 'SYNC_PROFILE_PICS' });
-            syncBtn.textContent = '📷 Done! Reload to see.';
+            syncBtn.textContent = '📷 Done!';
+            // Reload profile info to show the new avatar
+            loadProfileInfo(contactId);
           } catch {
             syncBtn.textContent = '📷 Failed — try opening their profile manually';
           }
@@ -1332,6 +1334,10 @@ document.getElementById('sync-pics-header').addEventListener('click', async () =
   try {
     const res = await chrome.runtime.sendMessage({ type: 'SYNC_PROFILE_PICS' });
     btn.textContent = res?.count ? `✓${res.count}` : '📷';
+    // Reload threads so avatars update in the list
+    if (res?.count) loadThreads();
+    // If in thread detail, reload profile info
+    if (currentThread) loadProfileInfo(currentThread.contactId);
   } catch {
     btn.textContent = '❌';
   }
