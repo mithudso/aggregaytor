@@ -17,7 +17,7 @@ import {
   getContact,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
-import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus } from './llm.js';
+import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS } from './llm.js';
 import { getDossier, upsertDossier, setAutoExtractedField } from '@aggregaytor/store';
 import { handleDebugCommand } from './debug-bridge.js';
 
@@ -116,6 +116,19 @@ async function handleMessage(msg: any): Promise<any> {
         if (tab.id) chrome.tabs.sendMessage(tab.id, { type: 'SET_LOG_LEVEL', level: msg.level }).catch(() => {});
       }
       return { ok: true };
+    }
+    case 'GET_PERSONALITY': return { ok: true, personality: await getPersonalitySettings(), presets: Object.entries(PERSONALITY_PRESETS).map(([k, v]) => ({ id: k, ...v })) };
+    case 'SAVE_PERSONALITY': { await savePersonalitySettings(msg.settings); return { ok: true }; }
+    case 'DERIVE_STYLE_GUIDE': {
+      // Collect all outbound messages (user's own writing, excluding auto-responses)
+      const db = await getDB();
+      const result = await db.find({ selector: { docType: 'message', direction: 'out' }, limit: 200 });
+      const sentMsgs = (result.docs as any[])
+        .filter(d => !d.metadata?.autoRespond && !d.metadata?.suggested)
+        .map(d => ({ direction: 'out' as const, body: d.body, timestamp: d.timestamp }));
+      const guide = await deriveStyleGuide(sentMsgs);
+      await savePersonalitySettings({ styleGuide: guide, styleGuideUpdatedAt: new Date().toISOString() });
+      return { ok: true, styleGuide: guide };
     }
     case 'GET_LLM_RATE_SETTINGS': return { ok: true, settings: await getLLMRateSettings() };
     case 'SAVE_LLM_RATE_SETTINGS': { await saveLLMRateSettings(msg.settings); return { ok: true }; }

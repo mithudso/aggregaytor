@@ -52,6 +52,23 @@
     <div id="sync-status" class="info" style="margin-top:6px"></div>
   </div>
 
+  <h2 data-toggle="personality-section">Personality & Style</h2>
+  <div id="personality-section" class="section">
+    <label>Response personality</label>
+    <select id="personality-preset"></select>
+    <div id="preset-description" class="info"></div>
+
+    <label style="margin-top:8px">Custom instructions</label>
+    <textarea id="custom-instructions" rows="4" style="width:100%;padding:5px 7px;border-radius:6px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.06);color:#e7e9ea;font-size:11px;font-family:inherit;resize:vertical" placeholder="e.g., Always be closing. Never use emojis. Be direct and clear..."></textarea>
+
+    <label style="margin-top:8px">Writing style (auto-derived)</label>
+    <div id="style-guide-display" class="info" style="max-height:60px;overflow-y:auto">Not yet derived.</div>
+    <button class="btn" id="derive-style" style="margin-top:4px">Analyze my writing style</button>
+
+    <button class="btn" id="save-personality" style="margin-top:8px">Save Personality Settings</button>
+    <div class="saved" id="personality-saved">Saved</div>
+  </div>
+
   <h2 data-toggle="llm-section">AI Settings</h2>
   <div id="llm-section" class="section">
     <label for="provider">Provider</label>

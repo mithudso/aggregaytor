@@ -354,23 +354,178 @@ export async function saveLLMConfig(config: Partial<LLMConfig>): Promise<void> {
   }
 }
 
-function buildSystemPrompt(contactName: string, platform: string): string {
-  return `You are a dating/hookup chat assistant helping compose responses on ${platform}. The user is chatting with "${contactName}".
+// ── Personality presets + style guide + custom instructions ──────────────────
 
-Your job: suggest 3-4 short, natural response options based on the conversation context.
+const PERSONALITY_SETTINGS_KEY = 'aggregaytor_personality';
 
-Rules:
-- Be casual and conversational — match the tone of the chat
+export interface PersonalitySettings {
+  preset: string;           // active preset name
+  customInstructions: string;
+  styleGuide: string;       // auto-derived from user's messages
+  styleGuideUpdatedAt: string;
+}
+
+const DEFAULT_PERSONALITY: PersonalitySettings = {
+  preset: 'direct',
+  customInstructions: '',
+  styleGuide: '',
+  styleGuideUpdatedAt: '',
+};
+
+export const PERSONALITY_PRESETS: Record<string, { label: string; description: string; prompt: string }> = {
+  eager: {
+    label: 'Eager',
+    description: 'Enthusiastic, excited, proactive about meeting',
+    prompt: 'Be enthusiastic and clearly interested. Show excitement. Proactively suggest meeting up. Use exclamation points sparingly but genuinely. Show you are keen.',
+  },
+  flirty: {
+    label: 'Flirty',
+    description: 'Playful, teasing, suggestive without being crass',
+    prompt: 'Be playful and flirtatious. Use innuendo and light teasing. Be charming and witty. Keep it fun and suggestive without being vulgar. Make them smile.',
+  },
+  conversational: {
+    label: 'Conversational',
+    description: 'Friendly, engaging, asks questions, keeps dialogue flowing',
+    prompt: 'Be warm and conversational. Ask follow-up questions. Show genuine curiosity about them. Keep the dialogue flowing naturally. Be a good listener.',
+  },
+  stoic: {
+    label: 'Stoic',
+    description: 'Calm, measured, unbothered, confident silence',
+    prompt: 'Be calm and measured. Use few words but make them count. Do not show eagerness or neediness. Let silences speak. Be confident and unhurried.',
+  },
+  direct: {
+    label: 'Direct',
+    description: 'Straightforward, no games, clear about intentions',
+    prompt: 'Be straightforward and clear. State what you want directly. No beating around the bush. Cut through small talk efficiently. Be honest and transparent.',
+  },
+  dismissive: {
+    label: 'Dismissive',
+    description: 'Disinterested energy, makes them work for attention',
+    prompt: 'Be slightly aloof and hard to impress. Give short responses. Make them earn your interest. Do not chase. Show you have better options.',
+  },
+  pleasant: {
+    label: 'Pleasant',
+    description: 'Warm, polite, genuinely nice, easy to talk to',
+    prompt: 'Be genuinely warm and pleasant. Be polite and considerate. Make them feel comfortable. Be the person everyone wants to talk to. Kind but not pushover.',
+  },
+  aloof: {
+    label: 'Aloof',
+    description: 'Mysterious, gives little away, creates intrigue',
+    prompt: 'Be enigmatic and give away little about yourself. Create curiosity. Answer questions with questions. Be intriguing without being rude.',
+  },
+  assertive: {
+    label: 'Assertive',
+    description: 'Takes charge, leads the conversation, decisive',
+    prompt: 'Take charge of the conversation. Be decisive — suggest specific times and places. Lead without being pushy. Show you know what you want.',
+  },
+  witty: {
+    label: 'Witty',
+    description: 'Clever, uses humor, quick on the uptake',
+    prompt: 'Be clever and use dry humor. Make witty observations. Be quick on the uptake. Use banter. Keep it intelligent and amusing.',
+  },
+  masculine: {
+    label: 'Masculine',
+    description: 'Confident, protective energy, takes the lead',
+    prompt: 'Project confidence and masculinity. Be protective without being controlling. Take the lead. Be strong and dependable. Use a commanding but warm tone.',
+  },
+  submissive: {
+    label: 'Submissive',
+    description: 'Accommodating, follows their lead, eager to please',
+    prompt: 'Be accommodating and let them take the lead. Show eagerness to please. Be flexible with their preferences. Express desire to fulfill their needs.',
+  },
+  hookup: {
+    label: 'Hookup-focused',
+    description: 'Efficient, logistics-focused, cuts to the chase',
+    prompt: 'Focus on logistics. Get to the point quickly — hosting, travel, timing. Skip extensive small talk. Be efficient but not rude. Close the deal.',
+  },
+  dating: {
+    label: 'Dating-focused',
+    description: 'Getting to know them, building genuine connection',
+    prompt: 'Focus on building a genuine connection. Ask about their interests, life, and goals. Suggest date activities. Show you are interested in them as a person, not just physically.',
+  },
+};
+
+export async function getPersonalitySettings(): Promise<PersonalitySettings> {
+  const data = await chrome.storage.local.get(PERSONALITY_SETTINGS_KEY);
+  return { ...DEFAULT_PERSONALITY, ...(data[PERSONALITY_SETTINGS_KEY] || {}) };
+}
+
+export async function savePersonalitySettings(settings: Partial<PersonalitySettings>): Promise<void> {
+  const existing = await getPersonalitySettings();
+  await chrome.storage.local.set({ [PERSONALITY_SETTINGS_KEY]: { ...existing, ...settings } });
+}
+
+/**
+ * Derive a style guide from the user's own sent messages.
+ * Analyzes message length, vocabulary, punctuation, emoji usage, etc.
+ */
+export async function deriveStyleGuide(sentMessages: Message[]): Promise<string> {
+  if (sentMessages.length < 5) return 'Not enough messages to derive style (need 5+).';
+
+  const bodies = sentMessages.map(m => m.body);
+  const avgLength = Math.round(bodies.reduce((s, b) => s + b.length, 0) / bodies.length);
+  const usesEmoji = bodies.some(b => /[\u{1F600}-\u{1F9FF}]/u.test(b));
+  const usesExclamation = bodies.filter(b => b.includes('!')).length / bodies.length;
+  const usesQuestion = bodies.filter(b => b.includes('?')).length / bodies.length;
+  const avgWords = Math.round(bodies.reduce((s, b) => s + b.split(/\s+/).length, 0) / bodies.length);
+  const usesSlang = bodies.some(b => /\b(wbu|hbu|tbh|ngl|fr|imo|smh|lol|lmao|bruh)\b/i.test(b));
+  const usesCapitals = bodies.filter(b => b === b.toUpperCase() && b.length > 3).length / bodies.length;
+  const startsLowercase = bodies.filter(b => /^[a-z]/.test(b)).length / bodies.length;
+
+  const traits: string[] = [];
+  traits.push(`Average message length: ${avgLength} chars, ${avgWords} words`);
+  if (avgWords <= 5) traits.push('Very brief messages — keep responses short');
+  else if (avgWords <= 15) traits.push('Medium-length messages');
+  else traits.push('Longer, more detailed messages');
+
+  if (usesEmoji) traits.push('Uses emoji occasionally');
+  else traits.push('Does NOT use emoji — avoid emoji in responses');
+
+  if (usesExclamation > 0.3) traits.push('Uses exclamation marks frequently');
+  else if (usesExclamation < 0.05) traits.push('Rarely uses exclamation marks — keep responses calm');
+
+  if (usesQuestion > 0.3) traits.push('Asks lots of questions — include questions in responses');
+
+  if (usesSlang) traits.push('Uses casual slang (wbu, tbh, lol)');
+  else traits.push('Formal/standard language — avoid heavy slang');
+
+  if (startsLowercase > 0.5) traits.push('Often starts with lowercase — match this style');
+  if (usesCapitals > 0.1) traits.push('Sometimes uses ALL CAPS for emphasis');
+
+  // Sample some actual messages for LLM to analyze
+  const samples = bodies.slice(-10).map(b => `"${b.slice(0, 60)}"`).join(', ');
+  traits.push(`Recent message samples: ${samples}`);
+
+  return traits.join('. ') + '.';
+}
+
+async function buildSystemPrompt(contactName: string, platform: string): Promise<string> {
+  const personality = await getPersonalitySettings();
+  const presetPrompt = PERSONALITY_PRESETS[personality.preset]?.prompt || PERSONALITY_PRESETS.direct.prompt;
+
+  let prompt = `You are composing responses for a dating/hookup chat on ${platform}. The user is chatting with "${contactName}".
+
+PERSONALITY: ${presetPrompt}
+
+Your job: suggest 3-4 short, natural response options matching this personality.`;
+
+  if (personality.customInstructions) {
+    prompt += `\n\nUSER'S CUSTOM INSTRUCTIONS (follow these strictly):\n${personality.customInstructions}`;
+  }
+
+  if (personality.styleGuide) {
+    prompt += `\n\nSTYLE GUIDE (match the user's writing style):\n${personality.styleGuide}`;
+  }
+
+  prompt += `\n\nRules:
 - Keep responses short (1-2 sentences max)
-- Be direct and confident
-- Read the vibe — flirty, logistics, casual, etc.
-- If they asked a question, make sure at least one suggestion answers it
-- If the conversation seems to be going well, suggest escalation (meeting up, exchanging info)
-- If the user sent the last message and it's been a while, suggest a follow-up
-- Never be desperate or overly eager
+- Match the conversation tone and flow
+- If they asked a question, at least one suggestion should answer it
 - Return ONLY a JSON array of strings, no other text
 
-Example output: ["Hey, sounds good! When works for you?", "I'm free tonight if you want to hang", "What area are you in?"]`;
+Example output: ["Hey, sounds good! When works for you?", "I'm free tonight", "What area are you in?"]`;
+
+  return prompt;
 }
 
 function buildConversationContext(messages: Message[], contactName: string): string {
@@ -598,7 +753,7 @@ export async function generateSuggestions(
   platform: string,
 ): Promise<SuggestionResult> {
   const config = await getBestProvider();
-  const systemPrompt = buildSystemPrompt(contactName, platform);
+  const systemPrompt = await buildSystemPrompt(contactName, platform);
   const conversation = buildConversationContext(messages, contactName);
 
   console.log(`${LOG} Generating suggestions via ${config.provider} (${messages.length} messages)`);
@@ -652,19 +807,28 @@ const AGGRESSIVENESS_PROMPTS: Record<string, string> = {
   eager: 'Be enthusiastic and proactive. If the conversation is flowing well, suggest meeting up. Propose times and show clear interest.',
 };
 
-function buildAutoRespondPrompt(contactName: string, platform: string, settings?: AutoRespondSettings): string {
+async function buildAutoRespondPrompt(contactName: string, platform: string, settings?: AutoRespondSettings): Promise<string> {
+  const personality = await getPersonalitySettings();
+  const presetPrompt = PERSONALITY_PRESETS[personality.preset]?.prompt || PERSONALITY_PRESETS.direct.prompt;
   const agg = AGGRESSIVENESS_PROMPTS[settings?.aggressiveness || 'normal'];
   const timeStr = settings?.preferredTime ? `\nUser's preferred time: "${settings.preferredTime}" (flexibility: ${settings?.timeFlexibility || 'flexible'})` : '';
   const placeStr = settings?.preferredPlace ? `\nUser's preferred place: "${settings.preferredPlace}" (flexibility: ${settings?.placeFlexibility || 'flexible'})` : '';
   const picStr = settings?.allowPictures ? `\nUser allows sending pictures tagged: ${(settings.pictureTagsAllowed || []).join(', ') || 'any'}. If appropriate, include "sendPicture" in your response.` : '';
 
-  return `You are composing a response in a dating/hookup chat on ${platform}. You ARE the user — write a single response, not options.
+  let prompt = `You are composing a response in a dating/hookup chat on ${platform}. You ARE the user — write a single response, not options.
 
+PERSONALITY: ${presetPrompt}
 TONE: ${agg}
-${timeStr}${placeStr}${picStr}
+${timeStr}${placeStr}${picStr}`;
 
-Match the user's tone and style from their previous "You:" messages.
-Keep it short (1-2 sentences). Be direct and confident.
+  if (personality.customInstructions) {
+    prompt += `\n\nCUSTOM INSTRUCTIONS (follow strictly):\n${personality.customInstructions}`;
+  }
+  if (personality.styleGuide) {
+    prompt += `\n\nWRITING STYLE:\n${personality.styleGuide}`;
+  }
+
+  prompt += `\n\nKeep it short (1-2 sentences). Be direct and confident.
 
 CRITICAL: You MUST return a JSON object with these fields:
 {
@@ -708,7 +872,7 @@ export async function generateAutoResponse(
   settings?: AutoRespondSettings,
 ): Promise<AutoRespondResult> {
   const config = await getBestProvider();
-  const systemPrompt = buildAutoRespondPrompt(contactName, platform, settings);
+  const systemPrompt = await buildAutoRespondPrompt(contactName, platform, settings);
   const conversation = buildConversationContext(messages, contactName);
   const userPrompt = `Here is the conversation:\n\n${conversation}\n\nGenerate your JSON response:`;
 

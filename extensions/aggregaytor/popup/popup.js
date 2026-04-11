@@ -13,6 +13,72 @@ const PROVIDER_INFO = {
   copilot: 'Via Copilot proxy (unofficial). Needs Copilot sub.',
 };
 
+// ── Personality settings ────────────────────────────────────────────────────
+
+async function loadPersonality() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_PERSONALITY' });
+    if (!res?.ok) return;
+    const { personality, presets } = res;
+
+    // Populate preset dropdown
+    const select = document.getElementById('personality-preset');
+    select.innerHTML = presets.map(p =>
+      `<option value="${p.id}"${p.id === personality.preset ? ' selected' : ''}>${p.label}</option>`
+    ).join('');
+
+    // Show description
+    const active = presets.find(p => p.id === personality.preset);
+    document.getElementById('preset-description').textContent = active?.description || '';
+
+    // Custom instructions
+    document.getElementById('custom-instructions').value = personality.customInstructions || '';
+
+    // Style guide
+    document.getElementById('style-guide-display').textContent = personality.styleGuide || 'Not yet derived. Click "Analyze" to scan your sent messages.';
+  } catch {}
+}
+
+document.getElementById('personality-preset')?.addEventListener('change', (e) => {
+  // Update description dynamically — fetch presets again
+  chrome.runtime.sendMessage({ type: 'GET_PERSONALITY' }).then(res => {
+    if (res?.ok) {
+      const active = res.presets.find(p => p.id === e.target.value);
+      document.getElementById('preset-description').textContent = active?.description || '';
+    }
+  }).catch(() => {});
+});
+
+document.getElementById('save-personality')?.addEventListener('click', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_PERSONALITY',
+    settings: {
+      preset: document.getElementById('personality-preset').value,
+      customInstructions: document.getElementById('custom-instructions').value.trim(),
+    },
+  });
+  const msg = document.getElementById('personality-saved');
+  msg.classList.add('show'); setTimeout(() => msg.classList.remove('show'), 2000);
+});
+
+document.getElementById('derive-style')?.addEventListener('click', async () => {
+  const btn = document.getElementById('derive-style');
+  btn.textContent = 'Analyzing...';
+  btn.disabled = true;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'DERIVE_STYLE_GUIDE' });
+    if (res?.ok) {
+      document.getElementById('style-guide-display').textContent = res.styleGuide;
+    } else {
+      document.getElementById('style-guide-display').textContent = 'Failed to derive style.';
+    }
+  } catch {
+    document.getElementById('style-guide-display').textContent = 'Error analyzing messages.';
+  }
+  btn.textContent = 'Analyze my writing style';
+  btn.disabled = false;
+});
+
 // ── Sync profile pics ───────────────────────────────────────────────────────
 
 document.getElementById('sync-pics')?.addEventListener('click', async () => {
@@ -336,6 +402,7 @@ document.getElementById('open-panel').addEventListener('click', async () => {
 // ── Init ────────────────────────────────────────────────────────────────────
 
 loadStats();
+loadPersonality();
 loadLLMSettings();
 loadRateSettings();
 loadCalendarSettings();
