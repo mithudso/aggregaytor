@@ -1,0 +1,56 @@
+{
+  "manifest_version": 3,
+  "name": "Aggregaytor",
+  "version": "0.1.0",
+  "description": "Unified message inbox across platforms",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "sidePanel",
+    "tabs",
+    "alarms",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://sniffies.com/*",
+    "https://web.grindr.com/*",
+    "https://doublelist.com/*",
+    "https://www.adam4adam.com/*",
+    "https://m.adam4adam.com/*",
+    "https://mail.google.com/*",
+    "https://mail.yahoo.com/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/panel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://sniffies.com/*"],
+      "js": ["content/sniffies-bridge.js", "content/sniffies-migrate.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["content/sniffies.js"],
+      "matches": ["https://sniffies.com/*"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  }
+}

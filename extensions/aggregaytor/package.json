@@ -1,0 +1,25 @@
+{
+  "name": "@aggregaytor/extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@aggregaytor/adapter-core": "workspace:*",
+    "@aggregaytor/adapter-sniffies": "workspace:*",
+    "@aggregaytor/context-engine": "workspace:*",
+    "@aggregaytor/store": "workspace:*",
+    "pouchdb-browser": "^9.0.0",
+    "pouchdb-find": "^9.0.0"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@types/chrome": "^0.0.300",
+    "typescript": "^5.7.0",
+    "vite": "^6.3.0"
+  }
+}
