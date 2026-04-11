@@ -40,7 +40,7 @@ const PLATFORM_URLS: Record<string, (contactId: string) => string> = {
   sniffies: (id) => `https://sniffies.com/profile/${id.replace('sniffies:', '')}/chat`,
   grindr: (id) => `https://web.grindr.com/chat/${id.replace('grindr:', '')}`,
   doublelist: () => `https://doublelist.com/inbox/`,
-  adam4adam: (id) => `https://www.adam4adam.com/messages/${id.replace('adam4adam:', '')}`,
+  adam4adam: (id) => `https://www.adam4adam.com/mailbox`,
   gmail: () => `https://mail.google.com/mail/`,
   yahoo: () => `https://mail.yahoo.com/`,
 };
