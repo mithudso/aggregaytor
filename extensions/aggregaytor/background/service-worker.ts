@@ -61,13 +61,26 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_THREAD_SUMMARIES': return { ok: true, summaries: await getThreadSummaries(msg.opts) };
     case 'GET_UNREAD_COUNT': return { ok: true, count: await getUnreadCount(msg.platform) };
     case 'GET_MESSAGES_BY_CONTACT': {
-      const msgs = await getMessagesByContact(msg.contactId, { limit: msg.limit || 200 });
-      console.log(`${LOG} GET_MESSAGES_BY_CONTACT contactId="${msg.contactId}" → ${msgs.length} messages`);
-      // Debug: log unique contactIds in results to detect mismatch
-      const uniqueIds = [...new Set(msgs.map(m => m.contactId))];
-      if (uniqueIds.length > 1 || (uniqueIds.length === 1 && uniqueIds[0] !== msg.contactId)) {
-        console.warn(`${LOG} ⚠ CONTACT ID MISMATCH! Queried "${msg.contactId}" but got messages with contactIds:`, uniqueIds);
+      let msgs = await getMessagesByContact(msg.contactId, { limit: msg.limit || 200 });
+
+      // For non-global-chat contacts, also include their messages from global chat
+      // (tagged by metadata.senderId matching the profile ID)
+      if (msg.contactId !== 'sniffies:global-chat') {
+        const profileId = msg.contactId.replace(/^[a-z]+:/, '');
+        if (profileId) {
+          const globalMsgs = await getMessagesByContact('sniffies:global-chat', { limit: 500 });
+          const fromThisSender = globalMsgs.filter(m =>
+            m.metadata?.senderId === profileId || m.metadata?.profileId === profileId
+          );
+          if (fromThisSender.length) {
+            // Tag global chat messages so the UI can show them differently
+            const tagged = fromThisSender.map(m => ({ ...m, metadata: { ...m.metadata, fromGlobalChat: true } }));
+            msgs = [...msgs, ...tagged];
+          }
+        }
       }
+
+      console.log(`${LOG} GET_MESSAGES_BY_CONTACT contactId="${msg.contactId}" → ${msgs.length} messages`);
       return { ok: true, messages: msgs };
     }
     case 'MARK_THREAD_READ': { const c = await markThreadRead(msg.threadId); await updateBadgeCount(); return { ok: true, count: c }; }

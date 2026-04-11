@@ -130,6 +130,7 @@ body {
 .msg-hidden .msg-bubble { display: none; }
 .msg-hidden .msg-time { display: none; }
 .msg-hidden .msg-hidden-label { display: block; font-size: 10px; color: #4b5563; font-style: italic; margin: 2px 0; }
+.msg-gc-tag { font-size: 9px; color: #6b7280; margin-bottom: 2px; }
 .action-icon {
   display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; border-radius: 6px; cursor: pointer;

@@ -673,8 +673,10 @@ function renderMessages(messages) {
       if (msgDate !== lastDate) { lastDate = msgDate; sep = `<div class="msg-date-sep">${msgDate}</div>`; }
       const dir = msg.direction || 'in';
       const hidden = hiddenMsgs.has(msg._id || msg.id);
+      const isFromGC = msg.metadata?.fromGlobalChat;
       return `${sep}<div class="msg-wrapper${hidden ? ' msg-hidden' : ''}" data-msg-id="${esc(msg._id || msg.id || '')}">
         <span class="msg-toggle" title="${hidden ? 'Show' : 'Hide'}">${hidden ? '+' : '−'}</span>
+        ${isFromGC ? '<div class="msg-gc-tag">🌐 from Global Chat</div>' : ''}
         <div class="msg-bubble ${dir}">${esc(msg.body || '')}</div>
         <div class="msg-time ${dir}">${formatMsgTime(msg.timestamp)}</div>
         <div class="msg-hidden-label" style="display:${hidden ? 'block' : 'none'}">Message hidden</div>
