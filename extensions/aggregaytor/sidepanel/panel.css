@@ -13,6 +13,54 @@ body {
 .header h1 { font-size: 15px; font-weight: 700; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .header-back { display: none; background: none; border: none; color: #93c5fd; font-size: 13px; cursor: pointer; padding: 4px 0; }
 .header-actions { display: none; gap: 2px; flex-shrink: 0; }
+.header-settings {
+  background: none; border: none; color: #6b7280; font-size: 16px; cursor: pointer; padding: 2px 4px;
+}
+.header-settings:hover { color: #e7e9ea; }
+
+/* ── Search ── */
+.search-bar {
+  display: flex; gap: 6px; padding: 6px 12px; align-items: center;
+  border-bottom: 1px solid rgba(255,255,255,0.06); flex-shrink: 0;
+}
+.search-input {
+  flex: 1; padding: 5px 10px; border-radius: 16px; font-size: 12px;
+  border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.06); color: #e7e9ea;
+  outline: none; font-family: inherit;
+}
+.search-input:focus { border-color: rgba(59,130,246,0.5); }
+.search-close { background: none; border: none; color: #6b7280; cursor: pointer; font-size: 14px; }
+.search-results {
+  flex: 1; overflow-y: auto; padding: 8px 12px;
+}
+.search-result {
+  padding: 6px 8px; border-radius: 6px; margin-bottom: 4px; cursor: pointer;
+  border: 1px solid rgba(255,255,255,0.04); font-size: 12px;
+}
+.search-result:hover { background: rgba(255,255,255,0.04); }
+.search-result-contact { font-weight: 600; font-size: 11px; color: #93c5fd; }
+.search-result-body { color: #d1d5db; margin-top: 2px; }
+.search-result-body mark { background: rgba(234,179,8,0.3); color: #fbbf24; border-radius: 2px; padding: 0 2px; }
+.search-result-time { font-size: 10px; color: #6b7280; }
+.search-count { font-size: 10px; color: #6b7280; flex-shrink: 0; }
+.thread-search-bar {
+  display: flex; gap: 6px; padding: 4px 12px; align-items: center;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+
+/* ── Message hide toggle ── */
+.msg-wrapper { position: relative; }
+.msg-wrapper:hover .msg-toggle { display: flex; }
+.msg-toggle {
+  display: none; position: absolute; left: -18px; top: 4px;
+  width: 16px; height: 16px; border-radius: 50%; cursor: pointer;
+  background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.1);
+  align-items: center; justify-content: center; font-size: 10px; color: #6b7280;
+}
+.msg-toggle:hover { background: rgba(255,255,255,0.15); color: #e7e9ea; }
+.msg-hidden .msg-bubble { display: none; }
+.msg-hidden .msg-time { display: none; }
+.msg-hidden .msg-hidden-label { display: block; font-size: 10px; color: #4b5563; font-style: italic; margin: 2px 0; }
 .action-icon {
   display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; border-radius: 6px; cursor: pointer;
@@ -316,12 +364,16 @@ body {
 
 /* ── Dossier ── */
 .dossier-section {
-  padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,0.06); flex-shrink: 0; max-height: 300px; overflow-y: auto;
+  padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,0.06); flex-shrink: 0;
 }
+.dossier-section .dossier-fields { display: none; max-height: 300px; overflow-y: auto; }
+.dossier-section.expanded .dossier-fields { display: grid; }
 .dossier-header {
-  display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;
+  display: flex; justify-content: space-between; align-items: center; cursor: pointer;
   font-size: 12px; font-weight: 600; color: #9ca3af;
 }
+.dossier-header::before { content: '▸ '; font-size: 10px; }
+.dossier-section.expanded .dossier-header::before { content: '▾ '; }
 .dossier-extract-btn {
   font-size: 10px; padding: 2px 8px; border-radius: 4px; cursor: pointer;
   border: 1px solid rgba(124,58,237,0.3); background: rgba(124,58,237,0.1); color: #c4b5fd;

@@ -217,6 +217,46 @@ export async function getLLMConfig(): Promise<LLMConfig> {
   };
 }
 
+/**
+ * Get all configured API keys for failover.
+ */
+async function getAllProviderKeys(): Promise<Record<string, string>> {
+  const data = await chrome.storage.local.get('aggregaytor_all_llm_keys');
+  return data.aggregaytor_all_llm_keys || {};
+}
+
+export async function saveProviderKey(provider: string, apiKey: string): Promise<void> {
+  const keys = await getAllProviderKeys();
+  keys[provider] = apiKey;
+  await chrome.storage.local.set({ aggregaytor_all_llm_keys: keys });
+}
+
+/**
+ * Get a working LLM config, trying failover providers if the primary is rate-limited.
+ */
+async function getConfigWithFailover(rateLimitedProvider?: string): Promise<LLMConfig> {
+  const primary = await getLLMConfig();
+
+  // If not rate limited, use primary
+  if (!rateLimitedProvider || rateLimitedProvider !== primary.provider) return primary;
+
+  // Try failover: check all stored keys
+  const keys = await getAllProviderKeys();
+  const providerOrder: LLMProvider[] = ['gemini', 'anthropic', 'openai'];
+
+  for (const p of providerOrder) {
+    if (p === rateLimitedProvider) continue;
+    const key = keys[p] || (p === primary.provider ? primary.apiKey : '');
+    if (key) {
+      console.log(`${LOG} Failing over from ${rateLimitedProvider} to ${p}`);
+      return { provider: p, apiKey: key, model: '' };
+    }
+  }
+
+  // No failover available, return primary anyway
+  return primary;
+}
+
 export function getLLMQueueStatus(): { queueLength: number; requestsLastMinute: number; backoffUntil: number } {
   const now = Date.now();
   return {
@@ -231,6 +271,10 @@ export async function saveLLMConfig(config: Partial<LLMConfig>): Promise<void> {
   await chrome.storage.local.set({
     [SETTINGS_KEY]: { ...existing, ...config },
   });
+  // Also save key to failover store
+  if (config.provider && config.apiKey) {
+    await saveProviderKey(config.provider, config.apiKey);
+  }
 }
 
 function buildSystemPrompt(contactName: string, platform: string): string {
@@ -323,6 +367,14 @@ async function callProvider(
   const res = await queuedFetch(url, init, feature);
 
   if (!res.ok) {
+    // On 429 rate limit, try failover to another provider
+    if (res.status === 429) {
+      const failoverConfig = await getConfigWithFailover(config.provider);
+      if (failoverConfig.provider !== config.provider) {
+        console.log(`${LOG} Failing over from ${config.provider} to ${failoverConfig.provider}`);
+        return callProvider(failoverConfig, systemPrompt, userPrompt, feature, opts);
+      }
+    }
     const err = await res.text();
     throw new Error(`${config.provider} ${res.status}: ${err.slice(0, 200)}`);
   }

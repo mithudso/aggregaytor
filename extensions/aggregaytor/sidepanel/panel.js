@@ -537,6 +537,8 @@ function renderMessages(messages) {
     currentThread?.contactId?.includes('group') ||
     isMultiSenderThread(sorted);
 
+  const hiddenMsgs = new Set(JSON.parse(localStorage.getItem('aggregaytor_hidden_msgs') || '[]'));
+
   if (isGlobalChat) {
     container.innerHTML = sorted.map(msg => renderGlobalChatMessage(msg)).join('');
   } else {
@@ -546,10 +548,33 @@ function renderMessages(messages) {
       let sep = '';
       if (msgDate !== lastDate) { lastDate = msgDate; sep = `<div class="msg-date-sep">${msgDate}</div>`; }
       const dir = msg.direction || 'in';
-      return `${sep}<div class="msg-bubble ${dir}">${esc(msg.body || '')}</div><div class="msg-time ${dir}">${formatMsgTime(msg.timestamp)}</div>`;
+      const hidden = hiddenMsgs.has(msg._id || msg.id);
+      return `${sep}<div class="msg-wrapper${hidden ? ' msg-hidden' : ''}" data-msg-id="${esc(msg._id || msg.id || '')}">
+        <span class="msg-toggle" title="${hidden ? 'Show' : 'Hide'}">${hidden ? '+' : '−'}</span>
+        <div class="msg-bubble ${dir}">${esc(msg.body || '')}</div>
+        <div class="msg-time ${dir}">${formatMsgTime(msg.timestamp)}</div>
+        <div class="msg-hidden-label" style="display:${hidden ? 'block' : 'none'}">Message hidden</div>
+      </div>`;
     }).join('');
   }
   container.scrollTop = container.scrollHeight;
+
+  // Attach hide toggle handlers
+  container.querySelectorAll('.msg-toggle').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const wrapper = btn.closest('.msg-wrapper');
+      const msgId = wrapper?.dataset.msgId;
+      if (!msgId) return;
+      const hidden = wrapper.classList.toggle('msg-hidden');
+      btn.textContent = hidden ? '+' : '−';
+      wrapper.querySelector('.msg-hidden-label').style.display = hidden ? 'block' : 'none';
+      // Persist hidden state
+      const set = new Set(JSON.parse(localStorage.getItem('aggregaytor_hidden_msgs') || '[]'));
+      if (hidden) set.add(msgId); else set.delete(msgId);
+      localStorage.setItem('aggregaytor_hidden_msgs', JSON.stringify([...set]));
+    });
+  });
 }
 
 function isMultiSenderThread(messages) {
@@ -763,6 +788,12 @@ async function loadDossier() {
     const d = res?.dossier || {};
 
     section.style.display = '';
+    // Restore expanded state from session
+    if (sessionStorage.getItem('dossier_expanded') === '1') {
+      section.classList.add('expanded');
+    } else {
+      section.classList.remove('expanded');
+    }
     container.innerHTML = DOSSIER_FIELDS.map(f => {
       const val = d[f.key];
       const displayVal = f.isArray ? (Array.isArray(val) ? val.join(', ') : String(val || '')) : String(val ?? '');
@@ -1167,6 +1198,119 @@ function updateTotalUnread(count) {
   const b = document.getElementById('total-unread');
   if (count > 0) { b.textContent = count; b.style.display = ''; } else { b.style.display = 'none'; }
 }
+
+// ── Settings button ─────────────────────────────────────────────────────────
+
+document.getElementById('open-settings').addEventListener('click', () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL('popup/popup.html') });
+});
+
+// ── Global search ───────────────────────────────────────────────────────────
+
+let searchDebounce = null;
+// Toggle search with Ctrl+F or clicking a search icon
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+    e.preventDefault();
+    toggleGlobalSearch();
+  }
+});
+
+function toggleGlobalSearch() {
+  const bar = document.getElementById('search-bar');
+  const results = document.getElementById('search-results');
+  if (bar.style.display === 'none') {
+    bar.style.display = '';
+    document.getElementById('search-input').focus();
+  } else {
+    bar.style.display = 'none';
+    results.style.display = 'none';
+    document.getElementById('search-input').value = '';
+  }
+}
+
+document.getElementById('search-close').addEventListener('click', toggleGlobalSearch);
+
+document.getElementById('search-input').addEventListener('input', (e) => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => performGlobalSearch(e.target.value.trim()), 300);
+});
+
+async function performGlobalSearch(query) {
+  const results = document.getElementById('search-results');
+  if (!query || query.length < 2) { results.style.display = 'none'; return; }
+
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'SEARCH_MESSAGES', query, limit: 50 });
+    if (!res?.ok || !res.messages?.length) {
+      results.innerHTML = '<div class="empty-state"><p>No results</p></div>';
+      results.style.display = '';
+      return;
+    }
+
+    const q = query.toLowerCase();
+    results.innerHTML = res.messages.map(m => {
+      const body = m.body || '';
+      const highlighted = body.replace(new RegExp(`(${escRegex(query)})`, 'gi'), '<mark>$1</mark>');
+      const contact = stripPrefix(m.contactId);
+      return `<div class="search-result" data-contact-id="${esc(m.contactId)}" data-platform="${esc(m.platform)}">
+        <div class="search-result-contact">${esc(contact)} ${platformIcon(m.platform)}</div>
+        <div class="search-result-body">${highlighted}</div>
+        <div class="search-result-time">${formatTime(m.timestamp)}</div>
+      </div>`;
+    }).join('');
+    results.style.display = '';
+
+    results.querySelectorAll('.search-result').forEach(el => {
+      el.addEventListener('click', () => {
+        toggleGlobalSearch();
+        openThread(el.dataset.contactId, el.dataset.platform, stripPrefix(el.dataset.contactId));
+      });
+    });
+  } catch {
+    results.innerHTML = '<div class="empty-state"><p>Search failed</p></div>';
+    results.style.display = '';
+  }
+}
+
+function escRegex(str) { return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+// ── Thread search ───────────────────────────────────────────────────────────
+
+document.getElementById('btn-thread-search').addEventListener('click', () => {
+  const bar = document.getElementById('thread-search-bar');
+  bar.style.display = bar.style.display === 'none' ? '' : 'none';
+  if (bar.style.display !== 'none') document.getElementById('thread-search-input').focus();
+});
+
+document.getElementById('thread-search-input').addEventListener('input', (e) => {
+  const query = e.target.value.trim().toLowerCase();
+  const container = document.getElementById('message-list');
+  const wrappers = container.querySelectorAll('.msg-wrapper, .msg-global');
+  let count = 0;
+
+  wrappers.forEach(w => {
+    if (!query) { w.style.display = ''; return; }
+    const text = (w.textContent || '').toLowerCase();
+    if (text.includes(query)) { w.style.display = ''; count++; }
+    else { w.style.display = 'none'; }
+  });
+
+  document.getElementById('thread-search-count').textContent = query ? `${count} found` : '';
+});
+
+// ── Dossier collapse ────────────────────────────────────────────────────────
+// Dossier starts minimized, remembers expanded state per-session
+
+document.addEventListener('click', (e) => {
+  if (e.target.closest('.dossier-header')) {
+    const section = e.target.closest('.dossier-section');
+    if (section) {
+      section.classList.toggle('expanded');
+      sessionStorage.setItem('dossier_expanded', section.classList.contains('expanded') ? '1' : '0');
+    }
+  }
+});
 
 loadThreads();
 loadDrafts();

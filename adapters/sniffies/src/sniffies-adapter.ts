@@ -165,7 +165,12 @@ export class SniffiesAdapter extends BaseAdapter {
     this.selfIds.seedFromWindow(window as Window & typeof globalThis);
     this.seedSelfIdsFromPage();
     this.setupNetworkInterception(window as Window & typeof globalThis);
-    this.storageTimer = setInterval(() => this.scanStorage(), 60_000);
+    this.storageTimer = setInterval(() => {
+      this.scanStorage();
+      this.scrapeAvatarsFromDOM();
+    }, 60_000);
+    // Initial avatar scrape after DOM settles
+    setTimeout(() => this.scrapeAvatarsFromDOM(), 5000);
     console.log(`${LOG} Adapter initialized. Self IDs:`, [...this.selfIds.ids]);
   }
 
@@ -395,13 +400,51 @@ export class SniffiesAdapter extends BaseAdapter {
     }
     // Check for Sniffies CDN pattern in any string value
     for (const val of Object.values(obj)) {
-      if (typeof val === 'string' && val.includes('sniffiesassets.com') && val.includes(profileId)) return val;
+      if (typeof val === 'string' && val.includes('sniffiesassets.com')) return val;
+      if (typeof val === 'string' && val.includes('sniffies') && (val.includes('.jpg') || val.includes('.png') || val.includes('.webp'))) return val;
     }
-    // Construct CDN URL from profile ID (Sniffies pattern)
-    if (profileId) {
-      return `https://profile.sniffiesassets.com/${profileId}/0`;
+    // Check for any URL-like string in common photo key patterns
+    for (const [key, val] of Object.entries(obj)) {
+      const k = normalizeKey(key);
+      if (/photo|image|pic|thumb|avatar|media/.test(k) && typeof val === 'string' && val.startsWith('http')) return val;
     }
+    // Don't construct CDN URL — it likely requires auth. Return empty.
     return '';
+  }
+
+  /**
+   * Scrape avatar URLs from visible map markers on the page.
+   * Sniffies renders marker avatars as background-image CSS on DOM elements.
+   */
+  private scrapeAvatarsFromDOM(): void {
+    try {
+      const markers = document.querySelectorAll('.maplibregl-marker, .marker-avatar-image, [style*="sniffiesassets"]');
+      for (const el of markers) {
+        const bg = (el as HTMLElement).style?.backgroundImage || getComputedStyle(el).backgroundImage || '';
+        // Extract URL from background-image: url("https://profile.sniffiesassets.com/{id}/{num}")
+        const match = bg.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/i);
+        if (!match) continue;
+        const url = match[1];
+        const idMatch = url.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+        if (idMatch) {
+          const profileId = idMatch[1].toLowerCase();
+          // Emit as a contact update with the real avatar URL
+          this.emit({
+            type: 'contacts',
+            payload: [{
+              id: `sniffies:${profileId}`,
+              platform: 'sniffies' as const,
+              platformUserId: profileId,
+              displayName: '',
+              profileUrl: `https://sniffies.com/profile/${profileId}`,
+              avatarUrl: url,
+              lastSeen: new Date().toISOString(),
+              metadata: {},
+            }],
+          });
+        }
+      }
+    } catch {}
   }
 
   private scanStorage(): void {

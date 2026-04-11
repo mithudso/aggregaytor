@@ -12,7 +12,14 @@
     <h1 id="header-title">Aggregaytor</h1>
     <div id="header-actions" class="header-actions"></div>
     <span id="total-unread" class="unread-badge" style="display:none"></span>
+    <button class="header-settings" id="open-settings" title="Settings">⚙</button>
   </div>
+  <!-- Global search -->
+  <div class="search-bar" id="search-bar" style="display:none">
+    <input type="text" id="search-input" class="search-input" placeholder="Search all messages...">
+    <button class="search-close" id="search-close">✕</button>
+  </div>
+  <div id="search-results" class="search-results" style="display:none"></div>
 
   <!-- Global controls bar -->
   <div class="global-controls">
@@ -126,7 +133,12 @@
     <!-- Thread toolbar -->
     <div class="thread-toolbar">
       <button class="toolbar-btn" id="btn-resync" title="Re-fetch conversation from platform">↻ Resync</button>
-      <button class="toolbar-btn danger" id="btn-clear-thread" title="Clear local message history">Clear history</button>
+      <button class="toolbar-btn" id="btn-thread-search" title="Search this chat">🔍 Search</button>
+      <button class="toolbar-btn danger" id="btn-clear-thread" title="Clear local message history">Clear</button>
+    </div>
+    <div class="thread-search-bar" id="thread-search-bar" style="display:none">
+      <input type="text" id="thread-search-input" class="search-input" placeholder="Search this conversation...">
+      <span id="thread-search-count" class="search-count"></span>
     </div>
     <!-- Notes editor (collapsible) -->
     <div id="notes-section" class="notes-section" style="display:none">

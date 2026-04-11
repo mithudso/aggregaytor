@@ -45,6 +45,16 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_UNREAD_COUNT': return { ok: true, count: await getUnreadCount(msg.platform) };
     case 'GET_MESSAGES_BY_CONTACT': return { ok: true, messages: await getMessagesByContact(msg.contactId, { limit: msg.limit || 200 }) };
     case 'MARK_THREAD_READ': { const c = await markThreadRead(msg.threadId); await updateBadgeCount(); return { ok: true, count: c }; }
+    case 'SEARCH_MESSAGES': {
+      const db = await getDB();
+      const result = await db.find({ selector: { docType: 'message' }, limit: 5000 });
+      const q = String(msg.query || '').toLowerCase();
+      const matches = (result.docs as any[])
+        .filter((d: any) => d.body && d.body.toLowerCase().includes(q))
+        .sort((a: any, b: any) => (b.timestamp || '').localeCompare(a.timestamp || ''))
+        .slice(0, msg.limit || 50);
+      return { ok: true, messages: matches };
+    }
     case 'NAVIGATE_TO_CONVERSATION': { await navigateToConversation(msg.platform, msg.contactId); return { ok: true }; }
     case 'CLEAR_THREAD_MESSAGES': {
       const db = await getDB();
@@ -487,5 +497,8 @@ async function updateBadgeCount(): Promise<void> {
 updateBadgeCount().catch(() => {});
 chrome.alarms.create('badge-refresh', { periodInMinutes: 1 });
 chrome.alarms.create('reminder-check', { periodInMinutes: 0.25 });
+
+// Open side panel when extension icon is clicked (no popup)
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 chrome.alarms.create('block-rule-check', { periodInMinutes: 5 });
 console.log(`${LOG} Service worker ready`);
