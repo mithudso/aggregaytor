@@ -531,15 +531,66 @@ function renderMessages(messages) {
     return;
   }
   const sorted = [...messages].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-  let lastDate = '';
-  container.innerHTML = sorted.map(msg => {
-    const msgDate = formatDate(msg.timestamp);
-    let sep = '';
-    if (msgDate !== lastDate) { lastDate = msgDate; sep = `<div class="msg-date-sep">${msgDate}</div>`; }
-    const dir = msg.direction || 'in';
-    return `${sep}<div class="msg-bubble ${dir}">${esc(msg.body || '')}</div><div class="msg-time ${dir}">${formatMsgTime(msg.timestamp)}</div>`;
-  }).join('');
+
+  // Detect global/group chat — if messages come from many different senders
+  const isGlobalChat = currentThread?.contactId?.includes('global') ||
+    currentThread?.contactId?.includes('group') ||
+    isMultiSenderThread(sorted);
+
+  if (isGlobalChat) {
+    container.innerHTML = sorted.map(msg => renderGlobalChatMessage(msg)).join('');
+  } else {
+    let lastDate = '';
+    container.innerHTML = sorted.map(msg => {
+      const msgDate = formatDate(msg.timestamp);
+      let sep = '';
+      if (msgDate !== lastDate) { lastDate = msgDate; sep = `<div class="msg-date-sep">${msgDate}</div>`; }
+      const dir = msg.direction || 'in';
+      return `${sep}<div class="msg-bubble ${dir}">${esc(msg.body || '')}</div><div class="msg-time ${dir}">${formatMsgTime(msg.timestamp)}</div>`;
+    }).join('');
+  }
   container.scrollTop = container.scrollHeight;
+}
+
+function isMultiSenderThread(messages) {
+  // If there are 3+ distinct sender IDs in metadata, it's probably a group/global chat
+  const senders = new Set();
+  for (const m of messages) {
+    const sender = m.metadata?.senderId || m.metadata?.author || m.metadata?.profileId || '';
+    if (sender) senders.add(sender);
+    if (senders.size >= 3) return true;
+  }
+  return false;
+}
+
+function renderGlobalChatMessage(msg) {
+  const md = msg.metadata || {};
+  const senderName = md.displayName || md.author || md.username || md.senderId || stripPrefix(msg.contactId || '');
+  const avatar = md.avatarUrl || md.avatar || '';
+  const attrs = [];
+  if (md.age) attrs.push(md.age);
+  if (md.height) attrs.push(md.height);
+  if (md.weight) attrs.push(md.weight);
+  if (md.bodyType || md.body) attrs.push(String(md.bodyType || md.body));
+  if (md.attitude || md.position) attrs.push(String(md.attitude || md.position));
+  if (md.ethnicity) attrs.push(String(md.ethnicity));
+  const attrStr = attrs.filter(Boolean).join(', ');
+  const time = formatTime(msg.timestamp);
+  const distance = md.distance || '';
+
+  return `
+    <div class="msg-global" data-sender-id="${esc(md.profileId || md.senderId || '')}">
+      <div class="msg-global-avatar">
+        ${avatar ? `<img src="${esc(avatar)}" alt="">` : `<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#6b7280;font-size:14px">${esc(senderName.charAt(0).toUpperCase())}</div>`}
+      </div>
+      <div class="msg-global-content">
+        <div class="msg-global-header">
+          <span class="msg-global-attrs">${esc(attrStr || senderName)}</span>
+          <span class="msg-global-meta">${time}${distance ? ', ' + esc(distance) : ''}</span>
+        </div>
+        <div class="msg-global-body">${esc(msg.body || '')}</div>
+      </div>
+    </div>`;
 }
 
 // ── Draft review ────────────────────────────────────────────────────────────
@@ -601,6 +652,46 @@ async function toggleDraftPanel() {
     });
   });
 }
+
+// ── Thread toolbar ──────────────────────────────────────────────────────────
+
+document.getElementById('btn-resync').addEventListener('click', async () => {
+  if (!currentThread) return;
+  const btn = document.getElementById('btn-resync');
+  btn.textContent = '↻ Syncing...';
+  btn.disabled = true;
+
+  // Navigate to the conversation on the platform to trigger fresh API intercepts
+  await chrome.runtime.sendMessage({
+    type: 'NAVIGATE_TO_CONVERSATION',
+    platform: currentThread.platform,
+    contactId: currentThread.contactId,
+  });
+
+  // Wait a few seconds for the adapter to capture fresh messages, then reload
+  setTimeout(async () => {
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: 'GET_MESSAGES_BY_CONTACT', contactId: currentThread.contactId, limit: 500,
+      });
+      if (res?.ok) { currentMessages = res.messages || []; renderMessages(currentMessages); }
+    } catch {}
+    btn.textContent = '↻ Resync';
+    btn.disabled = false;
+  }, 4000);
+});
+
+document.getElementById('btn-clear-thread').addEventListener('click', async () => {
+  if (!currentThread) return;
+  if (!confirm('Clear all stored messages for this conversation? This cannot be undone.')) return;
+
+  await chrome.runtime.sendMessage({
+    type: 'CLEAR_THREAD_MESSAGES',
+    contactId: currentThread.contactId,
+  });
+  currentMessages = [];
+  renderMessages([]);
+});
 
 function goBack() {
   currentThread = null; currentMessages = []; currentMeta = null;

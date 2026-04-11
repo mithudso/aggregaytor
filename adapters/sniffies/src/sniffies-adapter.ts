@@ -280,16 +280,44 @@ export class SniffiesAdapter extends BaseAdapter {
         const direction = detectDirection(obj, this.selfIds.ids);
         const msgId = String(obj.id || obj._id || obj.messageId || obj.message_id || `${profileId}:${ts}`);
 
+        // Detect global/group chat context
+        const isGlobal = url.includes('global') || url.includes('group') ||
+          (typeof obj.channel === 'string' && (obj.channel.includes('global') || obj.channel.includes('group')));
+        const threadKey = isGlobal ? 'global-chat' : profileId;
+
+        // Collect sender attributes for global chat rendering
+        const senderAttrs: Record<string, unknown> = { profileId, url };
+        if (isGlobal || direction === 'in') {
+          // Include profile details in message metadata for per-profile attribution
+          const displayName = String(obj.displayName || obj.username || obj.name || obj.label || '').trim();
+          if (displayName) senderAttrs.displayName = displayName;
+          senderAttrs.avatarUrl = this.resolveAvatarUrl(obj, profileId);
+          // Copy any profile attributes found on the sender
+          for (const [key, value] of Object.entries(obj)) {
+            const k = normalizeKey(key);
+            if (typeof value === 'string' && value.length < 100) {
+              if (/bodytype|body|build/.test(k)) senderAttrs.bodyType = value;
+              if (/attitude|position|role/.test(k)) senderAttrs.position = value;
+              if (/^age$/.test(k)) senderAttrs.age = value;
+              if (/height/.test(k)) senderAttrs.height = value;
+              if (/weight/.test(k)) senderAttrs.weight = value;
+              if (/ethnicity/.test(k)) senderAttrs.ethnicity = value;
+              if (/distance|miles|km/.test(k)) senderAttrs.distance = value;
+            }
+          }
+          senderAttrs.senderId = profileId;
+        }
+
         messages.push({
           id: `sniffies:${msgId}`,
           platform: 'sniffies',
-          threadId: `sniffies:${profileId}`,
-          contactId: `sniffies:${profileId}`,
+          threadId: `sniffies:${threadKey}`,
+          contactId: `sniffies:${isGlobal ? 'global-chat' : profileId}`,
           direction,
           body,
           timestamp: new Date(ts).toISOString(),
           read: direction === 'out',
-          metadata: { profileId, url },
+          metadata: senderAttrs,
         });
       },
     });

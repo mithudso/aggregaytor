@@ -123,6 +123,11 @@
 
   <!-- Thread detail view -->
   <div id="thread-detail" class="thread-detail">
+    <!-- Thread toolbar -->
+    <div class="thread-toolbar">
+      <button class="toolbar-btn" id="btn-resync" title="Re-fetch conversation from platform">↻ Resync</button>
+      <button class="toolbar-btn danger" id="btn-clear-thread" title="Clear local message history">Clear history</button>
+    </div>
     <!-- Notes editor (collapsible) -->
     <div id="notes-section" class="notes-section" style="display:none">
       <textarea id="notes-input" class="notes-input" placeholder="Add notes about this person..." rows="2"></textarea>
