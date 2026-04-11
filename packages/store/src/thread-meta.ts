@@ -17,6 +17,7 @@ const DEFAULTS: Omit<ThreadMetaDoc, '_id' | '_rev' | 'contactId' | 'platform' | 
   hidden: false,
   hiddenUntilResponse: false,
   bookmarked: false,
+  favorited: false,
   alias: '',
   tags: [],
   notes: '',

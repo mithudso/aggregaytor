@@ -15,8 +15,9 @@ let activeOnSiteContactId = null; // which conversation is open on the actual si
 let filters = {
   searchText: '', bodyType: [], position: [], minDeleteCount: 0,
   maxDistance: 0, unreadOnly: false, newChatsOnly: false,
-  hasResponded: false, engagedRecently: false, bookmarked: false,
+  hasResponded: false, engagedRecently: false, bookmarked: false, favoritesOnly: false,
 };
+let currentSort = 'recent';
 
 // ── Inbox ───────────────────────────────────────────────────────────────────
 
@@ -31,7 +32,7 @@ async function loadThreads() {
       allThreadMeta.clear();
       for (const m of metaRes.metas || []) allThreadMeta.set(m.contactId, m);
     }
-    if (threadRes?.ok) renderThreads(applyFilters(threadRes.summaries));
+    if (threadRes?.ok) renderThreads(sortThreads(applyFilters(threadRes.summaries)));
   } catch (err) { console.error('[Panel] Load error:', err); }
 }
 
@@ -82,7 +83,47 @@ function applyFilters(summaries) {
       if (Date.now() - lastTs > 24 * 3600_000) return false;
     }
     if (filters.bookmarked && !meta.bookmarked) return false;
+    if (filters.favoritesOnly && !meta.favorited) return false;
     return true;
+  });
+}
+
+function sortThreads(summaries) {
+  return [...summaries].sort((a, b) => {
+    const metaA = allThreadMeta.get(a.contactId) || {};
+    const metaB = allThreadMeta.get(b.contactId) || {};
+
+    // Favorites always sort first regardless of sort mode
+    if (metaA.favorited && !metaB.favorited) return -1;
+    if (!metaA.favorited && metaB.favorited) return 1;
+
+    switch (currentSort) {
+      case 'distance': {
+        const dA = parseFloat(String(a.contact?.metadata?.distance || metaA.distance || '')) || 9999;
+        const dB = parseFloat(String(b.contact?.metadata?.distance || metaB.distance || '')) || 9999;
+        return dA - dB;
+      }
+      case 'interest': {
+        const iA = metaA.sentiment?.interest || 0;
+        const iB = metaB.sentiment?.interest || 0;
+        return iB - iA;
+      }
+      case 'commitment': {
+        const cA = metaA.sentiment?.commitment || 0;
+        const cB = metaB.sentiment?.commitment || 0;
+        return cB - cA;
+      }
+      case 'unread':
+        return (b.unreadCount || 0) - (a.unreadCount || 0);
+      case 'name': {
+        const nA = metaA.alias || a.contact?.displayName || a.contactId;
+        const nB = metaB.alias || b.contact?.displayName || b.contactId;
+        return nA.localeCompare(nB);
+      }
+      case 'recent':
+      default:
+        return new Date(b.lastMessage?.timestamp || 0).getTime() - new Date(a.lastMessage?.timestamp || 0).getTime();
+    }
   });
 }
 
@@ -126,6 +167,7 @@ function renderThreads(summaries) {
 
     const isActiveSite = activeOnSiteContactId === t.contactId;
     const isBlocked = meta.blockedByThem || false;
+    const isFav = meta.favorited || false;
     const distance = t.contact?.metadata?.distance || meta.distance || '';
     const lastDir = t.lastMessage?.direction;
     const dirArrow = lastDir === 'out' ? '<span class="dir-arrow out">↗</span>' : lastDir === 'in' ? '<span class="dir-arrow in">↙</span>' : '';
@@ -133,7 +175,7 @@ function renderThreads(summaries) {
     return `
       <div class="thread-item${unread ? ' unread' : ''}${isActiveSite ? ' active-on-site' : ''}${isBlocked ? ' blocked' : ''}"
            data-contact-id="${esc(t.contactId)}" data-platform="${esc(t.platform)}" data-name="${esc(name)}">
-        ${avatarHtml}${platformIcon(t.platform)}
+        ${avatarHtml}<span class="thread-fav${isFav ? ' active' : ''}" data-action="favorite" title="${isFav ? 'Unstar' : 'Star'}">⭐</span>${platformIcon(t.platform)}
         <div class="thread-content">
           <div class="thread-header">
             <span class="thread-name${isBlocked ? ' strikethrough' : ''}">${esc(name)}</span>${distance ? `<span class="thread-distance">${esc(distance)}</span>` : ''}
@@ -175,6 +217,15 @@ function renderThreads(summaries) {
       const contactId = item.dataset.contactId;
       const platform = item.dataset.platform;
       handleAction(icon.dataset.action, contactId, platform);
+    });
+  });
+
+  // Favorite star click handlers
+  container.querySelectorAll('.thread-fav').forEach(star => {
+    star.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const item = star.closest('.thread-item');
+      handleAction('favorite', item.dataset.contactId, item.dataset.platform);
     });
   });
 
@@ -273,6 +324,15 @@ async function loadHoverPreview(contactId, platform, previewEl, threadEl) {
 
 async function handleAction(action, contactId, platform) {
   switch (action) {
+    case 'favorite': {
+      const meta = allThreadMeta.get(contactId) || {};
+      await chrome.runtime.sendMessage({
+        type: 'UPSERT_THREAD_META', contactId, platform,
+        updates: { favorited: !meta.favorited },
+      });
+      loadThreads();
+      break;
+    }
     case 'like':
       await chrome.runtime.sendMessage({ type: 'RECORD_PREFERENCE', contactId, platform, liked: true });
       break;
@@ -1015,11 +1075,13 @@ function readFilters() {
   filters.hasResponded = document.getElementById('filter-responded').checked;
   filters.engagedRecently = document.getElementById('filter-recent').checked;
   filters.bookmarked = document.getElementById('filter-bookmarked').checked;
+  filters.favoritesOnly = document.getElementById('filter-favorites').checked;
 
   const count = (filters.searchText ? 1 : 0) + filters.bodyType.length + filters.position.length +
     (filters.minDeleteCount ? 1 : 0) + (filters.maxDistance ? 1 : 0) +
     (filters.unreadOnly ? 1 : 0) + (filters.newChatsOnly ? 1 : 0) +
-    (filters.hasResponded ? 1 : 0) + (filters.engagedRecently ? 1 : 0) + (filters.bookmarked ? 1 : 0);
+    (filters.hasResponded ? 1 : 0) + (filters.engagedRecently ? 1 : 0) + (filters.bookmarked ? 1 : 0) +
+    (filters.favoritesOnly ? 1 : 0);
   const badge = document.getElementById('filter-count');
   if (count) { badge.textContent = count; badge.style.display = ''; } else { badge.style.display = 'none'; }
 
@@ -1030,9 +1092,13 @@ for (const id of ['filter-search', 'filter-body', 'filter-position', 'filter-del
   document.getElementById(id).addEventListener('change', readFilters);
 }
 document.getElementById('filter-search').addEventListener('input', readFilters);
-for (const id of ['filter-responded', 'filter-recent', 'filter-bookmarked', 'filter-unread', 'filter-newchats']) {
+for (const id of ['filter-responded', 'filter-recent', 'filter-bookmarked', 'filter-unread', 'filter-newchats', 'filter-favorites']) {
   document.getElementById(id).addEventListener('change', readFilters);
 }
+document.getElementById('sort-by').addEventListener('change', (e) => {
+  currentSort = e.target.value;
+  loadThreads();
+});
 document.getElementById('filter-clear').addEventListener('click', () => {
   document.getElementById('filter-search').value = '';
   document.getElementById('filter-body').selectedIndex = -1;
@@ -1044,6 +1110,7 @@ document.getElementById('filter-clear').addEventListener('click', () => {
   document.getElementById('filter-responded').checked = false;
   document.getElementById('filter-recent').checked = false;
   document.getElementById('filter-bookmarked').checked = false;
+  document.getElementById('filter-favorites').checked = false;
   readFilters();
 });
 
@@ -1256,8 +1323,22 @@ function updateTotalUnread(count) {
 
 // ── Settings button ─────────────────────────────────────────────────────────
 
-document.getElementById('open-settings').addEventListener('click', () => {
-  chrome.tabs.create({ url: chrome.runtime.getURL('popup/popup.html') });
+let settingsTabId = null;
+document.getElementById('open-settings').addEventListener('click', async () => {
+  // Toggle: if settings tab is open, close it; otherwise open it
+  if (settingsTabId) {
+    try {
+      await chrome.tabs.remove(settingsTabId);
+      settingsTabId = null;
+      return;
+    } catch { settingsTabId = null; }
+  }
+  const tab = await chrome.tabs.create({ url: chrome.runtime.getURL('popup/popup.html') });
+  settingsTabId = tab.id;
+  // Clear reference when the tab is closed by the user
+  chrome.tabs.onRemoved.addListener(function onRemove(id) {
+    if (id === settingsTabId) { settingsTabId = null; chrome.tabs.onRemoved.removeListener(onRemove); }
+  });
 });
 
 // ── Open all sites on title click ───────────────────────────────────────────

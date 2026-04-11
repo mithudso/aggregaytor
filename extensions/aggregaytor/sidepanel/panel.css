@@ -108,6 +108,27 @@ body {
   transform: translateX(14px);
 }
 .global-ar-label { font-weight: 500; }
+.controls-row {
+  display: flex; align-items: center; gap: 8px; padding: 4px 12px 6px;
+}
+.sort-control { display: flex; align-items: center; gap: 4px; flex: 1; }
+.sort-label { font-size: 10px; color: #6b7280; }
+.sort-select {
+  padding: 2px 6px; border-radius: 6px; font-size: 10px;
+  border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.05); color: #d1d5db;
+}
+.fav-filter { font-size: 14px; cursor: pointer; display: flex; align-items: center; gap: 2px; user-select: none; }
+.fav-filter input { display: none; }
+.fav-filter { opacity: 0.4; }
+.fav-filter:has(input:checked) { opacity: 1; }
+
+/* ── Favorite star in thread list ── */
+.thread-fav {
+  font-size: 12px; cursor: pointer; flex-shrink: 0; user-select: none; opacity: 0.3;
+  transition: opacity 0.1s;
+}
+.thread-fav:hover { opacity: 0.7; }
+.thread-fav.active { opacity: 1; color: #fbbf24; }
 
 /* ── Platform icons ── */
 .platform-icon {

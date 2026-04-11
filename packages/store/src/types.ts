@@ -68,6 +68,7 @@ export interface ThreadMetaDoc {
   hidden: boolean;
   hiddenUntilResponse: boolean;
   bookmarked: boolean;
+  favorited: boolean;        // starred/pinned on platform
   alias: string;
   tags: string[];
   notes: string;
