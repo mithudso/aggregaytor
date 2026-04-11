@@ -233,7 +233,7 @@ export class SniffiesAdapter extends BaseAdapter {
         this.selfIds.detectFromPayload(obj);
         this.detectSelfIdsFromObj(obj);
 
-        const profileId = findLikelyProfileId(obj, ctx || '');
+        const profileId = findLikelyProfileId(obj, ctx || '', this.selfIds.ids);
 
         // ── Extract contact/profile info from ANY object with a profile ID ──
         if (profileId && !seenContacts.has(profileId)) {

@@ -56,7 +56,16 @@ async function handleMessage(msg: any): Promise<any> {
     case 'ADAPTER_CONTACTS': { await handleIncomingContacts(msg.payload); return { ok: true }; }
     case 'GET_THREAD_SUMMARIES': return { ok: true, summaries: await getThreadSummaries(msg.opts) };
     case 'GET_UNREAD_COUNT': return { ok: true, count: await getUnreadCount(msg.platform) };
-    case 'GET_MESSAGES_BY_CONTACT': return { ok: true, messages: await getMessagesByContact(msg.contactId, { limit: msg.limit || 200 }) };
+    case 'GET_MESSAGES_BY_CONTACT': {
+      const msgs = await getMessagesByContact(msg.contactId, { limit: msg.limit || 200 });
+      console.log(`${LOG} GET_MESSAGES_BY_CONTACT contactId="${msg.contactId}" → ${msgs.length} messages`);
+      // Debug: log unique contactIds in results to detect mismatch
+      const uniqueIds = [...new Set(msgs.map(m => m.contactId))];
+      if (uniqueIds.length > 1 || (uniqueIds.length === 1 && uniqueIds[0] !== msg.contactId)) {
+        console.warn(`${LOG} ⚠ CONTACT ID MISMATCH! Queried "${msg.contactId}" but got messages with contactIds:`, uniqueIds);
+      }
+      return { ok: true, messages: msgs };
+    }
     case 'MARK_THREAD_READ': { const c = await markThreadRead(msg.threadId); await updateBadgeCount(); return { ok: true, count: c }; }
     case 'SEARCH_MESSAGES': {
       const db = await getDB();
