@@ -156,6 +156,14 @@ interface QueuedRequest {
 
 const requestQueue: QueuedRequest[] = [];
 let queueProcessing = false;
+
+function sortQueueByPriority(): void {
+  requestQueue.sort((a, b) => {
+    const pA = PRIORITY_ORDER[FEATURE_PRIORITY[a.feature] || 'background'] ?? 1;
+    const pB = PRIORITY_ORDER[FEATURE_PRIORITY[b.feature] || 'background'] ?? 1;
+    return pA - pB;
+  });
+}
 let requestTimestamps: number[] = [];
 let backoffUntil = 0;
 const MAX_RETRIES = 3;
@@ -173,6 +181,7 @@ async function processQueue(): Promise<void> {
   queueProcessing = true;
 
   while (requestQueue.length > 0) {
+    sortQueueByPriority(); // interactive requests first
     const rateSettings = await getLLMRateSettings();
 
     // Check global backoff
@@ -657,8 +666,110 @@ let totalCacheHits = 0;
 let totalApiCalls = 0;
 
 export function getLLMOptimizationStats() {
-  return { totalTokensSaved, totalCacheHits, totalApiCalls, cacheSize: responseCache.size };
+  return { totalTokensSaved, totalCacheHits, totalApiCalls, cacheSize: responseCache.size, coalescedRequests: totalCoalesced };
 }
+
+// 8. Request coalescing — dedupe concurrent identical prompts
+const inflightRequests = new Map<string, Promise<string>>();
+let totalCoalesced = 0;
+
+async function coalescedCallProvider(
+  config: LLMConfig, systemPrompt: string, userPrompt: string,
+  feature: string, opts?: { temperature?: number; maxTokens?: number; jsonMode?: boolean },
+): Promise<string> {
+  const key = getCacheKey(systemPrompt, userPrompt, feature);
+  const inflight = inflightRequests.get(key);
+  if (inflight) {
+    totalCoalesced++;
+    console.log(`${LOG} Coalesced request (${feature})`);
+    return inflight;
+  }
+  const promise = callProvider(config, systemPrompt, userPrompt, feature, opts);
+  inflightRequests.set(key, promise);
+  try {
+    const result = await promise;
+    return result;
+  } finally {
+    inflightRequests.delete(key);
+  }
+}
+
+// 9. Rolling conversation summary — compress old messages into a summary
+const conversationSummaryCache = new Map<string, { summary: string; messageCount: number; timestamp: number }>();
+const SUMMARY_CACHE_TTL = 10 * 60_000; // 10 min
+
+async function getCompactConversationContext(
+  messages: Message[], contactName: string, contactId: string, feature: string,
+): Promise<string> {
+  const windowSize = CONTEXT_WINDOWS[feature] || 15;
+
+  // If conversation fits in window, no compression needed
+  if (messages.length <= windowSize) {
+    return buildConversationContext(messages, contactName, feature);
+  }
+
+  // Check if we have a cached summary for the older messages
+  const cached = conversationSummaryCache.get(contactId);
+  const recentMessages = messages.slice(-windowSize);
+  const olderMessages = messages.slice(0, -windowSize);
+
+  // Use cached summary if it covers roughly the same older messages
+  if (cached && Math.abs(cached.messageCount - olderMessages.length) < 5 &&
+      Date.now() - cached.timestamp < SUMMARY_CACHE_TTL) {
+    const recentContext = recentMessages.map(m => {
+      const body = m.body.length > 100 ? m.body.slice(0, 100) + '...' : m.body;
+      return `${m.direction === 'out' ? 'You' : contactName}: ${body}`;
+    }).join('\n');
+    return `[Earlier conversation summary: ${cached.summary}]\n\n${recentContext}`;
+  }
+
+  // Generate a local summary of older messages (no LLM call)
+  const inCount = olderMessages.filter(m => m.direction === 'in').length;
+  const outCount = olderMessages.filter(m => m.direction === 'out').length;
+  const topics = extractTopics(olderMessages);
+  const summary = `${olderMessages.length} earlier messages (${inCount} from them, ${outCount} from you). Topics: ${topics || 'general chat'}.`;
+
+  conversationSummaryCache.set(contactId, {
+    summary, messageCount: olderMessages.length, timestamp: Date.now(),
+  });
+
+  const recentContext = recentMessages.map(m => {
+    const body = m.body.length > 100 ? m.body.slice(0, 100) + '...' : m.body;
+    return `${m.direction === 'out' ? 'You' : contactName}: ${body}`;
+  }).join('\n');
+
+  return `[Earlier: ${summary}]\n\n${recentContext}`;
+}
+
+function extractTopics(messages: Message[]): string {
+  const keywords = new Map<string, number>();
+  const topicPatterns = /\b(host|travel|meet|tonight|tomorrow|pics|photo|looking for|top|bottom|vers|fun|chill|hang|hookup|date|drink|place|car|hotel|address|age|height|weight)\b/gi;
+  for (const m of messages) {
+    const matches = m.body.match(topicPatterns) || [];
+    for (const match of matches) {
+      const word = match.toLowerCase();
+      keywords.set(word, (keywords.get(word) || 0) + 1);
+    }
+  }
+  return [...keywords.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([word]) => word)
+    .join(', ');
+}
+
+// 10. Priority levels for request queue
+type RequestPriority = 'interactive' | 'background' | 'batch';
+const PRIORITY_ORDER: Record<RequestPriority, number> = { interactive: 0, background: 1, batch: 2 };
+
+const FEATURE_PRIORITY: Record<string, RequestPriority> = {
+  suggestions: 'interactive',
+  'auto-respond': 'interactive',
+  greeting: 'interactive',
+  nickname: 'background',
+  dossier: 'background',
+  summary: 'background',
+};
 
 // ── Centralized provider call (all LLM requests go through here) ────────────
 
@@ -725,12 +836,16 @@ async function callProvider(
       break;
     }
     case 'anthropic': {
-      const model = config.model || DEFAULT_MODELS.anthropic;
+      const model = routedConfig.model || DEFAULT_MODELS.anthropic;
       url = 'https://api.anthropic.com/v1/messages';
+      // Use Anthropic prompt caching — cache the system prompt (90% savings on cached tokens)
+      const anthropicSystem = systemPrompt ? [
+        { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
+      ] : undefined;
       init = {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-        body: JSON.stringify({ model, max_tokens: maxTokens, ...(systemPrompt ? { system: systemPrompt } : {}), messages: [{ role: 'user', content: userPrompt }] }),
+        headers: { 'Content-Type': 'application/json', 'x-api-key': routedConfig.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+        body: JSON.stringify({ model, max_tokens: maxTokens, ...(anthropicSystem ? { system: anthropicSystem } : {}), messages: [{ role: 'user', content: userPrompt }] }),
       };
       break;
     }
@@ -902,29 +1017,22 @@ export async function generateSuggestions(
   platform: string,
 ): Promise<SuggestionResult> {
   const config = await getBestProvider();
-  const systemPrompt = await buildSystemPrompt(contactName, platform);
+  const systemPrompt = await getCachedSystemPrompt(contactName, platform);
   const conversation = buildConversationContext(messages, contactName, "suggestions");
 
-  console.log(`${LOG} Generating suggestions via ${config.provider} (${messages.length} messages)`);
+  console.log(`${LOG} Generating suggestions via ${config.provider} (${messages.length} msgs, ~${estimateTokens(systemPrompt + conversation)} tokens)`);
 
   if (config.provider === 'local' || !config.apiKey) {
     return { suggestions: localSuggestions(messages), provider: 'local' };
   }
 
   try {
-    let suggestions: string[];
-    switch (config.provider) {
-      case 'gemini':
-        suggestions = await callGemini(config, systemPrompt, conversation);
-        break;
-      case 'openai':
-        suggestions = await callOpenAI(config, systemPrompt, conversation);
-        break;
-      case 'anthropic':
-        suggestions = await callAnthropic(config, systemPrompt, conversation);
-        break;
-      default:
-        suggestions = localSuggestions(messages);
+    const text = await coalescedCallProvider(config, systemPrompt,
+      `Here is the conversation:\n\n${conversation}\n\nGenerate 3-4 suggested responses as a JSON array of strings.`,
+      'suggestions', { jsonMode: true });
+    let suggestions = parseJsonArray(text);
+    if (!suggestions.length) {
+      suggestions = localSuggestions(messages);
     }
     console.log(`${LOG} Got ${suggestions.length} suggestions from ${config.provider}`);
     return { suggestions, provider: config.provider };
