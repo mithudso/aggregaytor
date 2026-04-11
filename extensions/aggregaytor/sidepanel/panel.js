@@ -268,6 +268,60 @@ function renderMessages(messages) {
   container.scrollTop = container.scrollHeight;
 }
 
+// ── Draft review ────────────────────────────────────────────────────────────
+
+async function loadDrafts() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_DRAFTS' });
+    const drafts = res?.drafts || [];
+    const bar = document.getElementById('draft-bar');
+    const count = document.getElementById('draft-count');
+    if (drafts.length) {
+      bar.style.display = ''; count.textContent = drafts.length;
+    } else {
+      bar.style.display = 'none';
+      document.getElementById('draft-panel').style.display = 'none';
+    }
+    return drafts;
+  } catch { return []; }
+}
+
+window.toggleDraftPanel = async function() {
+  const panel = document.getElementById('draft-panel');
+  if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+  const drafts = await loadDrafts();
+  if (!drafts.length) { panel.style.display = 'none'; return; }
+  panel.innerHTML = drafts.map(d => {
+    const name = d.contactId.replace(/^[a-z]+:/, '').slice(0, 12);
+    return `
+      <div class="draft-item ${d.tier}">
+        <div class="draft-header">
+          <span>${esc(name)} (${d.platform})</span>
+          <span class="draft-tier ${d.tier}">${d.tier}</span>
+        </div>
+        <div class="draft-body" contenteditable="true" data-id="${d._id}">${esc(d.generatedResponse)}</div>
+        ${d.suggestedPictureTag ? `<div style="font-size:10px;color:#6b7280">Picture: ${esc(d.suggestedPictureTag)}</div>` : ''}
+        <div class="draft-actions">
+          <button class="draft-btn approve" onclick="approveDraft('${d._id}', this)">Approve & Send</button>
+          <button class="draft-btn reject" onclick="rejectDraft('${d._id}')">Reject</button>
+        </div>
+      </div>`;
+  }).join('');
+  panel.style.display = '';
+};
+
+window.approveDraft = async function(id, btn) {
+  const body = btn.closest('.draft-item').querySelector('.draft-body');
+  const editedResponse = body?.textContent?.trim();
+  await chrome.runtime.sendMessage({ type: 'APPROVE_DRAFT', id, editedResponse });
+  loadDrafts();
+};
+
+window.rejectDraft = async function(id) {
+  await chrome.runtime.sendMessage({ type: 'REJECT_DRAFT', id });
+  loadDrafts();
+};
+
 function goBack() {
   currentThread = null; currentMessages = []; currentMeta = null;
   document.body.classList.remove('view-thread');
@@ -439,7 +493,9 @@ chrome.runtime.onMessage.addListener((message) => {
       chrome.runtime.sendMessage({ type: 'GET_MESSAGES_BY_CONTACT', contactId: currentThread.contactId, limit: 500 })
         .then(res => { if (res?.ok) { currentMessages = res.messages || []; renderMessages(currentMessages); } }).catch(() => {});
     }
+    loadDrafts();
   }
+  if (message.type === 'DRAFTS_UPDATED') loadDrafts();
 });
 
 // ── Utilities ───────────────────────────────────────────────────────────────
@@ -469,3 +525,4 @@ function updateTotalUnread(count) {
 }
 
 loadThreads();
+loadDrafts();

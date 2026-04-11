@@ -8,9 +8,11 @@ import {
   getMessagesByContact, markThreadRead,
   getThreadMeta, upsertThreadMeta, getAllThreadMeta,
   createReminder, getReminders, markReminderNotified, deleteReminder,
-  queueAutoRespond, getPendingAutoResponds, updateAutoRespondStatus,
+  queueAutoRespond, getPendingAutoResponds, getDraftAutoResponds, getApprovedAutoResponds, updateAutoRespondStatus,
+  addPicture, getAllPictures, getPictureByTag, incrementPictureStat, deletePicture,
+  createBlockRule, getAllBlockRules, updateBlockRule, deleteBlockRule, evaluateRules, executeAction,
 } from '@aggregaytor/store';
-import type { ThreadSummary } from '@aggregaytor/store';
+import type { ThreadSummary, AutoRespondSettings } from '@aggregaytor/store';
 import { generateSuggestions, generateAutoResponse, generateGreeting, getLLMConfig, saveLLMConfig } from './llm.js';
 
 const LOG = '[Aggregaytor:SW]';
@@ -19,99 +21,86 @@ console.log(`${LOG} Service worker starting...`);
 const PLATFORM_URLS: Record<string, (contactId: string) => string> = {
   sniffies: (id) => `https://sniffies.com/profile/${id.replace('sniffies:', '')}/chat`,
   grindr: (id) => `https://web.grindr.com/chat/${id.replace('grindr:', '')}`,
-  doublelist: (_id) => `https://doublelist.com/inbox/`,
+  doublelist: () => `https://doublelist.com/inbox/`,
   adam4adam: (id) => `https://www.adam4adam.com/messages/${id.replace('adam4adam:', '')}`,
-  gmail: (_id) => `https://mail.google.com/mail/`,
-  yahoo: (_id) => `https://mail.yahoo.com/`,
+  gmail: () => `https://mail.google.com/mail/`,
+  yahoo: () => `https://mail.yahoo.com/`,
 };
 
-chrome.runtime.onMessage.addListener(
-  (message: any, _sender: chrome.runtime.MessageSender, sendResponse: (r: any) => void) => {
-    handleMessage(message).then(sendResponse).catch(err =>
-      sendResponse({ ok: false, error: (err as Error).message })
-    );
-    return true; // async
-  },
-);
+chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
+  handleMessage(msg).then(sendResponse).catch(err => sendResponse({ ok: false, error: (err as Error).message }));
+  return true;
+});
 
 async function handleMessage(msg: any): Promise<any> {
   switch (msg.type) {
-    // ── Messages ──
-    case 'ADAPTER_MESSAGES':
-      return handleIncomingMessages(msg.payload, msg.platform);
-    case 'ADAPTER_CONTACTS':
-      await handleIncomingContacts(msg.payload);
-      return { ok: true };
-    case 'GET_THREAD_SUMMARIES':
-      return { ok: true, summaries: await getThreadSummaries(msg.opts) };
-    case 'GET_UNREAD_COUNT':
-      return { ok: true, count: await getUnreadCount(msg.platform) };
-    case 'GET_MESSAGES_BY_CONTACT':
-      return { ok: true, messages: await getMessagesByContact(msg.contactId, { limit: msg.limit || 200 }) };
-    case 'MARK_THREAD_READ': {
-      const count = await markThreadRead(msg.threadId);
-      await updateBadgeCount();
-      return { ok: true, count };
-    }
-    case 'NAVIGATE_TO_CONVERSATION':
-      await navigateToConversation(msg.platform, msg.contactId);
-      return { ok: true };
+    case 'ADAPTER_MESSAGES': return handleIncomingMessages(msg.payload, msg.platform);
+    case 'ADAPTER_CONTACTS': { await handleIncomingContacts(msg.payload); return { ok: true }; }
+    case 'GET_THREAD_SUMMARIES': return { ok: true, summaries: await getThreadSummaries(msg.opts) };
+    case 'GET_UNREAD_COUNT': return { ok: true, count: await getUnreadCount(msg.platform) };
+    case 'GET_MESSAGES_BY_CONTACT': return { ok: true, messages: await getMessagesByContact(msg.contactId, { limit: msg.limit || 200 }) };
+    case 'MARK_THREAD_READ': { const c = await markThreadRead(msg.threadId); await updateBadgeCount(); return { ok: true, count: c }; }
+    case 'NAVIGATE_TO_CONVERSATION': { await navigateToConversation(msg.platform, msg.contactId); return { ok: true }; }
 
-    // ── Thread metadata ──
-    case 'GET_THREAD_META':
-      return { ok: true, meta: await getThreadMeta(msg.contactId) };
-    case 'UPSERT_THREAD_META':
-      return { ok: true, meta: await upsertThreadMeta(msg.contactId, msg.platform, msg.updates) };
-    case 'GET_ALL_THREAD_META':
-      return { ok: true, metas: await getAllThreadMeta() };
+    // Thread meta
+    case 'GET_THREAD_META': return { ok: true, meta: await getThreadMeta(msg.contactId) };
+    case 'UPSERT_THREAD_META': return { ok: true, meta: await upsertThreadMeta(msg.contactId, msg.platform, msg.updates) };
+    case 'GET_ALL_THREAD_META': return { ok: true, metas: await getAllThreadMeta() };
 
-    // ── Reminders ──
-    case 'CREATE_REMINDER':
-      return { ok: true, reminder: await createReminder(msg.contactId, msg.platform, msg.note, msg.dueAt) };
-    case 'GET_REMINDERS':
-      return { ok: true, reminders: await getReminders(msg.opts) };
-    case 'DELETE_REMINDER':
-      await deleteReminder(msg.id);
-      return { ok: true };
+    // Reminders
+    case 'CREATE_REMINDER': return { ok: true, reminder: await createReminder(msg.contactId, msg.platform, msg.note, msg.dueAt) };
+    case 'GET_REMINDERS': return { ok: true, reminders: await getReminders(msg.opts) };
+    case 'DELETE_REMINDER': { await deleteReminder(msg.id); return { ok: true }; }
 
-    // ── LLM ──
-    case 'GENERATE_SUGGESTIONS':
-      return { ok: true, ...(await generateSuggestions(msg.messages, msg.contactName, msg.platform)) };
-    case 'GET_LLM_CONFIG':
-      return { ok: true, config: await getLLMConfig() };
-    case 'SAVE_LLM_CONFIG':
-      await saveLLMConfig(msg.config);
-      return { ok: true };
+    // LLM
+    case 'GENERATE_SUGGESTIONS': return { ok: true, ...(await generateSuggestions(msg.messages, msg.contactName, msg.platform)) };
+    case 'GET_LLM_CONFIG': return { ok: true, config: await getLLMConfig() };
+    case 'SAVE_LLM_CONFIG': { await saveLLMConfig(msg.config); return { ok: true }; }
 
-    // ── Greeting ──
+    // Greeting
     case 'SEND_GREETING': {
-      const greeting = await generateGreeting(msg.platform);
-      // Queue with 5-15s delay
+      const g = await generateGreeting(msg.platform);
       const delay = 5000 + Math.floor(Math.random() * 10000);
-      setTimeout(() => sendMessageToTab(msg.platform, msg.contactId, greeting.response), delay);
-      return { ok: true, greeting: greeting.response, delay };
+      setTimeout(() => sendMessageToTab(msg.platform, msg.contactId, g.response), delay);
+      return { ok: true, greeting: g.response, delay };
     }
 
-    // ── Auto-respond ──
-    case 'TOGGLE_AUTO_RESPOND':
-      return { ok: true, meta: await upsertThreadMeta(msg.contactId, msg.platform, { autoRespondEnabled: msg.enabled }) };
+    // Auto-respond
+    case 'TOGGLE_AUTO_RESPOND': return { ok: true, meta: await upsertThreadMeta(msg.contactId, msg.platform, { autoRespondEnabled: msg.enabled }) };
+    case 'UPDATE_AUTO_RESPOND_SETTINGS': return { ok: true, meta: await upsertThreadMeta(msg.contactId, msg.platform, { autoRespondSettings: msg.settings }) };
 
-    default:
-      return { ok: false, error: `Unknown message type: ${msg.type}` };
+    // Drafts
+    case 'GET_DRAFTS': return { ok: true, drafts: await getDraftAutoResponds() };
+    case 'APPROVE_DRAFT': {
+      await updateAutoRespondStatus(msg.id, 'approved', msg.editedResponse ? { generatedResponse: msg.editedResponse } : undefined);
+      chrome.alarms.create('auto-respond-check', { delayInMinutes: 0.05 });
+      return { ok: true };
+    }
+    case 'REJECT_DRAFT': { await updateAutoRespondStatus(msg.id, 'rejected'); return { ok: true }; }
+
+    // Pictures
+    case 'ADD_PICTURE': return { ok: true, picture: await addPicture(msg.input) };
+    case 'GET_ALL_PICTURES': return { ok: true, pictures: await getAllPictures(msg.tag) };
+    case 'DELETE_PICTURE': { await deletePicture(msg.id); return { ok: true }; }
+    case 'INCREMENT_PICTURE_STAT': { await incrementPictureStat(msg.id, msg.stat); return { ok: true }; }
+
+    // Block rules
+    case 'CREATE_BLOCK_RULE': return { ok: true, rule: await createBlockRule(msg.input) };
+    case 'GET_ALL_BLOCK_RULES': return { ok: true, rules: await getAllBlockRules() };
+    case 'UPDATE_BLOCK_RULE': { await updateBlockRule(msg.id, msg.updates); return { ok: true }; }
+    case 'DELETE_BLOCK_RULE': { await deleteBlockRule(msg.id); return { ok: true }; }
+
+    default: return { ok: false, error: `Unknown: ${msg.type}` };
   }
 }
 
 // ── Core handlers ───────────────────────────────────────────────────────────
 
-async function handleIncomingMessages(
-  messages: UnifiedMessage[],
-  platform: Platform,
-): Promise<any> {
+async function handleIncomingMessages(messages: UnifiedMessage[], platform: Platform): Promise<any> {
   const result = await upsertMessages(messages);
   await updateBadgeCount();
   try { chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform, count: result.created }); } catch {}
 
-  // Check auto-respond for each new inbound message
   if (result.created > 0) {
     for (const msg of messages) {
       if (msg.direction !== 'in') continue;
@@ -120,143 +109,190 @@ async function handleIncomingMessages(
         if (meta?.autoRespondEnabled) {
           const queued = await queueAutoRespond(msg.contactId, msg.platform, msg.id);
           if (queued) {
-            console.log(`${LOG} Auto-respond queued for ${msg.contactId}, scheduled at ${queued.scheduledAt}`);
+            console.log(`${LOG} Auto-respond queued for ${msg.contactId}`);
             chrome.alarms.create('auto-respond-check', { delayInMinutes: 0.5 });
           }
         }
-        // Unhide if hiddenUntilResponse
         if (meta?.hiddenUntilResponse) {
           await upsertThreadMeta(msg.contactId, msg.platform, { hiddenUntilResponse: false, hidden: false });
         }
-      } catch (err) {
-        console.warn(`${LOG} Auto-respond check failed:`, err);
-      }
+      } catch {}
     }
+    // Run block rules
+    await runBlockRules(messages).catch(e => console.warn(`${LOG} Block rules error:`, e));
   }
 
   return { ok: true, ...result };
 }
 
 async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void> {
-  for (const contact of contacts) {
-    await upsertContact(contact);
-  }
+  for (const c of contacts) await upsertContact(c);
 }
 
-async function navigateToConversation(platform: string, contactId: string): Promise<void> {
-  const urlFn = PLATFORM_URLS[platform];
-  if (!urlFn) return;
-  const url = urlFn(contactId);
-  const tabs = await chrome.tabs.query({});
-  const platformHost = new URL(url).hostname;
-  const existing = tabs.find(t => { try { return t.url && new URL(t.url).hostname === platformHost; } catch { return false; } });
-  if (existing?.id) {
-    await chrome.tabs.update(existing.id, { url, active: true });
-    if (existing.windowId) await chrome.windows.update(existing.windowId, { focused: true });
-  } else {
-    await chrome.tabs.create({ url });
-  }
-}
-
-async function sendMessageToTab(platform: string, contactId: string, text: string): Promise<void> {
-  console.log(`${LOG} Sending message to ${contactId}: "${text.slice(0, 50)}..."`);
-  const urlFn = PLATFORM_URLS[platform];
-  if (!urlFn) return;
-  const url = urlFn(contactId);
-  const tabs = await chrome.tabs.query({});
-  const platformHost = new URL(url).hostname;
-  const tab = tabs.find(t => { try { return t.url && new URL(t.url).hostname === platformHost; } catch { return false; } });
-
-  if (tab?.id) {
-    await chrome.tabs.update(tab.id, { url, active: true });
-    // Wait for page load, then send
-    setTimeout(() => {
-      chrome.tabs.sendMessage(tab.id!, { type: 'SEND_AUTO_RESPONSE', text, contactId }).catch(err => {
-        console.warn(`${LOG} DOM send failed:`, err);
-      });
-    }, 3000);
-  } else {
-    const newTab = await chrome.tabs.create({ url });
-    setTimeout(() => {
-      if (newTab.id) {
-        chrome.tabs.sendMessage(newTab.id, { type: 'SEND_AUTO_RESPONSE', text, contactId }).catch(err => {
-          console.warn(`${LOG} DOM send failed:`, err);
-        });
-      }
-    }, 5000);
-  }
-}
-
-// ── Auto-respond alarm ──────────────────────────────────────────────────────
-
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === 'badge-refresh') {
-    await updateBadgeCount().catch(() => {});
-    return;
-  }
-  if (alarm.name === 'auto-respond-check') {
-    await processAutoResponds().catch(err => console.error(`${LOG} Auto-respond error:`, err));
-    return;
-  }
-  if (alarm.name === 'reminder-check') {
-    await processReminders().catch(err => console.error(`${LOG} Reminder error:`, err));
-  }
-});
+// ── Auto-respond with tier-based processing ─────────────────────────────────
 
 async function processAutoResponds(): Promise<void> {
+  // Process pending (newly queued)
   const pending = await getPendingAutoResponds();
-  if (!pending.length) return;
-  console.log(`${LOG} Processing ${pending.length} auto-responds`);
-
   for (const entry of pending) {
     try {
       await updateAutoRespondStatus(entry._id, 'generating');
       const messages = await getMessagesByContact(entry.contactId, { limit: 30 });
-      const contactName = entry.contactId.replace(/^[a-z]+:/, '').slice(0, 10);
+      const meta = await getThreadMeta(entry.contactId);
+      const settings: AutoRespondSettings = meta?.autoRespondSettings || {} as any;
+      const contactName = meta?.alias || entry.contactId.replace(/^[a-z]+:/, '').slice(0, 10);
+
       const result = await generateAutoResponse(
         messages.map(m => ({ direction: m.direction, body: m.body, timestamp: m.timestamp })),
-        contactName,
-        entry.platform,
+        contactName, entry.platform, settings,
       );
-      await updateAutoRespondStatus(entry._id, 'sending', { generatedResponse: result.response });
-      await sendMessageToTab(entry.platform, entry.contactId, result.response);
+
+      if (result.tier === 'low') {
+        // Auto-send immediately
+        await updateAutoRespondStatus(entry._id, 'sending', {
+          generatedResponse: result.response, tier: result.tier,
+          suggestedPictureTag: result.sendPicture?.tag || '',
+        });
+        await sendMessageToTab(entry.platform, entry.contactId, result.response);
+        if (result.sendPicture?.tag && settings.allowPictures) {
+          await handlePictureSend(result.sendPicture.tag, entry.contactId, entry.platform);
+        }
+        await updateAutoRespondStatus(entry._id, 'sent');
+        console.log(`${LOG} Auto-sent (low tier): "${result.response.slice(0, 40)}..."`);
+      } else {
+        // Queue as draft for approval
+        await updateAutoRespondStatus(entry._id, 'draft', {
+          generatedResponse: result.response, tier: result.tier,
+          suggestedPictureTag: result.sendPicture?.tag || '',
+        });
+        // Notify user
+        chrome.notifications.create(`draft-${entry._id}`, {
+          type: 'basic', iconUrl: 'icons/icon-128.png',
+          title: result.tier === 'high' ? 'Review required' : 'Draft response ready',
+          message: `${contactName}: "${result.response.slice(0, 100)}"`,
+          requireInteraction: result.tier === 'high',
+        });
+        try { chrome.runtime.sendMessage({ type: 'DRAFTS_UPDATED' }); } catch {}
+        console.log(`${LOG} Draft created (${result.tier} tier): "${result.response.slice(0, 40)}..."`);
+      }
+    } catch (err) {
+      console.error(`${LOG} Auto-respond failed:`, err);
+      await updateAutoRespondStatus(entry._id, 'failed', { error: (err as Error).message });
+    }
+  }
+
+  // Process approved drafts
+  const approved = await getApprovedAutoResponds();
+  for (const entry of approved) {
+    try {
+      await updateAutoRespondStatus(entry._id, 'sending');
+      await sendMessageToTab(entry.platform, entry.contactId, entry.generatedResponse);
+      if (entry.suggestedPictureTag) {
+        const meta = await getThreadMeta(entry.contactId);
+        if (meta?.autoRespondSettings?.allowPictures) {
+          await handlePictureSend(entry.suggestedPictureTag, entry.contactId, entry.platform);
+        }
+      }
       await updateAutoRespondStatus(entry._id, 'sent');
     } catch (err) {
-      console.error(`${LOG} Auto-respond failed for ${entry.contactId}:`, err);
       await updateAutoRespondStatus(entry._id, 'failed', { error: (err as Error).message });
     }
   }
 }
 
-async function processReminders(): Promise<void> {
-  const reminders = await getReminders({ upcoming: true });
-  const now = Date.now();
-  const approachMs = 20 * 60_000; // 20 min before
+async function handlePictureSend(tag: string, contactId: string, platform: string): Promise<void> {
+  const pic = await getPictureByTag(tag);
+  if (!pic) { console.log(`${LOG} No picture found for tag: ${tag}`); return; }
+  await incrementPictureStat(pic._id, 'sentCount');
+  console.log(`${LOG} Picture sent: ${pic.label || pic.tag} (sent: ${pic.sentCount + 1})`);
+  // TODO: actual picture sending via platform API/DOM — for now just tracks the stat
+}
 
-  for (const r of reminders) {
-    const dueMs = new Date(r.dueAt).getTime();
-    if (!r.notifiedApproach && (dueMs - now) <= approachMs && (dueMs - now) > 0) {
-      chrome.notifications.create(`reminder-approach-${r._id}`, {
-        type: 'basic',
-        iconUrl: 'icons/icon-128.png',
-        title: 'Reminder approaching',
-        message: `${r.note} — in ${Math.round((dueMs - now) / 60_000)} min`,
-      });
-      await markReminderNotified(r._id, 'approach');
-    }
-    if (!r.notifiedDue && dueMs <= now) {
-      chrome.notifications.create(`reminder-due-${r._id}`, {
-        type: 'basic',
-        iconUrl: 'icons/icon-128.png',
-        title: 'Reminder',
-        message: r.note,
-      });
-      await markReminderNotified(r._id, 'due');
+// ── Block rules ─────────────────────────────────────────────────────────────
+
+async function runBlockRules(newMessages: UnifiedMessage[]): Promise<void> {
+  const rules = await getAllBlockRules();
+  if (!rules.length) return;
+
+  const contactIds = new Set(newMessages.filter(m => m.direction === 'in').map(m => m.contactId));
+  for (const contactId of contactIds) {
+    const messages = await getMessagesByContact(contactId, { limit: 50 });
+    const meta = await getThreadMeta(contactId);
+    const actions = evaluateRules(rules, messages, meta);
+    for (const { rule, action } of actions) {
+      console.log(`${LOG} Block rule "${rule.name}" triggered for ${contactId} → ${action}`);
+      await executeAction(contactId, newMessages[0].platform, action, rule._id);
     }
   }
 }
 
-// ── Badge + alarms ──────────────────────────────────────────────────────────
+// ── Navigation + messaging ──────────────────────────────────────────────────
+
+async function navigateToConversation(platform: string, contactId: string): Promise<void> {
+  const urlFn = PLATFORM_URLS[platform]; if (!urlFn) return;
+  const url = urlFn(contactId);
+  const tabs = await chrome.tabs.query({});
+  const host = new URL(url).hostname;
+  const tab = tabs.find(t => { try { return t.url && new URL(t.url).hostname === host; } catch { return false; } });
+  if (tab?.id) { await chrome.tabs.update(tab.id, { url, active: true }); if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true }); }
+  else await chrome.tabs.create({ url });
+}
+
+async function sendMessageToTab(platform: string, contactId: string, text: string): Promise<void> {
+  console.log(`${LOG} Sending to ${contactId}: "${text.slice(0, 50)}..."`);
+  const urlFn = PLATFORM_URLS[platform]; if (!urlFn) return;
+  const url = urlFn(contactId);
+  const tabs = await chrome.tabs.query({});
+  const host = new URL(url).hostname;
+  const tab = tabs.find(t => { try { return t.url && new URL(t.url).hostname === host; } catch { return false; } });
+  const targetId = tab?.id ? (await chrome.tabs.update(tab.id, { url, active: true }), tab.id) : (await chrome.tabs.create({ url })).id;
+  if (targetId) {
+    setTimeout(() => {
+      chrome.tabs.sendMessage(targetId, { type: 'SEND_AUTO_RESPONSE', text, contactId }).catch(() => {});
+    }, tab?.id ? 3000 : 5000);
+  }
+}
+
+// ── Alarms + reminders ──────────────────────────────────────────────────────
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'badge-refresh') await updateBadgeCount().catch(() => {});
+  if (alarm.name === 'auto-respond-check') await processAutoResponds().catch(e => console.error(`${LOG} AR error:`, e));
+  if (alarm.name === 'reminder-check') await processReminders().catch(e => console.error(`${LOG} Reminder error:`, e));
+  if (alarm.name === 'block-rule-check') {
+    // Periodic block rule evaluation across all active threads
+    try {
+      const rules = await getAllBlockRules();
+      if (!rules.length) return;
+      const summaries = await getThreadSummaries({});
+      for (const s of summaries) {
+        const messages = await getMessagesByContact(s.contactId, { limit: 50 });
+        const meta = await getThreadMeta(s.contactId);
+        const actions = evaluateRules(rules, messages, meta);
+        for (const { rule, action } of actions) {
+          console.log(`${LOG} Periodic block rule "${rule.name}" → ${action} on ${s.contactId}`);
+          await executeAction(s.contactId, s.platform, action, rule._id);
+        }
+      }
+    } catch {}
+  }
+});
+
+async function processReminders(): Promise<void> {
+  const reminders = await getReminders({ upcoming: true });
+  const now = Date.now();
+  for (const r of reminders) {
+    const due = new Date(r.dueAt).getTime();
+    if (!r.notifiedApproach && (due - now) <= 20 * 60_000 && (due - now) > 0) {
+      chrome.notifications.create(`rem-a-${r._id}`, { type: 'basic', iconUrl: 'icons/icon-128.png', title: 'Reminder approaching', message: `${r.note} — ${Math.round((due - now) / 60_000)} min` });
+      await markReminderNotified(r._id, 'approach');
+    }
+    if (!r.notifiedDue && due <= now) {
+      chrome.notifications.create(`rem-d-${r._id}`, { type: 'basic', iconUrl: 'icons/icon-128.png', title: 'Reminder', message: r.note });
+      await markReminderNotified(r._id, 'due');
+    }
+  }
+}
 
 async function updateBadgeCount(): Promise<void> {
   try {
@@ -268,6 +304,6 @@ async function updateBadgeCount(): Promise<void> {
 
 updateBadgeCount().catch(() => {});
 chrome.alarms.create('badge-refresh', { periodInMinutes: 1 });
-chrome.alarms.create('reminder-check', { periodInMinutes: 0.25 }); // every 15 seconds
-
+chrome.alarms.create('reminder-check', { periodInMinutes: 0.25 });
+chrome.alarms.create('block-rule-check', { periodInMinutes: 5 });
 console.log(`${LOG} Service worker ready`);

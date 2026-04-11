@@ -4,6 +4,7 @@
 
 import type { Platform } from '@aggregaytor/adapter-core';
 import type { ThreadMetaDoc } from './types.js';
+import { DEFAULT_AUTO_RESPOND_SETTINGS } from './types.js';
 import { getDB } from './db.js';
 
 function metaId(contactId: string): string {
@@ -21,6 +22,7 @@ const DEFAULTS: Omit<ThreadMetaDoc, '_id' | '_rev' | 'contactId' | 'platform' | 
   notes: '',
   deletedChatCount: 0,
   autoRespondEnabled: false,
+  autoRespondSettings: { ...DEFAULT_AUTO_RESPOND_SETTINGS },
 };
 
 export async function getThreadMeta(

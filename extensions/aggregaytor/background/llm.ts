@@ -262,19 +262,54 @@ export async function generateSuggestions(
   }
 }
 
-// ── Auto-respond ────────────────────────────────────────────────────────────
+// ── Auto-respond with escalation tiers ──────────────────────────────────────
 
-function buildAutoRespondPrompt(contactName: string, platform: string): string {
-  return `You are composing a response in a dating/hookup chat on ${platform}. You ARE the user — write a single response, not options or suggestions.
+export interface AutoRespondSettings {
+  aggressiveness?: 'chill' | 'normal' | 'eager';
+  preferredTime?: string;
+  preferredPlace?: string;
+  timeFlexibility?: 'firm' | 'flexible' | 'open';
+  placeFlexibility?: 'firm' | 'flexible' | 'open';
+  allowPictures?: boolean;
+  pictureTagsAllowed?: string[];
+}
 
-Based on the conversation below, write one natural, casual response as the user.
-Match the user's tone and style from their previous messages ("You:" lines).
+const AGGRESSIVENESS_PROMPTS: Record<string, string> = {
+  chill: 'Be laid-back and casual. Do not push to meet up or suggest times/places. Let them lead the conversation. Keep it light.',
+  normal: 'Be direct but not pushy. Express interest naturally. If the conversation is going well, you can mention wanting to meet but do not push hard.',
+  eager: 'Be enthusiastic and proactive. If the conversation is flowing well, suggest meeting up. Propose times and show clear interest.',
+};
+
+function buildAutoRespondPrompt(contactName: string, platform: string, settings?: AutoRespondSettings): string {
+  const agg = AGGRESSIVENESS_PROMPTS[settings?.aggressiveness || 'normal'];
+  const timeStr = settings?.preferredTime ? `\nUser's preferred time: "${settings.preferredTime}" (flexibility: ${settings?.timeFlexibility || 'flexible'})` : '';
+  const placeStr = settings?.preferredPlace ? `\nUser's preferred place: "${settings.preferredPlace}" (flexibility: ${settings?.placeFlexibility || 'flexible'})` : '';
+  const picStr = settings?.allowPictures ? `\nUser allows sending pictures tagged: ${(settings.pictureTagsAllowed || []).join(', ') || 'any'}. If appropriate, include "sendPicture" in your response.` : '';
+
+  return `You are composing a response in a dating/hookup chat on ${platform}. You ARE the user — write a single response, not options.
+
+TONE: ${agg}
+${timeStr}${placeStr}${picStr}
+
+Match the user's tone and style from their previous "You:" messages.
 Keep it short (1-2 sentences). Be direct and confident.
-If they asked a question, answer it naturally.
-If they sent a greeting, respond warmly.
-If the conversation is going well, keep the momentum.
 
-Return ONLY the response text, nothing else. No quotes, no JSON, just the message.`;
+CRITICAL: You MUST return a JSON object with these fields:
+{
+  "response": "your message text here",
+  "tier": "low" | "medium" | "high",
+  "reason": "why you chose this tier",
+  "sendPicture": null or { "tag": "face" | "body" | "other" }
+}
+
+TIER CLASSIFICATION:
+- "low": Safe to auto-send. Greetings, small talk, compliments, "wbu?", casual chat. NO logistics.
+- "medium": Needs user review. Suggesting a TIME ("tonight?", "8pm?"), mentioning a general AREA ("I'm near uptown"), asking about availability.
+- "high": NEVER auto-send. Specific ADDRESSES, "come over", "on my way", phone numbers, exact meetup locations, confirming plans.
+
+When in doubt, classify as "medium". Any response involving time, place, or meeting plans is AT LEAST "medium".
+
+Return ONLY the JSON object, nothing else.`;
 }
 
 function buildGreetingPrompt(platform: string): string {
@@ -282,11 +317,14 @@ function buildGreetingPrompt(platform: string): string {
   const timeOfDay = hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : hour < 21 ? 'evening' : 'night';
   return `Write a single casual, friendly greeting for a ${timeOfDay} chat on ${platform}.
 Be natural and confident, not desperate or overly eager. One short sentence.
-Return ONLY the greeting text, nothing else.`;
+Return ONLY a JSON object: { "response": "your greeting", "tier": "low", "reason": "greeting" }`;
 }
 
 export interface AutoRespondResult {
   response: string;
+  tier: 'low' | 'medium' | 'high';
+  reason: string;
+  sendPicture: { tag: string } | null;
   provider: LLMProvider;
   error?: string;
 }
@@ -295,17 +333,18 @@ export async function generateAutoResponse(
   messages: Message[],
   contactName: string,
   platform: string,
+  settings?: AutoRespondSettings,
 ): Promise<AutoRespondResult> {
   const config = await getLLMConfig();
-  const systemPrompt = buildAutoRespondPrompt(contactName, platform);
+  const systemPrompt = buildAutoRespondPrompt(contactName, platform, settings);
   const conversation = buildConversationContext(messages, contactName);
-  const userPrompt = `Here is the conversation:\n\n${conversation}\n\nWrite your response:`;
+  const userPrompt = `Here is the conversation:\n\n${conversation}\n\nGenerate your JSON response:`;
 
-  console.log(`${LOG} Auto-responding via ${config.provider} (${messages.length} messages)`);
+  console.log(`${LOG} Auto-responding via ${config.provider} (${messages.length} messages, ${settings?.aggressiveness || 'normal'})`);
 
   if (config.provider === 'local' || !config.apiKey) {
     const suggestions = localSuggestions(messages);
-    return { response: suggestions[0] || 'Hey', provider: 'local' };
+    return { response: suggestions[0] || 'Hey', tier: 'low', reason: 'local fallback', sendPicture: null, provider: 'local' };
   }
 
   try {
@@ -362,13 +401,32 @@ export async function generateAutoResponse(
         text = localSuggestions(messages)[0] || 'Hey';
     }
 
-    // Clean up: remove quotes, JSON wrapping
-    text = text.replace(/^["']|["']$/g, '').trim();
-    console.log(`${LOG} Auto-response generated: "${text.slice(0, 50)}..."`);
-    return { response: text, provider: config.provider };
+    // Parse the JSON response to extract tier + picture suggestion
+    const parsed = parseAutoRespondJson(text);
+    console.log(`${LOG} Auto-response: tier=${parsed.tier}, response="${parsed.response.slice(0, 50)}..."`);
+    return { ...parsed, provider: config.provider };
   } catch (err) {
     console.error(`${LOG} Auto-respond failed:`, err);
-    return { response: localSuggestions(messages)[0] || 'Hey', provider: 'local', error: (err as Error).message };
+    return { response: localSuggestions(messages)[0] || 'Hey', tier: 'low', reason: 'fallback', sendPicture: null, provider: 'local', error: (err as Error).message };
+  }
+}
+
+function parseAutoRespondJson(text: string): { response: string; tier: 'low' | 'medium' | 'high'; reason: string; sendPicture: { tag: string } | null } {
+  try {
+    const parsed = JSON.parse(text);
+    return {
+      response: String(parsed.response || text).replace(/^["']|["']$/g, '').trim(),
+      tier: ['low', 'medium', 'high'].includes(parsed.tier) ? parsed.tier : 'medium',
+      reason: String(parsed.reason || ''),
+      sendPicture: parsed.sendPicture && parsed.sendPicture.tag ? parsed.sendPicture : null,
+    };
+  } catch {
+    // Not JSON — treat as plain text response, classify conservatively
+    const lower = text.toLowerCase();
+    let tier: 'low' | 'medium' | 'high' = 'low';
+    if (/come over|my place|your place|address|on my way|omw|meet at|meet me/i.test(lower)) tier = 'high';
+    else if (/tonight|tomorrow|\d+\s*(am|pm)|when.*free|what time|this week/i.test(lower)) tier = 'medium';
+    return { response: text.replace(/^["']|["']$/g, '').trim(), tier, reason: 'auto-classified', sendPicture: null };
   }
 }
 
@@ -385,7 +443,7 @@ export async function generateGreeting(
       : hour < 17
       ? ['Hey, how\'s your afternoon?', 'Hey there']
       : ['Hey, how\'s your evening going?', 'What\'s up tonight?'];
-    return { response: greetings[Math.floor(Math.random() * greetings.length)], provider: 'local' };
+    return { response: greetings[Math.floor(Math.random() * greetings.length)], tier: 'low', reason: 'greeting', sendPicture: null, provider: 'local' };
   }
 
   try {
@@ -397,11 +455,11 @@ export async function generateGreeting(
     );
     // Override with greeting prompt if we got a generic response
     if (result.response.length < 3) {
-      return { response: 'Hey, how\'s it going?', provider: 'local' };
+      return { response: 'Hey, how\'s it going?', tier: 'low', reason: 'greeting', sendPicture: null, provider: 'local' };
     }
     return result;
   } catch {
-    return { response: 'Hey, how\'s it going?', provider: 'local' };
+    return { response: 'Hey, how\'s it going?', tier: 'low', reason: 'greeting fallback', sendPicture: null, provider: 'local' };
   }
 }
 

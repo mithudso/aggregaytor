@@ -63,6 +63,13 @@
     </div>
   </div>
 
+  <!-- Draft review bar -->
+  <div id="draft-bar" class="draft-bar" style="display:none" onclick="toggleDraftPanel()">
+    <span>Drafts pending review</span>
+    <span id="draft-count" class="unread-badge">0</span>
+  </div>
+  <div id="draft-panel" class="draft-panel" style="display:none"></div>
+
   <!-- Inbox thread list -->
   <div id="thread-list" class="thread-list">
     <div class="empty-state"><h2>No messages yet</h2><p>Visit a connected site to start capturing messages.</p></div>
