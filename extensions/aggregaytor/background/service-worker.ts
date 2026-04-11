@@ -337,29 +337,36 @@ async function handleIncomingMessages(messages: UnifiedMessage[], platform: Plat
     // Run block rules
     await runBlockRules(messages).catch(e => console.warn(`${LOG} Block rules error:`, e));
 
-    // Queue dossier auto-extraction (debounced — only run every 5 min per contact)
+    // Queue dossier auto-extraction — waits for 30s of inactivity before starting
     const contactIds = new Set(messages.filter(m => m.direction === 'in').map(m => m.contactId));
     for (const cid of contactIds) {
       dossierExtractionQueue.add(`${cid}:${messages[0]?.platform || platform}`);
     }
-    if (dossierExtractionQueue.size > 0 && !dossierExtractionTimer) {
-      dossierExtractionTimer = setTimeout(processDossierExtractions, 5 * 60_000); // 5 min debounce (was 30s)
+    // Reset the idle timer on every new message — only starts after 30s of silence
+    if (dossierExtractionQueue.size > 0) {
+      if (dossierExtractionTimer) clearTimeout(dossierExtractionTimer);
+      dossierExtractionTimer = setTimeout(processDossierExtractions, 30_000); // 30s idle debounce
     }
   }
 
   return { ok: true, ...result };
 }
 
-// Debounced dossier extraction
+// Debounced dossier extraction — serial processing, 30s idle trigger
 const dossierExtractionQueue = new Set<string>();
 let dossierExtractionTimer: ReturnType<typeof setTimeout> | null = null;
+let dossierProcessing = false;
 
 async function processDossierExtractions(): Promise<void> {
   dossierExtractionTimer = null;
-  const queue = [...dossierExtractionQueue];
-  dossierExtractionQueue.clear();
+  if (dossierProcessing) return; // already running, will pick up queued items
+  dossierProcessing = true;
 
-  for (const entry of queue) {
+  try {
+    // Process one contact at a time (serial, not parallel)
+    while (dossierExtractionQueue.size > 0) {
+      const entry = dossierExtractionQueue.values().next().value;
+      dossierExtractionQueue.delete(entry);
     const [contactId, platform] = [entry.substring(0, entry.lastIndexOf(':')), entry.substring(entry.lastIndexOf(':') + 1)];
     try {
       const allMessages = await getMessagesByContact(contactId, { limit: 50 });
@@ -405,6 +412,14 @@ async function processDossierExtractions(): Promise<void> {
     } catch (err) {
       console.warn(`${LOG} Dossier extraction failed for ${contactId}:`, err);
     }
+
+      // Small delay between contacts to avoid API spam
+      if (dossierExtractionQueue.size > 0) {
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    } // end while
+  } finally {
+    dossierProcessing = false;
   }
 }
 
