@@ -195,7 +195,6 @@ document.getElementById('add-rule').addEventListener('click', async () => {
 });
 
 // toggleRule and deleteRule are now handled via data attributes above
-};
 
 // ── Open panel ──────────────────────────────────────────────────────────────
 
