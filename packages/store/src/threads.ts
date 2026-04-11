@@ -47,6 +47,24 @@ export async function getThreadSummaries(
     });
   }
 
+  // Include pinned contacts that have no messages yet (e.g., Global Chat)
+  const pinnedIds = ['sniffies:global-chat'];
+  for (const pid of pinnedIds) {
+    if (!contactMap.has(pid)) {
+      const contact = await getContact(pid, store);
+      if (contact) {
+        summaries.push({
+          threadId: pid,
+          contactId: pid,
+          contact,
+          lastMessage: { _id: '', docType: 'message', platform: contact.platform, threadId: pid, contactId: pid, direction: 'in', body: 'Tap to open global chat', timestamp: contact.lastSeen || new Date().toISOString(), read: true, metadata: {}, contentHash: '', createdAt: '', updatedAt: '' } as MessageDoc,
+          unreadCount: 0,
+          platform: contact.platform,
+        });
+      }
+    }
+  }
+
   return summaries
     .sort((a, b) =>
       new Date(b.lastMessage.timestamp).getTime() - new Date(a.lastMessage.timestamp).getTime(),

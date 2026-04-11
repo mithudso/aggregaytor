@@ -634,6 +634,18 @@ updateBadgeCount().catch(() => {});
 chrome.alarms.create('badge-refresh', { periodInMinutes: 1 });
 chrome.alarms.create('reminder-check', { periodInMinutes: 0.25 });
 
+// Ensure Global Chat contact always exists (runs on every SW startup)
+upsertContact({
+  id: 'sniffies:global-chat',
+  platform: 'sniffies',
+  platformUserId: 'global-chat',
+  displayName: '🌐 Global Chat',
+  profileUrl: 'https://sniffies.com/global-chat',
+  avatarUrl: '',
+  lastSeen: new Date().toISOString(),
+  metadata: { isGlobalChat: true },
+}).catch(() => {});
+
 // Open side panel when extension icon is clicked
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 
