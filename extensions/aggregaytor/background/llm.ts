@@ -528,11 +528,136 @@ Example output: ["Hey, sounds good! When works for you?", "I'm free tonight", "W
   return prompt;
 }
 
-function buildConversationContext(messages: Message[], contactName: string): string {
-  const recent = messages.slice(-30);
-  return recent.map(m =>
-    `${m.direction === 'out' ? 'You' : contactName}: ${m.body}`
-  ).join('\n');
+// ── Optimization layer ──────────────────────────────────────────────────────
+
+// 1. Response cache — cache LLM responses by prompt hash
+const responseCache = new Map<string, { response: string; timestamp: number; tokens: number }>();
+const CACHE_TTL_MS = 5 * 60_000; // 5 minutes
+const MAX_CACHE_SIZE = 100;
+
+function getCacheKey(systemPrompt: string, userPrompt: string, feature: string): string {
+  // Simple hash — same prompt = same response (within TTL)
+  let hash = 0;
+  const str = `${feature}:${systemPrompt.slice(0, 200)}:${userPrompt.slice(-500)}`;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
+  }
+  return `c_${hash.toString(36)}`;
+}
+
+function getCachedResponse(key: string): string | null {
+  const entry = responseCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
+    responseCache.delete(key);
+    return null;
+  }
+  console.log(`${LOG} Cache hit (saved ${entry.tokens} tokens)`);
+  return entry.response;
+}
+
+function setCachedResponse(key: string, response: string, estimatedTokens: number): void {
+  if (responseCache.size >= MAX_CACHE_SIZE) {
+    // Evict oldest
+    const oldest = [...responseCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp)[0];
+    if (oldest) responseCache.delete(oldest[0]);
+  }
+  responseCache.set(key, { response, timestamp: Date.now(), tokens: estimatedTokens });
+}
+
+// 2. System prompt cache — don't rebuild when personality hasn't changed
+let cachedSystemPrompt = '';
+let systemPromptHash = '';
+
+async function getCachedSystemPrompt(contactName: string, platform: string): Promise<string> {
+  const personality = await getPersonalitySettings();
+  const hash = `${personality.preset}:${personality.customInstructions?.slice(0, 50)}:${personality.styleGuide?.slice(0, 50)}`;
+  if (hash !== systemPromptHash) {
+    cachedSystemPrompt = '';
+    systemPromptHash = hash;
+  }
+  if (!cachedSystemPrompt) {
+    cachedSystemPrompt = await buildSystemPrompt(contactName, platform);
+  }
+  // Replace contact name (the only variable part)
+  return cachedSystemPrompt.replace(/chatting with "[^"]*"/, `chatting with "${contactName}"`);
+}
+
+// 3. Conversation windowing — use fewer messages for simpler tasks
+const CONTEXT_WINDOWS: Record<string, number> = {
+  suggestions: 10,      // was 30 — suggestions only need recent context
+  'auto-respond': 15,   // was 30 — auto-respond needs slightly more
+  dossier: 25,          // was 50 — dossier still needs depth
+  summary: 20,          // was 30
+  nickname: 5,          // minimal context needed
+  greeting: 0,          // no context needed
+};
+
+function buildConversationContext(messages: Message[], contactName: string, feature = 'suggestions'): string {
+  const windowSize = CONTEXT_WINDOWS[feature] || 15;
+  const recent = messages.slice(-windowSize);
+
+  // Context compaction: for long messages, truncate to first 100 chars
+  return recent.map(m => {
+    const body = m.body.length > 100 ? m.body.slice(0, 100) + '...' : m.body;
+    return `${m.direction === 'out' ? 'You' : contactName}: ${body}`;
+  }).join('\n');
+}
+
+// 4. Incremental dossier extraction — only process new messages
+const lastDossierExtractTimestamp = new Map<string, string>();
+
+function getNewMessagesSinceLastExtraction(contactId: string, messages: Message[]): Message[] {
+  const lastTs = lastDossierExtractTimestamp.get(contactId);
+  if (!lastTs) return messages; // first extraction — use all
+  return messages.filter(m => m.timestamp > lastTs);
+}
+
+function markDossierExtracted(contactId: string, messages: Message[]): void {
+  if (messages.length) {
+    const latest = messages.reduce((a, b) => a.timestamp > b.timestamp ? a : b);
+    lastDossierExtractTimestamp.set(contactId, latest.timestamp);
+  }
+}
+
+// 5. Model routing — use cheapest model for simple tasks
+const TASK_COMPLEXITY: Record<string, 'simple' | 'medium' | 'complex'> = {
+  nickname: 'simple',
+  greeting: 'simple',
+  suggestions: 'medium',
+  'auto-respond': 'medium',
+  dossier: 'medium',
+  summary: 'complex',
+};
+
+// Simple tasks can use the smallest model available
+function getModelForTask(config: LLMConfig, feature: string): string {
+  const complexity = TASK_COMPLEXITY[feature] || 'medium';
+  if (complexity === 'simple') {
+    // Use the cheapest model for the provider
+    switch (config.provider) {
+      case 'openai': return 'gpt-4o-mini';
+      case 'anthropic': return 'claude-haiku-4-5-20251001';
+      case 'gemini': return 'gemini-2.5-flash-lite';
+      case 'groq': return 'llama-3.1-8b-instant';
+      default: return config.model || DEFAULT_MODELS[config.provider] || '';
+    }
+  }
+  return config.model || DEFAULT_MODELS[config.provider] || '';
+}
+
+// 6. Token estimation — rough estimate to track usage
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4); // rough approximation: 4 chars per token
+}
+
+// 7. Stats tracking
+let totalTokensSaved = 0;
+let totalCacheHits = 0;
+let totalApiCalls = 0;
+
+export function getLLMOptimizationStats() {
+  return { totalTokensSaved, totalCacheHits, totalApiCalls, cacheSize: responseCache.size };
 }
 
 // ── Centralized provider call (all LLM requests go through here) ────────────
@@ -548,15 +673,32 @@ async function callProvider(
   feature: string,
   opts?: { temperature?: number; maxTokens?: number; jsonMode?: boolean },
 ): Promise<string> {
+  totalApiCalls++;
+
+  // Check response cache first (skip for high-temperature creative tasks)
   const temp = opts?.temperature ?? 0.9;
+  if (temp < 0.5) { // deterministic tasks can be cached
+    const cacheKey = getCacheKey(systemPrompt, userPrompt, feature);
+    const cached = getCachedResponse(cacheKey);
+    if (cached) {
+      totalCacheHits++;
+      totalTokensSaved += estimateTokens(systemPrompt + userPrompt);
+      return cached;
+    }
+  }
+
+  // Use cheapest model for simple tasks
+  const routedModel = getModelForTask(config, feature);
+  const routedConfig = { ...config, model: routedModel };
+
   const maxTokens = opts?.maxTokens ?? 256;
 
   let url: string;
   let init: RequestInit;
 
-  switch (config.provider) {
+  switch (routedConfig.provider) {
     case 'gemini': {
-      const model = config.model || DEFAULT_MODELS.gemini;
+      const model = routedConfig.model || DEFAULT_MODELS.gemini;
       url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.apiKey}`;
       init = {
         method: 'POST',
@@ -670,17 +812,24 @@ async function callProvider(
   }
 
   // Record this successful request for rate tracking
-  recordProviderRequest(config.provider);
+  recordProviderRequest(routedConfig.provider);
 
   const data = await res.json();
-  switch (config.provider) {
-    case 'gemini': return data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    case 'anthropic': return data?.content?.[0]?.text || '';
-    // OpenAI-compatible: openai, groq, perplexity, mistral, copilot
+  let result = '';
+  switch (routedConfig.provider) {
+    case 'gemini': result = data?.candidates?.[0]?.content?.parts?.[0]?.text || ''; break;
+    case 'anthropic': result = data?.content?.[0]?.text || ''; break;
     case 'openai': case 'groq': case 'perplexity': case 'mistral': case 'copilot':
-      return data?.choices?.[0]?.message?.content || '';
-    default: return '';
+      result = data?.choices?.[0]?.message?.content || ''; break;
   }
+
+  // Cache deterministic responses
+  if (temp < 0.5 && result) {
+    const cacheKey = getCacheKey(systemPrompt, userPrompt, feature);
+    setCachedResponse(cacheKey, result, estimateTokens(systemPrompt + userPrompt));
+  }
+
+  return result;
 }
 
 // Legacy wrappers for backward compatibility
@@ -754,7 +903,7 @@ export async function generateSuggestions(
 ): Promise<SuggestionResult> {
   const config = await getBestProvider();
   const systemPrompt = await buildSystemPrompt(contactName, platform);
-  const conversation = buildConversationContext(messages, contactName);
+  const conversation = buildConversationContext(messages, contactName, "suggestions");
 
   console.log(`${LOG} Generating suggestions via ${config.provider} (${messages.length} messages)`);
 
@@ -873,7 +1022,7 @@ export async function generateAutoResponse(
 ): Promise<AutoRespondResult> {
   const config = await getBestProvider();
   const systemPrompt = await buildAutoRespondPrompt(contactName, platform, settings);
-  const conversation = buildConversationContext(messages, contactName);
+  const conversation = buildConversationContext(messages, contactName, "auto-respond");
   const userPrompt = `Here is the conversation:\n\n${conversation}\n\nGenerate your JSON response:`;
 
   console.log(`${LOG} Auto-responding via ${config.provider} (${messages.length} messages, ${settings?.aggressiveness || 'normal'})`);
@@ -1062,7 +1211,7 @@ Return ONLY a JSON object with the fields you found new info for. Omit fields wi
   }
 }
 
-function localDossierExtraction(messages: Message[]): Record<string, string> {
+export function localDossierExtraction(messages: Message[]): Record<string, string> {
   const result: Record<string, string> = {};
   const inbound = messages.filter(m => m.direction === 'in').map(m => m.body.toLowerCase());
   const allText = inbound.join(' ');
@@ -1105,7 +1254,7 @@ export async function generateConversationSummary(
     return localSummary(messages);
   }
 
-  const conversation = buildConversationContext(messages, contactName);
+  const conversation = buildConversationContext(messages, contactName, "summary");
   const prompt = `Analyze this ${platform} conversation and return a JSON object:
 {
   "text": "2-3 sentence summary of the conversation state, tone, and what they want",

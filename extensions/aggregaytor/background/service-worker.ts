@@ -17,7 +17,7 @@ import {
   getContact,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
-import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS } from './llm.js';
+import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS } from './llm.js';
 import { getDossier, upsertDossier, setAutoExtractedField } from '@aggregaytor/store';
 import { handleDebugCommand } from './debug-bridge.js';
 
@@ -153,7 +153,7 @@ async function handleMessage(msg: any): Promise<any> {
     }
     case 'GET_LLM_RATE_SETTINGS': return { ok: true, settings: await getLLMRateSettings() };
     case 'SAVE_LLM_RATE_SETTINGS': { await saveLLMRateSettings(msg.settings); return { ok: true }; }
-    case 'GET_LLM_QUEUE_STATUS': return { ok: true, status: getLLMQueueStatus() };
+    case 'GET_LLM_QUEUE_STATUS': return { ok: true, status: getLLMQueueStatus(), optimization: getLLMOptimizationStats() };
 
     // Session summary
     case 'GENERATE_SESSION_SUMMARY': {
@@ -343,7 +343,7 @@ async function handleIncomingMessages(messages: UnifiedMessage[], platform: Plat
       dossierExtractionQueue.add(`${cid}:${messages[0]?.platform || platform}`);
     }
     if (dossierExtractionQueue.size > 0 && !dossierExtractionTimer) {
-      dossierExtractionTimer = setTimeout(processDossierExtractions, 30_000); // 30s debounce
+      dossierExtractionTimer = setTimeout(processDossierExtractions, 5 * 60_000); // 5 min debounce (was 30s)
     }
   }
 
@@ -362,19 +362,45 @@ async function processDossierExtractions(): Promise<void> {
   for (const entry of queue) {
     const [contactId, platform] = [entry.substring(0, entry.lastIndexOf(':')), entry.substring(entry.lastIndexOf(':') + 1)];
     try {
-      const messages = await getMessagesByContact(contactId, { limit: 50 });
-      if (messages.length < 3) continue; // need at least a few messages
+      const allMessages = await getMessagesByContact(contactId, { limit: 50 });
+      if (allMessages.length < 3) continue;
+
+      // Incremental: only use NEW inbound messages since last extraction
+      const inbound = allMessages.filter(m => m.direction === 'in');
       const existing = await getDossier(contactId) || {};
-      const contactName = contactId.replace(/^[a-z]+:/, '').slice(0, 10);
-      const extracted = await extractDossierFields(
-        messages.map(m => ({ direction: m.direction, body: m.body, timestamp: m.timestamp })),
-        contactName, existing,
-      );
-      for (const [field, value] of Object.entries(extracted)) {
-        await setAutoExtractedField(contactId, platform as Platform, field, value, 'auto-extraction');
+      const lastExtract = (existing as any).updatedAt || '';
+      const newMessages = lastExtract
+        ? inbound.filter(m => m.timestamp > lastExtract)
+        : inbound;
+
+      if (newMessages.length < 3) continue; // need at least 3 new messages to justify LLM call
+
+      // Use local extraction first (free, no LLM), then LLM for remaining
+      const { extractDossierFields: llmExtract } = await import('./llm.js');
+      const { localDossierExtraction } = await import('./llm.js');
+
+      // Step 1: Local regex extraction (always, no cost)
+      const localResult = localDossierExtraction(newMessages.map(m => ({ direction: m.direction, body: m.body, timestamp: m.timestamp })));
+      for (const [field, value] of Object.entries(localResult)) {
+        await setAutoExtractedField(contactId, platform as Platform, field, value, 'local-pattern');
       }
-      if (Object.keys(extracted).length) {
-        console.log(`${LOG} Auto-extracted ${Object.keys(extracted).length} dossier fields for ${contactId}`);
+
+      // Step 2: LLM extraction only if enough new content and LLM enabled
+      const rateSettings = await getLLMRateSettings();
+      if (rateSettings.enableDossierExtract && newMessages.length >= 5) {
+        const contactName = contactId.replace(/^[a-z]+:/, '').slice(0, 10);
+        const extracted = await llmExtract(
+          newMessages.map(m => ({ direction: m.direction, body: m.body, timestamp: m.timestamp })),
+          contactName, existing,
+        );
+        for (const [field, value] of Object.entries(extracted)) {
+          await setAutoExtractedField(contactId, platform as Platform, field, value, 'llm-extraction');
+        }
+        if (Object.keys(extracted).length) {
+          console.log(`${LOG} Auto-extracted ${Object.keys(extracted).length} dossier fields for ${contactId} (${Object.keys(localResult).length} local + ${Object.keys(extracted).length} LLM)`);
+        }
+      } else if (Object.keys(localResult).length) {
+        console.log(`${LOG} Local-extracted ${Object.keys(localResult).length} dossier fields for ${contactId}`);
       }
     } catch (err) {
       console.warn(`${LOG} Dossier extraction failed for ${contactId}:`, err);
