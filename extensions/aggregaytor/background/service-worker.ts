@@ -696,7 +696,7 @@ const ALL_SITES = [
   'https://sniffies.com',
   'https://web.grindr.com',
   'https://doublelist.com',
-  'https://www.adam4adam.com',
+  'https://www.adam4adam.com/mailbox',
   'https://mail.google.com',
 ];
 
