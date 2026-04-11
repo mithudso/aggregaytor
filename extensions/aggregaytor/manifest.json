@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Aggregaytor",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Unified message inbox across platforms",
   "permissions": [
     "storage",
@@ -9,7 +9,8 @@
     "sidePanel",
     "tabs",
     "alarms",
-    "notifications"
+    "notifications",
+    "identity"
   ],
   "host_permissions": [
     "https://sniffies.com/*",

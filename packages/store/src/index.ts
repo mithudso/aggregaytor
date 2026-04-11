@@ -6,6 +6,8 @@ export type {
   MessageDoc, ContactDoc, ThreadSummary, ThreadMetaDoc, ReminderDoc,
   AutoRespondDoc, AutoRespondTier, AutoRespondStatus, AutoRespondSettings,
   PictureDoc, BlockRuleDoc, BlockRuleCondition,
+  PreferenceFeedbackDoc, PreferenceModelDoc, ProfileFeatures,
+  SentimentScore, CalendarEventDoc, AutoRespondSession, TimeSlot,
 } from './types.js';
 export { DEFAULT_AUTO_RESPOND_SETTINGS } from './types.js';
 export { getDB, closeDB, destroyDB, createDB } from './db.js';
@@ -17,5 +19,9 @@ export { createReminder, getReminders, markReminderNotified, deleteReminder } fr
 export { queueAutoRespond, getPendingAutoResponds, getDraftAutoResponds, getApprovedAutoResponds, updateAutoRespondStatus, randomDelay } from './auto-respond.js';
 export { addPicture, getAllPictures, getPicture, getPictureByTag, incrementPictureStat, deletePicture } from './pictures.js';
 export { createBlockRule, getAllBlockRules, updateBlockRule, deleteBlockRule, evaluateRules, executeAction } from './block-rules.js';
+export { getCalendarSettings, saveCalendarSettings, getCalendarToken, saveCalendarToken, getAvailableSlots, createCalendarEvent, authenticateCalendar } from './calendar.js';
+export type { CalendarSettings, CalendarToken } from './calendar.js';
+export { recordFeedback, predictPreference, getModelStats, getAllFeedback, retrainModel, extractFeatures } from './preference-ml.js';
+export { analyzeConversationSentiment, formatSentimentSummary } from './sentiment.js';
 export { startSync, stopSync } from './sync.js';
 export type { SyncConfig } from './sync.js';

@@ -74,6 +74,8 @@ export interface ThreadMetaDoc {
   deletedChatCount: number;
   autoRespondEnabled: boolean;
   autoRespondSettings: AutoRespondSettings;
+  sentiment: SentimentScore | null;
+  preferenceScore: number | null;  // ML prediction: 0-1 likelihood of liking
   createdAt: string;
   updatedAt: string;
 }
@@ -143,6 +145,94 @@ export interface BlockRuleDoc {
   enabled: boolean;
   executedCount: number;
   createdAt: string;
+}
+
+// ── ML Preference Learning ──────────────────────────────────────────────────
+
+export interface PreferenceFeedbackDoc {
+  _id: string;              // 'pref:{contactId}:{timestamp}'
+  _rev?: string;
+  docType: 'preference_feedback';
+  contactId: string;
+  platform: Platform;
+  liked: boolean;           // true = liked, false = disliked/passed
+  features: ProfileFeatures;
+  createdAt: string;
+}
+
+export interface ProfileFeatures {
+  bodyType: string;
+  position: string;
+  age: string;
+  ethnicity: string;
+  height: string;
+  profileTextLength: number;
+  profileTextKeywords: string[];
+  hasPhoto: boolean;
+  photoCount: number;
+  distance: string;
+  conversationLength: number;   // number of messages exchanged
+  responseRate: number;         // their response rate (0-1)
+  [key: string]: unknown;
+}
+
+export interface PreferenceModelDoc {
+  _id: string;              // 'prefmodel:latest'
+  _rev?: string;
+  docType: 'preference_model';
+  featureWeights: Record<string, number>;   // learned weights per feature
+  trainingCount: number;
+  accuracy: number;         // estimated accuracy from cross-validation
+  lastTrainedAt: string;
+  version: number;
+}
+
+// ── Sentiment Analysis ──────────────────────────────────────────────────────
+
+export interface SentimentScore {
+  interest: number;         // 0-1: how interested they seem
+  engagement: number;       // 0-1: how engaged in conversation
+  commitment: number;       // 0-1: likelihood they'll actually meet
+  overall: number;          // 0-1: composite score
+  signals: string[];        // human-readable signal descriptions
+}
+
+// ── Calendar Integration ────────────────────────────────────────────────────
+
+export interface CalendarEventDoc {
+  _id: string;              // 'calevent:{contactId}:{timestamp}'
+  _rev?: string;
+  docType: 'calendar_event';
+  contactId: string;
+  platform: Platform;
+  googleEventId: string;
+  title: string;
+  startTime: string;
+  endTime: string;
+  prepStartTime: string;    // includes prep buffer
+  location: string;
+  notes: string;
+  status: 'tentative' | 'confirmed' | 'cancelled';
+  createdAt: string;
+}
+
+export interface AutoRespondSession {
+  _id: string;              // 'arsession:{timestamp}'
+  _rev?: string;
+  docType: 'ar_session';
+  lookingByDeadline: string; // ISO 8601 deadline
+  preferenceSummary: string; // LLM-generated summary of what user wants
+  confirmedPreferences: boolean;
+  activeContactIds: string[];
+  availableSlots: TimeSlot[];
+  startedAt: string;
+  status: 'setup' | 'active' | 'paused' | 'completed';
+}
+
+export interface TimeSlot {
+  start: string;            // ISO 8601
+  end: string;
+  label: string;            // human-readable: "7:00 PM - 9:00 PM"
 }
 
 export interface ThreadSummary {

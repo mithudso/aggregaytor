@@ -217,9 +217,84 @@ async function openThread(contactId, platform, displayName) {
   // Load messages
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_MESSAGES_BY_CONTACT', contactId, limit: 500 });
-    if (res?.ok) { currentMessages = res.messages || []; renderMessages(currentMessages); }
+    if (res?.ok) { currentMessages = res.messages || []; renderMessages(currentMessages); loadThreadAnalysis(); }
   } catch (err) { console.error('[Panel] Message load error:', err); }
 }
+
+async function loadThreadAnalysis() {
+  if (!currentThread || !currentMessages.length) return;
+
+  // Request sentiment + preference + summary from service worker
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'ANALYZE_THREAD',
+      contactId: currentThread.contactId,
+      messages: currentMessages.slice(-50).map(m => ({
+        direction: m.direction, body: m.body, timestamp: m.timestamp,
+      })),
+      platform: currentThread.platform,
+      contactName: currentThread.displayName || stripPrefix(currentThread.contactId),
+    });
+
+    if (res?.ok) {
+      renderSentiment(res.sentiment);
+      renderPreference(res.preference);
+      renderSummary(res.summary);
+    }
+  } catch (err) { console.warn('[Panel] Analysis error:', err); }
+}
+
+function renderSentiment(s) {
+  if (!s) return;
+  const el = document.getElementById('sentiment-display');
+  const barHtml = (label, value) => {
+    const pct = Math.round(value * 100);
+    const cls = pct > 65 ? 'high' : pct > 35 ? 'medium' : 'low';
+    return `<div class="sentiment-bar">
+      <span class="sentiment-bar-label">${label}</span>
+      <div class="sentiment-bar-track"><div class="sentiment-bar-fill ${cls}" style="width:${pct}%"></div></div>
+      <span style="font-size:10px;color:#9ca3af;min-width:28px;text-align:right">${pct}%</span>
+    </div>`;
+  };
+  el.innerHTML = barHtml('Interest', s.interest) + barHtml('Engaged', s.engagement) +
+    barHtml('Commit', s.commitment) +
+    (s.signals?.length ? `<div class="sentiment-signals">${s.signals.slice(0, 3).join(' | ')}</div>` : '');
+}
+
+function renderPreference(p) {
+  if (!p) return;
+  const el = document.getElementById('preference-display');
+  const pct = Math.round(p.score * 100);
+  const cls = pct > 60 ? 'like' : pct > 40 ? 'neutral' : 'dislike';
+  const label = pct > 60 ? 'Likely match' : pct > 40 ? 'Uncertain' : 'Unlikely match';
+  el.innerHTML = `<span class="pref-score ${cls}">${pct}%</span> ${label}` +
+    (p.confidence < 0.3 ? `<div class="pref-confidence">Low confidence (need more feedback)</div>` : '');
+}
+
+function renderSummary(summary) {
+  if (!summary) return;
+  const el = document.getElementById('convo-summary');
+  el.textContent = summary.text || 'No summary available';
+  const commitEl = document.getElementById('commitments-section');
+  if (summary.commitments?.length) {
+    commitEl.style.display = '';
+    document.getElementById('commitments-display').innerHTML =
+      summary.commitments.map(c => `<div>- ${esc(c)}</div>`).join('');
+  } else {
+    commitEl.style.display = 'none';
+  }
+}
+
+window.recordPref = async function(liked) {
+  if (!currentThread) return;
+  await chrome.runtime.sendMessage({
+    type: 'RECORD_PREFERENCE',
+    contactId: currentThread.contactId,
+    platform: currentThread.platform,
+    liked,
+  });
+  loadThreadAnalysis();
+};
 
 function renderHeaderActions() {
   const container = document.getElementById('header-actions');
@@ -496,6 +571,12 @@ chrome.runtime.onMessage.addListener((message) => {
     loadDrafts();
   }
   if (message.type === 'DRAFTS_UPDATED') loadDrafts();
+  if (message.type === 'COMMITMENT_ALERT') {
+    // Flash the screen and play alert sound
+    document.body.style.animation = 'commitFlash 0.5s ease 3';
+    setTimeout(() => { document.body.style.animation = ''; }, 1600);
+    try { new Audio('data:audio/wav;base64,UklGRlQFAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YTAFAABkAGQA').play(); } catch {}
+  }
 });
 
 // ── Utilities ───────────────────────────────────────────────────────────────

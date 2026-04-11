@@ -23,6 +23,8 @@ const DEFAULTS: Omit<ThreadMetaDoc, '_id' | '_rev' | 'contactId' | 'platform' | 
   deletedChatCount: 0,
   autoRespondEnabled: false,
   autoRespondSettings: { ...DEFAULT_AUTO_RESPOND_SETTINGS },
+  sentiment: null,
+  preferenceScore: null,
 };
 
 export async function getThreadMeta(

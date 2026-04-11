@@ -463,6 +463,94 @@ export async function generateGreeting(
   }
 }
 
+// ── Conversation summary ────────────────────────────────────────────────────
+
+export async function generateConversationSummary(
+  messages: Message[],
+  contactName: string,
+  platform: string,
+): Promise<{ text: string; commitments: string[] }> {
+  const config = await getLLMConfig();
+  if (config.provider === 'local' || !config.apiKey) {
+    return localSummary(messages);
+  }
+
+  const conversation = buildConversationContext(messages, contactName);
+  const prompt = `Analyze this ${platform} conversation and return a JSON object:
+{
+  "text": "2-3 sentence summary of the conversation state, tone, and what they want",
+  "commitments": ["list of any agreed times, places, or action items"],
+  "likelyOutcome": "one sentence prediction of where this is heading"
+}
+
+Conversation:
+${conversation}
+
+Return ONLY the JSON object.`;
+
+  try {
+    let text: string;
+    switch (config.provider) {
+      case 'gemini': {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model || 'gemini-2.0-flash'}:generateContent?key=${config.apiKey}`;
+        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.3, maxOutputTokens: 256, responseMimeType: 'application/json' } }) });
+        if (!res.ok) throw new Error(`Gemini ${res.status}`);
+        text = (await res.json())?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        break;
+      }
+      case 'openai': {
+        const res = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
+          body: JSON.stringify({ model: config.model || 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }], temperature: 0.3, max_tokens: 256, response_format: { type: 'json_object' } }) });
+        if (!res.ok) throw new Error(`OpenAI ${res.status}`);
+        text = (await res.json())?.choices?.[0]?.message?.content || '';
+        break;
+      }
+      case 'anthropic': {
+        const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+          body: JSON.stringify({ model: config.model || 'claude-haiku-4-5-20251001', max_tokens: 256, messages: [{ role: 'user', content: prompt }] }) });
+        if (!res.ok) throw new Error(`Anthropic ${res.status}`);
+        text = (await res.json())?.content?.[0]?.text || '';
+        break;
+      }
+      default: return localSummary(messages);
+    }
+
+    try {
+      const parsed = JSON.parse(text);
+      return {
+        text: String(parsed.text || parsed.summary || ''),
+        commitments: Array.isArray(parsed.commitments) ? parsed.commitments.map(String) : [],
+      };
+    } catch {
+      return { text: text.slice(0, 200), commitments: [] };
+    }
+  } catch (err) {
+    console.error(`${LOG} Summary generation failed:`, err);
+    return localSummary(messages);
+  }
+}
+
+function localSummary(messages: Message[]): { text: string; commitments: string[] } {
+  if (!messages.length) return { text: 'No conversation yet.', commitments: [] };
+  const inbound = messages.filter(m => m.direction === 'in');
+  const outbound = messages.filter(m => m.direction === 'out');
+  const last = messages[messages.length - 1];
+  const parts = [`${messages.length} messages exchanged (${inbound.length} from them, ${outbound.length} from you).`];
+  if (last) parts.push(`Last message was ${last.direction === 'in' ? 'from them' : 'from you'}: "${last.body.slice(0, 50)}..."`);
+
+  const commitments: string[] = [];
+  for (const m of messages.slice(-10)) {
+    if (/tonight|tomorrow|\d+\s*(am|pm)|meet|come over|my place|your place/i.test(m.body)) {
+      commitments.push(m.body.slice(0, 80));
+    }
+  }
+
+  return { text: parts.join(' '), commitments };
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 function parseJsonArray(text: string): string[] {

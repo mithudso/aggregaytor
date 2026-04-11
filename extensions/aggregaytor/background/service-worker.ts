@@ -11,8 +11,12 @@ import {
   queueAutoRespond, getPendingAutoResponds, getDraftAutoResponds, getApprovedAutoResponds, updateAutoRespondStatus,
   addPicture, getAllPictures, getPictureByTag, incrementPictureStat, deletePicture,
   createBlockRule, getAllBlockRules, updateBlockRule, deleteBlockRule, evaluateRules, executeAction,
+  getCalendarSettings, saveCalendarSettings, getAvailableSlots, createCalendarEvent, authenticateCalendar,
+  recordFeedback, predictPreference, getModelStats, retrainModel,
+  analyzeConversationSentiment, formatSentimentSummary,
+  getContact,
 } from '@aggregaytor/store';
-import type { ThreadSummary, AutoRespondSettings } from '@aggregaytor/store';
+import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
 import { generateSuggestions, generateAutoResponse, generateGreeting, getLLMConfig, saveLLMConfig } from './llm.js';
 
 const LOG = '[Aggregaytor:SW]';
@@ -89,6 +93,78 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_ALL_BLOCK_RULES': return { ok: true, rules: await getAllBlockRules() };
     case 'UPDATE_BLOCK_RULE': { await updateBlockRule(msg.id, msg.updates); return { ok: true }; }
     case 'DELETE_BLOCK_RULE': { await deleteBlockRule(msg.id); return { ok: true }; }
+
+    // Calendar
+    case 'AUTHENTICATE_CALENDAR': return { ok: true, success: await authenticateCalendar() };
+    case 'GET_CALENDAR_SETTINGS': return { ok: true, settings: await getCalendarSettings() };
+    case 'SAVE_CALENDAR_SETTINGS': { await saveCalendarSettings(msg.settings); return { ok: true }; }
+    case 'GET_AVAILABLE_SLOTS': return { ok: true, slots: await getAvailableSlots(msg.from, msg.to) };
+    case 'CREATE_CALENDAR_EVENT': return { ok: true, event: await createCalendarEvent(msg.contactId, msg.platform, msg.title, msg.startTime, msg.duration, msg.location, msg.notes) };
+
+    // ML Preference + Sentiment
+    case 'RECORD_PREFERENCE': {
+      const contact = await getContact(msg.contactId);
+      const features: ProfileFeatures = {
+        bodyType: String(contact?.metadata?.bodyType || contact?.metadata?.body || ''),
+        position: String(contact?.metadata?.attitude || contact?.metadata?.position || ''),
+        age: String(contact?.metadata?.age || ''),
+        ethnicity: String(contact?.metadata?.ethnicity || ''),
+        height: String(contact?.metadata?.height || ''),
+        profileTextLength: String(contact?.metadata?.profileText || '').length,
+        profileTextKeywords: String(contact?.metadata?.profileText || '').toLowerCase().split(/\s+/).slice(0, 20),
+        hasPhoto: !!contact?.avatarUrl,
+        photoCount: Number(contact?.metadata?.photoCount || (contact?.avatarUrl ? 1 : 0)),
+        distance: String(contact?.metadata?.distance || ''),
+        conversationLength: (await getMessagesByContact(msg.contactId, { limit: 500 })).length,
+        responseRate: 0,
+      };
+      await recordFeedback(msg.contactId, msg.platform, msg.liked, features);
+      const prediction = await predictPreference(features);
+      await upsertThreadMeta(msg.contactId, msg.platform, { preferenceScore: prediction.score });
+      return { ok: true, prediction };
+    }
+    case 'GET_MODEL_STATS': return { ok: true, stats: await getModelStats() };
+    case 'RETRAIN_MODEL': { await retrainModel(); return { ok: true }; }
+
+    // Thread analysis (sentiment + preference + summary)
+    case 'ANALYZE_THREAD': {
+      const sentiment = analyzeConversationSentiment(msg.messages);
+      const contact = await getContact(msg.contactId);
+      const features: ProfileFeatures = {
+        bodyType: String(contact?.metadata?.bodyType || ''),
+        position: String(contact?.metadata?.position || ''),
+        age: '', ethnicity: '', height: '',
+        profileTextLength: 0, profileTextKeywords: [],
+        hasPhoto: !!contact?.avatarUrl, photoCount: 0,
+        distance: '', conversationLength: msg.messages.length, responseRate: 0,
+      };
+      const preference = await predictPreference(features);
+
+      // Update thread meta with latest sentiment
+      await upsertThreadMeta(msg.contactId, msg.platform, {
+        sentiment, preferenceScore: preference.score,
+      });
+
+      // Generate conversation summary via LLM
+      let summary = { text: '', commitments: [] as string[] };
+      try {
+        summary = await generateConversationSummary(msg.messages, msg.contactName, msg.platform);
+      } catch {}
+
+      // Check if commitment opportunity — flash alert if so
+      if (sentiment.commitment > 0.6 || summary.commitments.length > 0) {
+        chrome.notifications.create(`commit-alert-${msg.contactId}`, {
+          type: 'basic', iconUrl: 'icons/icon-128.png',
+          title: 'Commitment opportunity!',
+          message: `${msg.contactName} seems ready to commit. ${summary.commitments[0] || 'Check the conversation.'}`,
+          requireInteraction: true, priority: 2,
+        });
+        // Flash the side panel
+        try { chrome.runtime.sendMessage({ type: 'COMMITMENT_ALERT', contactId: msg.contactId, contactName: msg.contactName }); } catch {}
+      }
+
+      return { ok: true, sentiment, preference, summary };
+    }
 
     default: return { ok: false, error: `Unknown: ${msg.type}` };
   }
