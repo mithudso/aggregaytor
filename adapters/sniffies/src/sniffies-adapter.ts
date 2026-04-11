@@ -1,8 +1,11 @@
 /**
  * sniffies-adapter.ts — Sniffies platform adapter.
  *
- * Intercepts ALL Sniffies network traffic (fetch, XHR, WebSocket),
- * extracts message-like objects, and normalizes to UnifiedMessage format.
+ * Intercepts Sniffies network traffic (fetch, XHR, WebSocket),
+ * extracts actual chat messages, and normalizes to UnifiedMessage format.
+ *
+ * Key challenge: Sniffies profiles have a `body` field for body type
+ * ("athletic", "muscular") which must NOT be confused with message text.
  */
 
 import {
@@ -15,15 +18,47 @@ import { findLikelyProfileId, normalizeProfileId, extractProfileIdFromUrl } from
 
 const LOG = '[Aggregaytor:Sniffies]';
 
-// Keys that indicate a timestamp (case-insensitive match via normalizeKey)
-const TS_PATTERNS = /^(createdat|sentat|timestamp|time|updatedat|date|lastmessageat|lastchatat|latestmessageat|ts|sent_at|created_at|updated_at)$/i;
+// ── Profile attribute values to reject as message bodies ────────────────────
+const PROFILE_ATTRIBUTE_VALUES = new Set([
+  // Body types
+  'slim', 'athletic', 'average', 'muscular', 'chubby', 'stocky', 'heavyset',
+  'toned', 'dad bod', 'dadbod', 'fit', 'skinny', 'thick', 'lean', 'large',
+  'bear', 'otter', 'twink', 'jock', 'cub',
+  // Positions/attitudes
+  'top', 'bottom', 'vers', 'vers top', 'vers bottom', 'side', 'versatile',
+  'power bottom', 'submissive bottom', 'passive top', 'dom top breeder',
+  // Roles
+  'dominant', 'submissive', 'switch',
+  // Relationship status
+  'single', 'partnered', 'married', 'open relationship', 'dating',
+  // Looking for
+  'friends', 'dates', 'networking', 'hookup', 'relationship', 'chat',
+  // Ethnicity, hair, eye values — common single/two-word values
+  'white', 'black', 'latino', 'asian', 'mixed', 'other',
+  'bald', 'blonde', 'brown', 'red', 'black', 'gray', 'grey',
+  'blue', 'green', 'hazel', 'brown',
+  // HIV status
+  'negative', 'positive', 'undetectable', 'prep', 'on prep',
+  // Misc profile fields
+  'yes', 'no', 'sometimes', 'never', 'prefer not to say',
+  'subscription added', 'subscription removed',
+]);
 
-// Keys that indicate message body text
-const BODY_KEYS = ['body', 'text', 'message', 'content', 'msg', 'snippet', 'messageText', 'messageBody', 'lastMessage', 'preview'];
+// Keys that indicate this object IS a chat message (strong signals)
+const MESSAGE_SIGNAL_KEYS = [
+  'messageid', 'message_id', 'chatid', 'chat_id', 'conversationid',
+  'conversation_id', 'senderid', 'sender_id', 'recipientid', 'recipient_id',
+  'fromme', 'ismine', 'sentbyme', 'isoutgoing', 'isincoming',
+  'messagetype', 'message_type', 'chattype', 'replyto', 'reply_to',
+];
 
-// Keys indicating direction
-const OUT_KEYS = ['fromme', 'ismine', 'mine', 'sentbyme', 'outgoing', 'isoutgoing', 'mymessage'];
-const IN_KEYS = ['incoming', 'isincoming', 'fromthem', 'received', 'isreceived', 'theirmessage'];
+// Keys that indicate this is a PROFILE object (not a message)
+const PROFILE_SIGNAL_KEYS = [
+  'attitude', 'bodytype', 'body_type', 'ethnicity', 'height', 'weight',
+  'age', 'hivstatus', 'hiv_status', 'position', 'tribe', 'pronouns',
+  'lookingfor', 'looking_for', 'hosting', 'lastactive', 'last_active',
+  'distance', 'distanceaway', 'miles', 'kilometers',
+];
 
 function normalizeKey(key: string): string {
   return String(key || '').replace(/[-_ ]/g, '').toLowerCase();
@@ -42,17 +77,16 @@ function parseTimestamp(value: unknown): number {
 }
 
 function extractTimestampFromObj(obj: Record<string, unknown>): number {
-  // Priority keys first
   for (const key of ['createdAt', 'sentAt', 'timestamp', 'time', 'updatedAt', 'date', 'lastMessageAt', 'ts', 'created_at', 'sent_at']) {
     if (key in obj) {
       const ts = parseTimestamp(obj[key]);
       if (ts) return ts;
     }
   }
-  // Fallback: any key ending in time/date/at/ts
   let latest = 0;
   for (const [key, value] of Object.entries(obj)) {
-    if (TS_PATTERNS.test(normalizeKey(key))) {
+    const nk = normalizeKey(key);
+    if (/^(createdat|sentat|timestamp|time|updatedat|date|lastmessageat|ts)$/.test(nk)) {
       const ts = parseTimestamp(value);
       if (ts > latest) latest = ts;
     }
@@ -60,16 +94,44 @@ function extractTimestampFromObj(obj: Record<string, unknown>): number {
   return latest;
 }
 
+/**
+ * Check if this object looks like a chat message vs a profile/attribute object.
+ */
+function isLikelyMessage(obj: Record<string, unknown>): boolean {
+  const keys = Object.keys(obj).map(normalizeKey);
+
+  // Strong positive signal: has message-specific keys
+  const hasMessageKey = MESSAGE_SIGNAL_KEYS.some(mk => keys.includes(mk));
+  if (hasMessageKey) return true;
+
+  // Strong negative signal: has profile-specific keys
+  const hasProfileKey = PROFILE_SIGNAL_KEYS.some(pk => keys.includes(pk));
+  if (hasProfileKey) return false;
+
+  // Weak signal: check the "body" value itself
+  const bodyVal = String(obj.body || obj.text || obj.message || obj.content || '').trim().toLowerCase();
+  if (PROFILE_ATTRIBUTE_VALUES.has(bodyVal)) return false;
+
+  // Require the body text to be at least a short sentence (>= 2 words or >= 8 chars)
+  // Single words are almost always profile attributes, not messages
+  const wordCount = bodyVal.split(/\s+/).length;
+  if (wordCount <= 1 && bodyVal.length < 8) return false;
+
+  return true;
+}
+
 function extractBody(obj: Record<string, unknown>): string {
-  for (const key of BODY_KEYS) {
+  // Only check message-appropriate keys (skip 'body' for profile objects)
+  const textKeys = ['text', 'message', 'msg', 'messageText', 'messageBody'];
+  for (const key of textKeys) {
     const value = obj[key];
-    if (typeof value === 'string' && value.trim().length >= 1) return value.trim();
+    if (typeof value === 'string' && value.trim().length >= 2) return value.trim();
   }
-  // Also check normalized keys
-  for (const [key, value] of Object.entries(obj)) {
-    const nk = normalizeKey(key);
-    if ((nk === 'body' || nk === 'text' || nk === 'message' || nk === 'content' || nk === 'msg') && typeof value === 'string' && value.trim()) {
-      return value.trim();
+  // Check 'body' and 'content' only if the object looks like a message
+  if (isLikelyMessage(obj)) {
+    for (const key of ['body', 'content', 'snippet', 'preview', 'lastMessage']) {
+      const value = obj[key];
+      if (typeof value === 'string' && value.trim().length >= 2) return value.trim();
     }
   }
   return '';
@@ -79,8 +141,8 @@ function detectDirection(obj: Record<string, unknown>, selfIds: Set<string>): 'i
   for (const [key, value] of Object.entries(obj)) {
     const k = normalizeKey(key);
     if (value === true) {
-      if (OUT_KEYS.includes(k)) return 'out';
-      if (IN_KEYS.includes(k)) return 'in';
+      if (['fromme', 'ismine', 'mine', 'sentbyme', 'outgoing', 'isoutgoing', 'mymessage'].includes(k)) return 'out';
+      if (['incoming', 'isincoming', 'fromthem', 'received', 'isreceived', 'theirmessage'].includes(k)) return 'in';
     }
     if (typeof value === 'string' && ['direction', 'messagedirection', 'type', 'msgtype'].includes(k)) {
       const s = value.toLowerCase();
@@ -88,7 +150,6 @@ function detectDirection(obj: Record<string, unknown>, selfIds: Set<string>): 'i
       if (/(in|received|fromthem)/.test(s)) return 'in';
     }
   }
-  // Check sender against self IDs
   const senderId = normalizeProfileId(String(obj.senderId || obj.sender_id || obj.from || obj.fromId || obj.from_id || ''));
   if (senderId && selfIds.has(senderId)) return 'out';
   return 'in';
@@ -101,18 +162,10 @@ export class SniffiesAdapter extends BaseAdapter {
 
   async init(): Promise<void> {
     console.log(`${LOG} Initializing adapter...`);
-
-    // Seed self-IDs from window globals
     this.selfIds.seedFromWindow(window as Window & typeof globalThis);
     this.seedSelfIdsFromPage();
-
-    // Set up network interception
     this.setupNetworkInterception(window as Window & typeof globalThis);
-
-    // Periodic localStorage scan
     this.storageTimer = setInterval(() => this.scanStorage(), 60_000);
-    this.scanStorage();
-
     console.log(`${LOG} Adapter initialized. Self IDs:`, [...this.selfIds.ids]);
   }
 
@@ -125,9 +178,8 @@ export class SniffiesAdapter extends BaseAdapter {
   }
 
   protected shouldInterceptUrl(url: string): boolean {
-    // Intercept ALL sniffies.com traffic, not just /api/
     const s = String(url).toLowerCase();
-    return s.includes('sniffies.com') || s.includes('sniffies');
+    return s.includes('sniffies.com');
   }
 
   protected parseApiResponse(url: string, payload: unknown): UnifiedMessage[] {
@@ -137,36 +189,42 @@ export class SniffiesAdapter extends BaseAdapter {
 
     walkPayload(payload, contextId, {
       onObject: (obj, ctx, _depth) => {
-        // Always try to detect self IDs
         this.selfIds.detectFromPayload(obj);
         this.detectSelfIdsFromObj(obj);
 
-        // Look for message-like objects (has body text + some kind of ID or timestamp)
+        // Only process objects that look like messages
+        if (!isLikelyMessage(obj)) return;
+
         const body = extractBody(obj);
+        if (!body) return;
+
+        // Reject if body looks like a profile attribute
+        if (PROFILE_ATTRIBUTE_VALUES.has(body.toLowerCase())) return;
+
         const ts = extractTimestampFromObj(obj);
         const profileId = findLikelyProfileId(obj, ctx || '');
 
-        if (body && (ts || profileId)) {
-          const direction = detectDirection(obj, this.selfIds.ids);
-          const msgId = String(obj.id || obj._id || obj.messageId || obj.message_id || `${profileId}:${ts || Date.now()}`);
-          const timestamp = ts ? new Date(ts).toISOString() : new Date().toISOString();
+        // Require BOTH timestamp AND profileId for a valid message
+        if (!ts || !profileId) return;
 
-          messages.push({
-            id: `sniffies:${msgId}`,
-            platform: 'sniffies',
-            threadId: `sniffies:${profileId || 'unknown'}`,
-            contactId: `sniffies:${profileId || 'unknown'}`,
-            direction,
-            body,
-            timestamp,
-            read: direction === 'out',
-            metadata: { profileId, url },
-          });
-        }
+        const direction = detectDirection(obj, this.selfIds.ids);
+        const msgId = String(obj.id || obj._id || obj.messageId || obj.message_id || `${profileId}:${ts}`);
 
-        // Also extract contact-like objects (has displayName/username + profileId)
+        messages.push({
+          id: `sniffies:${msgId}`,
+          platform: 'sniffies',
+          threadId: `sniffies:${profileId}`,
+          contactId: `sniffies:${profileId}`,
+          direction,
+          body,
+          timestamp: new Date(ts).toISOString(),
+          read: direction === 'out',
+          metadata: { profileId, url },
+        });
+
+        // Extract contact info
         const displayName = String(obj.displayName || obj.username || obj.name || obj.label || '').trim();
-        if (profileId && displayName && displayName !== profileId) {
+        if (profileId && displayName && displayName.length > 2 && !PROFILE_ATTRIBUTE_VALUES.has(displayName.toLowerCase())) {
           contacts.push({
             id: `sniffies:${profileId}`,
             platform: 'sniffies',
@@ -174,7 +232,7 @@ export class SniffiesAdapter extends BaseAdapter {
             displayName,
             profileUrl: `https://sniffies.com/profile/${profileId}`,
             avatarUrl: String(obj.avatar || obj.avatarUrl || obj.photo || obj.image || ''),
-            lastSeen: ts ? new Date(ts).toISOString() : new Date().toISOString(),
+            lastSeen: new Date(ts).toISOString(),
             metadata: {},
           });
         }
@@ -186,7 +244,6 @@ export class SniffiesAdapter extends BaseAdapter {
       console.log(`${LOG} Captured ${messages.length} messages from ${url} (total: ${this.captureCount})`);
     }
     if (contacts.length) {
-      console.log(`${LOG} Captured ${contacts.length} contacts from ${url}`);
       this.emit({ type: 'contacts', payload: contacts });
     }
 
@@ -196,11 +253,8 @@ export class SniffiesAdapter extends BaseAdapter {
   protected parseWebSocketFrame(data: string | ArrayBuffer): UnifiedMessage[] {
     const text = typeof data === 'string' ? data : '';
     if (!text) return [];
-
     const parsed = parseSocketIOFrame(text);
     if (!parsed) return [];
-
-    console.log(`${LOG} WebSocket frame parsed:`, typeof parsed, Array.isArray(parsed) ? 'array' : 'object');
     return this.parseApiResponse('[ws]', parsed);
   }
 
@@ -213,7 +267,6 @@ export class SniffiesAdapter extends BaseAdapter {
   }
 
   private seedSelfIdsFromPage(): void {
-    // Try to find self ID from page globals that Sniffies sets
     try {
       const w = window as any;
       for (const key of ['__sniffies_user_id', '__user', 'userId', 'currentUserId', 'myProfileId', 'selfId']) {
@@ -223,28 +276,17 @@ export class SniffiesAdapter extends BaseAdapter {
           if (id) this.selfIds.ids.add(id);
         }
       }
-      // Check for React fiber state
-      const root = document.getElementById('root') || document.getElementById('app');
-      if (root && (root as any)._reactRootContainer) {
-        console.log(`${LOG} React root detected, will capture self ID from API responses`);
-      }
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
   }
 
   private detectSelfIdsFromObj(obj: Record<string, unknown>): void {
-    // Sniffies-specific self ID patterns
     for (const [key, value] of Object.entries(obj)) {
       const k = normalizeKey(key);
       if (['selfid', 'myid', 'myprofileid', 'currentuserid', 'viewerid', 'ownerid', 'loggedinuserid'].includes(k)) {
         const id = normalizeProfileId(String(value || ''));
-        if (id) {
-          this.selfIds.ids.add(id);
-        }
+        if (id) this.selfIds.ids.add(id);
       }
     }
-    // Check for isMe: true pattern
     if (obj.isMe === true || obj.isSelf === true || obj.mine === true) {
       const id = normalizeProfileId(String(obj.id || obj._id || obj.profileId || obj.userId || ''));
       if (id) this.selfIds.ids.add(id);
@@ -262,16 +304,10 @@ export class SniffiesAdapter extends BaseAdapter {
           const data = JSON.parse(raw);
           if (data && typeof data === 'object') {
             const messages = this.parseApiResponse(`[storage:${key}]`, data);
-            if (messages.length) {
-              this.emit({ type: 'messages', payload: messages });
-            }
+            if (messages.length) this.emit({ type: 'messages', payload: messages });
           }
-        } catch {
-          // not JSON or too large
-        }
+        } catch { /* not JSON */ }
       }
-    } catch {
-      // localStorage not available
-    }
+    } catch { /* localStorage not available */ }
   }
 }
