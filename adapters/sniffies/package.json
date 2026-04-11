@@ -1,6 +1,6 @@
 {
   "name": "@aggregaytor/adapter-sniffies",
-  "version": "0.23.3",
+  "version": "0.24.0",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",

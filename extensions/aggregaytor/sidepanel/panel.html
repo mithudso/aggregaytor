@@ -141,6 +141,61 @@
   </div>
   <div id="draft-panel" class="draft-panel" style="display:none"></div>
 
+  <!-- Settings panel (inline, replaces inbox when visible) -->
+  <div id="settings-panel" class="settings-panel" style="display:none">
+    <div class="settings-section">
+      <h3 class="settings-heading">AI Provider</h3>
+      <select id="sp-provider" class="settings-select">
+        <option value="local">Local (no API key)</option>
+        <option value="anthropic">Claude (Anthropic) — 50 RPM</option>
+        <option value="gemini">Gemini (Google) — 15 RPM free</option>
+        <option value="openai">OpenAI — 500 RPM</option>
+        <option value="groq">Groq — 30 RPM free</option>
+        <option value="perplexity">Perplexity — 50 RPM</option>
+        <option value="mistral">Mistral — 2 RPM free</option>
+        <option value="copilot">GitHub Copilot</option>
+      </select>
+      <input type="password" id="sp-apikey" class="settings-input" placeholder="API key">
+      <input type="text" id="sp-model" class="settings-input" placeholder="Model (leave blank for auto)">
+      <button class="settings-btn" id="sp-save-provider">Save Provider</button>
+      <div id="sp-provider-status" class="settings-status"></div>
+    </div>
+
+    <div class="settings-section">
+      <h3 class="settings-heading">Personality</h3>
+      <select id="sp-personality" class="settings-select"></select>
+      <div id="sp-preset-desc" class="settings-info"></div>
+      <textarea id="sp-custom-instructions" class="settings-textarea" rows="3" placeholder="Custom instructions (e.g., Always be closing. Never use emojis.)"></textarea>
+      <button class="settings-btn" id="sp-save-personality">Save Personality</button>
+    </div>
+
+    <div class="settings-section">
+      <h3 class="settings-heading">Rate Limiting</h3>
+      <label class="settings-label"><input type="checkbox" id="sp-llm-enabled" checked> Enable LLM calls</label>
+      <label class="settings-label">Max requests/min: <input type="number" id="sp-rpm" value="10" min="1" max="60" class="settings-num"></label>
+      <label class="settings-label"><input type="checkbox" id="sp-feat-ar" checked> Auto-respond</label>
+      <label class="settings-label"><input type="checkbox" id="sp-feat-suggest" checked> Suggestions</label>
+      <label class="settings-label"><input type="checkbox" id="sp-feat-dossier" checked> Dossier</label>
+      <button class="settings-btn" id="sp-save-rate">Save Rate Settings</button>
+      <div id="sp-queue-status" class="settings-info"></div>
+    </div>
+
+    <div class="settings-section">
+      <h3 class="settings-heading">Log Level</h3>
+      <select id="sp-log-level" class="settings-select">
+        <option value="debug">Debug</option>
+        <option value="info" selected>Info</option>
+        <option value="warn">Warn</option>
+        <option value="error">Error only</option>
+        <option value="off">Off</option>
+      </select>
+    </div>
+
+    <div class="settings-section">
+      <button class="settings-btn" id="sp-open-full-settings">Open full settings page</button>
+    </div>
+  </div>
+
   <!-- Photo gallery overlay -->
   <div id="gallery-overlay" class="gallery-overlay" style="display:none">
     <div class="gallery-header">

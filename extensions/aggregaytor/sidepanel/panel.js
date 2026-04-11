@@ -1125,7 +1125,10 @@ document.getElementById('filter-clear').addEventListener('click', () => {
 
 // ── Event listeners ─────────────────────────────────────────────────────────
 
-document.getElementById('back-btn').addEventListener('click', goBack);
+document.getElementById('back-btn').addEventListener('click', () => {
+  if (settingsOpen) closeSettings();
+  else goBack();
+});
 document.querySelectorAll('.platform-chip').forEach(chip => {
   chip.addEventListener('click', () => {
     document.querySelectorAll('.platform-chip').forEach(c => c.classList.remove('active'));
@@ -1401,22 +1404,139 @@ document.getElementById('sync-pics-header').addEventListener('click', async () =
   setTimeout(() => { btn.textContent = '📷'; btn.disabled = false; }, 3000);
 });
 
-let settingsTabId = null;
-document.getElementById('open-settings').addEventListener('click', async () => {
-  // Toggle: if settings tab is open, close it; otherwise open it
-  if (settingsTabId) {
-    try {
-      await chrome.tabs.remove(settingsTabId);
-      settingsTabId = null;
-      return;
-    } catch { settingsTabId = null; }
+// ── Inline settings panel ───────────────────────────────────────────────────
+
+let settingsOpen = false;
+
+document.getElementById('open-settings').addEventListener('click', () => {
+  if (settingsOpen) {
+    closeSettings();
+  } else {
+    openSettings();
   }
-  const tab = await chrome.tabs.create({ url: chrome.runtime.getURL('popup/popup.html') });
-  settingsTabId = tab.id;
-  // Clear reference when the tab is closed by the user
-  chrome.tabs.onRemoved.addListener(function onRemove(id) {
-    if (id === settingsTabId) { settingsTabId = null; chrome.tabs.onRemoved.removeListener(onRemove); }
+});
+
+function openSettings() {
+  settingsOpen = true;
+  document.body.classList.remove('view-inbox', 'view-thread');
+  document.body.classList.add('view-settings');
+  document.getElementById('header-title').textContent = 'Settings';
+  document.getElementById('settings-panel').style.display = '';
+  loadInlineSettings();
+}
+
+function closeSettings() {
+  settingsOpen = false;
+  document.body.classList.remove('view-settings');
+  document.body.classList.add('view-inbox');
+  document.getElementById('header-title').textContent = 'Aggregaytor';
+  document.getElementById('settings-panel').style.display = 'none';
+  loadThreads();
+}
+
+async function loadInlineSettings() {
+  // Load provider
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_LLM_CONFIG' });
+    if (res?.ok) {
+      document.getElementById('sp-provider').value = res.config.provider || 'local';
+      document.getElementById('sp-apikey').value = res.config.apiKey || '';
+      document.getElementById('sp-model').value = res.config.model || '';
+    }
+  } catch {}
+
+  // Load personality
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_PERSONALITY' });
+    if (res?.ok) {
+      const sel = document.getElementById('sp-personality');
+      sel.innerHTML = res.presets.map(p =>
+        `<option value="${p.id}"${p.id === res.personality.preset ? ' selected' : ''}>${p.label}</option>`
+      ).join('');
+      document.getElementById('sp-preset-desc').textContent = res.presets.find(p => p.id === res.personality.preset)?.description || '';
+      document.getElementById('sp-custom-instructions').value = res.personality.customInstructions || '';
+    }
+  } catch {}
+
+  // Load rate settings
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_LLM_RATE_SETTINGS' });
+    if (res?.ok) {
+      document.getElementById('sp-llm-enabled').checked = res.settings.enabled !== false;
+      document.getElementById('sp-rpm').value = res.settings.maxRequestsPerMinute || 10;
+      document.getElementById('sp-feat-ar').checked = res.settings.enableAutoRespond !== false;
+      document.getElementById('sp-feat-suggest').checked = res.settings.enableSuggestions !== false;
+      document.getElementById('sp-feat-dossier').checked = res.settings.enableDossierExtract !== false;
+    }
+  } catch {}
+
+  // Load queue status
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_LLM_QUEUE_STATUS' });
+    if (res?.ok) {
+      const s = res.status;
+      const usage = Object.entries(s.providerUsage || {}).map(([p, u]) => `${p}: ${u.used}/${u.limit}`).join(', ');
+      document.getElementById('sp-queue-status').textContent = `Queue: ${s.queueLength} | Last min: ${s.requestsLastMinute} | ${usage}`;
+    }
+  } catch {}
+
+  // Load log level
+  try {
+    const data = await chrome.storage.local.get('aggregaytor_log_level');
+    if (data.aggregaytor_log_level) document.getElementById('sp-log-level').value = data.aggregaytor_log_level;
+  } catch {}
+}
+
+// Settings save handlers
+document.getElementById('sp-save-provider').addEventListener('click', async () => {
+  const provider = document.getElementById('sp-provider').value;
+  const apiKey = document.getElementById('sp-apikey').value.trim();
+  const model = document.getElementById('sp-model').value.trim();
+  await chrome.runtime.sendMessage({ type: 'SAVE_LLM_CONFIG', config: { provider, apiKey, model } });
+  const status = document.getElementById('sp-provider-status');
+  status.textContent = 'Saved!';
+  status.style.color = '#34d399';
+  setTimeout(() => { status.textContent = ''; }, 2000);
+});
+
+document.getElementById('sp-personality').addEventListener('change', (e) => {
+  chrome.runtime.sendMessage({ type: 'GET_PERSONALITY' }).then(res => {
+    if (res?.ok) {
+      const p = res.presets.find(pr => pr.id === e.target.value);
+      document.getElementById('sp-preset-desc').textContent = p?.description || '';
+    }
+  }).catch(() => {});
+});
+
+document.getElementById('sp-save-personality').addEventListener('click', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_PERSONALITY',
+    settings: {
+      preset: document.getElementById('sp-personality').value,
+      customInstructions: document.getElementById('sp-custom-instructions').value.trim(),
+    },
   });
+});
+
+document.getElementById('sp-save-rate').addEventListener('click', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_LLM_RATE_SETTINGS',
+    settings: {
+      enabled: document.getElementById('sp-llm-enabled').checked,
+      maxRequestsPerMinute: parseInt(document.getElementById('sp-rpm').value) || 10,
+      enableAutoRespond: document.getElementById('sp-feat-ar').checked,
+      enableSuggestions: document.getElementById('sp-feat-suggest').checked,
+      enableDossierExtract: document.getElementById('sp-feat-dossier').checked,
+    },
+  });
+});
+
+document.getElementById('sp-log-level').addEventListener('change', (e) => {
+  chrome.runtime.sendMessage({ type: 'SET_LOG_LEVEL', level: e.target.value }).catch(() => {});
+});
+
+document.getElementById('sp-open-full-settings').addEventListener('click', () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL('popup/popup.html') });
 });
 
 // ── Open all sites on title click ───────────────────────────────────────────

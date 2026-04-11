@@ -848,7 +848,7 @@ async function callProvider(
   switch (routedConfig.provider) {
     case 'gemini': {
       const model = routedConfig.model || DEFAULT_MODELS.gemini;
-      url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.apiKey}`;
+      url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${routedConfig.apiKey}`;
       init = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -861,14 +861,14 @@ async function callProvider(
       break;
     }
     case 'openai': {
-      const model = config.model || DEFAULT_MODELS.openai;
+      const model = routedConfig.model || DEFAULT_MODELS.openai;
       url = 'https://api.openai.com/v1/chat/completions';
       const msgs: any[] = [];
       if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
       msgs.push({ role: 'user', content: userPrompt });
       init = {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${routedConfig.apiKey}` },
         body: JSON.stringify({ model, messages: msgs, temperature: temp, max_tokens: maxTokens, ...(opts?.jsonMode ? { response_format: { type: 'json_object' } } : {}) }),
       };
       break;
@@ -889,47 +889,47 @@ async function callProvider(
     }
     case 'groq': {
       // Groq uses OpenAI-compatible API
-      const model = config.model || DEFAULT_MODELS.groq;
+      const model = routedConfig.model || DEFAULT_MODELS.groq;
       url = 'https://api.groq.com/openai/v1/chat/completions';
       const msgs: any[] = [];
       if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
       msgs.push({ role: 'user', content: userPrompt });
       init = {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${routedConfig.apiKey}` },
         body: JSON.stringify({ model, messages: msgs, temperature: temp, max_tokens: maxTokens }),
       };
       break;
     }
     case 'perplexity': {
-      const model = config.model || DEFAULT_MODELS.perplexity;
+      const model = routedConfig.model || DEFAULT_MODELS.perplexity;
       url = 'https://api.perplexity.ai/chat/completions';
       const msgs: any[] = [];
       if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
       msgs.push({ role: 'user', content: userPrompt });
       init = {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${routedConfig.apiKey}` },
         body: JSON.stringify({ model, messages: msgs, temperature: temp, max_tokens: maxTokens }),
       };
       break;
     }
     case 'mistral': {
-      const model = config.model || DEFAULT_MODELS.mistral;
+      const model = routedConfig.model || DEFAULT_MODELS.mistral;
       url = 'https://api.mistral.ai/v1/chat/completions';
       const msgs: any[] = [];
       if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
       msgs.push({ role: 'user', content: userPrompt });
       init = {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${routedConfig.apiKey}` },
         body: JSON.stringify({ model, messages: msgs, temperature: temp, max_tokens: maxTokens }),
       };
       break;
     }
     case 'copilot': {
       // GitHub Copilot uses OpenAI-compatible endpoint
-      const model = config.model || DEFAULT_MODELS.copilot;
+      const model = routedConfig.model || DEFAULT_MODELS.copilot;
       url = 'https://api.githubcopilot.com/chat/completions';
       const msgs: any[] = [];
       if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
@@ -938,7 +938,7 @@ async function callProvider(
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${config.apiKey}`,
+          'Authorization': `Bearer ${routedConfig.apiKey}`,
           'Editor-Version': 'aggregaytor/0.19.1',
         },
         body: JSON.stringify({ model, messages: msgs, temperature: temp, max_tokens: maxTokens }),
@@ -946,7 +946,7 @@ async function callProvider(
       break;
     }
     default:
-      throw new Error(`Unknown provider: ${config.provider}`);
+      throw new Error(`Unknown provider: ${routedConfig.provider}`);
   }
 
   const res = await queuedFetch(url, init, feature);
@@ -954,14 +954,14 @@ async function callProvider(
   if (!res.ok) {
     // On 429 rate limit, try failover to another provider
     if (res.status === 429) {
-      const failoverConfig = await getConfigWithFailover(config.provider);
-      if (failoverConfig.provider !== config.provider) {
-        console.log(`${LOG} Failing over from ${config.provider} to ${failoverConfig.provider}`);
+      const failoverConfig = await getConfigWithFailover(routedConfig.provider);
+      if (failoverConfig.provider !== routedConfig.provider) {
+        console.log(`${LOG} Failing over from ${routedConfig.provider} to ${failoverConfig.provider}`);
         return callProvider(failoverConfig, systemPrompt, userPrompt, feature, opts);
       }
     }
     const err = await res.text();
-    throw new Error(`${config.provider} ${res.status}: ${err.slice(0, 200)}`);
+    throw new Error(`${routedConfig.provider} ${res.status}: ${err.slice(0, 200)}`);
   }
 
   // Record this successful request for rate tracking
@@ -1058,9 +1058,9 @@ export async function generateSuggestions(
   const systemPrompt = await getCachedSystemPrompt(contactName, platform);
   const conversation = buildConversationContext(messages, contactName, "suggestions");
 
-  console.log(`${LOG} Generating suggestions via ${config.provider} (${messages.length} msgs, ~${estimateTokens(systemPrompt + conversation)} tokens)`);
+  console.log(`${LOG} Generating suggestions via ${routedConfig.provider} (${messages.length} msgs, ~${estimateTokens(systemPrompt + conversation)} tokens)`);
 
-  if (config.provider === 'local' || !config.apiKey) {
+  if (routedConfig.provider === 'local' || !routedConfig.apiKey) {
     return { suggestions: localSuggestions(messages), provider: 'local' };
   }
 
@@ -1072,10 +1072,10 @@ export async function generateSuggestions(
     if (!suggestions.length) {
       suggestions = localSuggestions(messages);
     }
-    console.log(`${LOG} Got ${suggestions.length} suggestions from ${config.provider}`);
-    return { suggestions, provider: config.provider };
+    console.log(`${LOG} Got ${suggestions.length} suggestions from ${routedConfig.provider}`);
+    return { suggestions, provider: routedConfig.provider };
   } catch (err) {
-    console.error(`${LOG} ${config.provider} failed, falling back to local:`, err);
+    console.error(`${LOG} ${routedConfig.provider} failed, falling back to local:`, err);
     return {
       suggestions: localSuggestions(messages),
       provider: 'local',
@@ -1171,16 +1171,16 @@ export async function generateAutoResponse(
   const conversation = buildConversationContext(messages, contactName, "auto-respond");
   const userPrompt = `Here is the conversation:\n\n${conversation}\n\nGenerate your JSON response:`;
 
-  console.log(`${LOG} Auto-responding via ${config.provider} (${messages.length} messages, ${settings?.aggressiveness || 'normal'})`);
+  console.log(`${LOG} Auto-responding via ${routedConfig.provider} (${messages.length} messages, ${settings?.aggressiveness || 'normal'})`);
 
-  if (config.provider === 'local' || !config.apiKey) {
+  if (routedConfig.provider === 'local' || !routedConfig.apiKey) {
     const suggestions = localSuggestions(messages);
     return { response: suggestions[0] || 'Hey', tier: 'low', reason: 'local fallback', sendPicture: null, provider: 'local' };
   }
 
   try {
     let text: string;
-    if (config.provider === 'local') {
+    if (routedConfig.provider === 'local') {
       text = localSuggestions(messages)[0] || 'Hey';
     } else {
       text = (await callProvider(config, systemPrompt, userPrompt, 'auto-respond', { maxTokens: 128 })).trim();
@@ -1189,7 +1189,7 @@ export async function generateAutoResponse(
     // Parse the JSON response to extract tier + picture suggestion
     const parsed = parseAutoRespondJson(text);
     console.log(`${LOG} Auto-response: tier=${parsed.tier}, response="${parsed.response.slice(0, 50)}..."`);
-    return { ...parsed, provider: config.provider };
+    return { ...parsed, provider: routedConfig.provider };
   } catch (err) {
     console.error(`${LOG} Auto-respond failed:`, err);
     return { response: localSuggestions(messages)[0] || 'Hey', tier: 'low', reason: 'fallback', sendPicture: null, provider: 'local', error: (err as Error).message };
@@ -1221,7 +1221,7 @@ export async function generateGreeting(
   const config = await getBestProvider();
   const prompt = buildGreetingPrompt(platform);
 
-  if (config.provider === 'local' || !config.apiKey) {
+  if (routedConfig.provider === 'local' || !routedConfig.apiKey) {
     const hour = new Date().getHours();
     const greetings = hour < 12
       ? ['Good morning!', 'Morning, how are you?']
@@ -1265,7 +1265,7 @@ export async function generateNickname(
   if (metadata.ethnicity) clues.push(`Ethnicity: ${metadata.ethnicity}`);
   if (lastMessageBody) clues.push(`Last message: "${lastMessageBody.slice(0, 60)}"`);
 
-  if (config.provider === 'local' || !config.apiKey) {
+  if (routedConfig.provider === 'local' || !routedConfig.apiKey) {
     // Generate a simple descriptive nickname locally
     const parts: string[] = [];
     if (metadata.bodyType || metadata.body) parts.push(String(metadata.bodyType || metadata.body));
@@ -1297,7 +1297,7 @@ export async function extractDossierFields(
   existingDossier: Record<string, unknown>,
 ): Promise<Record<string, string>> {
   const config = await getBestProvider();
-  if (config.provider === 'local' || !config.apiKey) {
+  if (routedConfig.provider === 'local' || !routedConfig.apiKey) {
     return localDossierExtraction(messages);
   }
 
@@ -1396,7 +1396,7 @@ export async function generateConversationSummary(
   platform: string,
 ): Promise<{ text: string; commitments: string[] }> {
   const config = await getBestProvider();
-  if (config.provider === 'local' || !config.apiKey) {
+  if (routedConfig.provider === 'local' || !routedConfig.apiKey) {
     return localSummary(messages);
   }
 
