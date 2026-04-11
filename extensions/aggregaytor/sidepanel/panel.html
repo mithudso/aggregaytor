@@ -141,6 +141,15 @@
   </div>
   <div id="draft-panel" class="draft-panel" style="display:none"></div>
 
+  <!-- Photo gallery overlay -->
+  <div id="gallery-overlay" class="gallery-overlay" style="display:none">
+    <div class="gallery-header">
+      <span id="gallery-title" class="gallery-title">Photos</span>
+      <button class="gallery-close" id="gallery-close">✕</button>
+    </div>
+    <div id="gallery-grid" class="gallery-grid"></div>
+  </div>
+
   <!-- Inbox thread list -->
   <div id="thread-list" class="thread-list">
     <div class="empty-state"><h2>No messages yet</h2><p>Visit a connected site to start capturing messages.</p></div>
@@ -151,6 +160,7 @@
     <!-- Thread toolbar -->
     <div class="thread-toolbar">
       <button class="toolbar-btn" id="btn-resync" title="Re-fetch conversation from platform">↻ Resync</button>
+      <button class="toolbar-btn" id="btn-gallery" title="View photos">🖼 Photos</button>
       <button class="toolbar-btn" id="btn-thread-search" title="Search this chat">🔍 Search</button>
       <button class="toolbar-btn" id="btn-archive-thread" title="Archive & hide profile">📦 Archive</button>
       <button class="toolbar-btn danger" id="btn-clear-thread" title="Clear local message history">Clear</button>

@@ -204,7 +204,14 @@ function renderThreads(summaries) {
   // Click handlers
   container.querySelectorAll('.thread-item').forEach(el => {
     el.addEventListener('click', (e) => {
-      if (e.target.closest('.thread-actions')) return; // handled by action icons
+      if (e.target.closest('.thread-actions')) return;
+      if (e.target.closest('.thread-fav')) return;
+      // Click on avatar opens gallery, click elsewhere opens thread
+      if (e.target.closest('.avatar')) {
+        e.stopPropagation();
+        openGallery(el.dataset.contactId, el.dataset.name);
+        return;
+      }
       openThread(el.dataset.contactId, el.dataset.platform, el.dataset.name);
     });
   });
@@ -1324,6 +1331,56 @@ function updateTotalUnread(count) {
 }
 
 // ── Settings button ─────────────────────────────────────────────────────────
+
+// ── Photo gallery ───────────────────────────────────────────────────────────
+
+async function openGallery(contactId, displayName) {
+  const overlay = document.getElementById('gallery-overlay');
+  const grid = document.getElementById('gallery-grid');
+  document.getElementById('gallery-title').textContent = `${displayName || stripPrefix(contactId)} — Photos`;
+
+  const pics = [];
+  try {
+    const summRes = await chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} });
+    const thread = summRes?.summaries?.find(s => s.contactId === contactId);
+    const contact = thread?.contact;
+    if (contact?.avatarUrl) pics.push(contact.avatarUrl);
+    if (Array.isArray(contact?.metadata?.photos)) {
+      for (const p of contact.metadata.photos) {
+        if (typeof p === 'string' && p.startsWith('http') && !pics.includes(p)) pics.push(p);
+      }
+    }
+    const dossierRes = await chrome.runtime.sendMessage({ type: 'GET_DOSSIER', contactId });
+    if (dossierRes?.dossier?.otherProfileLinks) {
+      for (const link of dossierRes.dossier.otherProfileLinks) {
+        if (/\.(jpg|jpeg|png|webp|gif)/i.test(link) && !pics.includes(link)) pics.push(link);
+      }
+    }
+  } catch {}
+
+  if (!pics.length) {
+    grid.innerHTML = '<div class="gallery-empty">No photos synced yet.<br>Open their profile and click 📷 to sync.</div>';
+  } else {
+    grid.innerHTML = pics.map((url, i) =>
+      `<div class="gallery-item" data-index="${i}"><img src="${esc(url)}" alt="Photo ${i + 1}" loading="lazy"></div>`
+    ).join('');
+    grid.querySelectorAll('.gallery-item').forEach(item => {
+      item.addEventListener('click', () => {
+        if (item.classList.contains('full')) item.classList.remove('full');
+        else { grid.querySelectorAll('.gallery-item.full').forEach(f => f.classList.remove('full')); item.classList.add('full'); }
+      });
+    });
+  }
+  overlay.style.display = '';
+}
+
+document.getElementById('gallery-close').addEventListener('click', () => {
+  document.getElementById('gallery-overlay').style.display = 'none';
+});
+
+document.getElementById('btn-gallery').addEventListener('click', () => {
+  if (currentThread) openGallery(currentThread.contactId, currentThread.displayName || stripPrefix(currentThread.contactId));
+});
 
 // ── Sync pics from header ───────────────────────────────────────────────────
 
