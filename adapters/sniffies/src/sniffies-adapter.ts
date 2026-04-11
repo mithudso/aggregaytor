@@ -293,7 +293,11 @@ export class SniffiesAdapter extends BaseAdapter {
 
         // Detect global/group chat context
         const isGlobal = url.includes('global') || url.includes('group') ||
-          (typeof obj.channel === 'string' && (obj.channel.includes('global') || obj.channel.includes('group')));
+          url.includes('cruising') || url.includes('feed') ||
+          (typeof obj.channel === 'string' && (obj.channel.includes('global') || obj.channel.includes('group'))) ||
+          (typeof obj.type === 'string' && (obj.type.includes('cruising') || obj.type.includes('global') || obj.type.includes('broadcast'))) ||
+          (typeof obj.feedType === 'string') ||
+          (typeof obj.cruisingUpdate === 'object');
         const threadKey = isGlobal ? 'global-chat' : profileId;
 
         // Collect sender attributes for global chat rendering

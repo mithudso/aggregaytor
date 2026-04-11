@@ -123,7 +123,10 @@ async function handleMessage(msg: any): Promise<any> {
         try {
           const res = await chrome.tabs.sendMessage(tab.id, { type: 'SCRAPE_AVATARS' });
           totalScraped += res?.count || 0;
-        } catch {}
+          console.log(`${LOG} Scraped ${res?.count || 0} avatars from tab ${tab.id} (${tab.url?.slice(0, 40)})`);
+        } catch (err) {
+          console.warn(`${LOG} SCRAPE_AVATARS failed on tab ${tab.id} (${tab.url?.slice(0, 40)}):`, (err as Error).message);
+        }
       }
       return { ok: true, count: totalScraped, tabs: tabCount };
     }

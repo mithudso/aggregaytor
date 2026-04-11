@@ -268,7 +268,19 @@ function renderThreads(summaries) {
   });
 }
 
+// Cache hover preview data to avoid repeated queries
+const hoverPreviewCache = new Map();
+const HOVER_CACHE_TTL = 30_000; // 30 seconds
+
 async function loadHoverPreview(contactId, platform, previewEl, threadEl) {
+  // Check cache first
+  const cached = hoverPreviewCache.get(contactId);
+  if (cached && Date.now() - cached.ts < HOVER_CACHE_TTL) {
+    previewEl.innerHTML = cached.html;
+    previewEl.classList.add('active');
+    return;
+  }
+
   previewEl.innerHTML = '<div class="hp-loading">Loading...</div>';
   previewEl.classList.add('active');
 
@@ -324,6 +336,8 @@ async function loadHoverPreview(contactId, platform, previewEl, threadEl) {
         `).join('') : '<div class="hp-empty">No messages</div>'}
       </div>
     `;
+    // Cache the rendered preview
+    hoverPreviewCache.set(contactId, { html: previewEl.innerHTML, ts: Date.now() });
   } catch (err) {
     previewEl.innerHTML = '<div class="hp-loading">Preview unavailable</div>';
   }
