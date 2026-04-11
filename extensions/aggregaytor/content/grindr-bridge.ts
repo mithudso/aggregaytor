@@ -27,6 +27,38 @@ try {
       sendResponse({ ok: true });
       return true;
     }
+    if (message.type === 'SCRAPE_AVATARS') {
+      let count = 0;
+      // Grindr profile images are <img> elements in the grid/chat
+      document.querySelectorAll('img[src*="cdns.grindr.com"], img[src*="grindr"]').forEach(img => {
+        const src = (img as HTMLImageElement).src;
+        if (!src || !src.startsWith('http')) return;
+        // Try to find the associated profile ID from nearby elements or URL
+        const container = img.closest('[data-profile-id], [data-conversation-id], a[href*="/chat/"]');
+        const profileId = container?.getAttribute('data-profile-id')
+          || container?.getAttribute('data-conversation-id')
+          || container?.getAttribute('href')?.match(/\/chat\/([^/?#]+)/)?.[1]
+          || '';
+        if (!profileId) return;
+        chrome.runtime.sendMessage({
+          type: 'ADAPTER_CONTACTS',
+          platform: 'grindr',
+          payload: [{
+            id: `grindr:${profileId}`,
+            platform: 'grindr',
+            platformUserId: profileId,
+            displayName: '',
+            profileUrl: `https://web.grindr.com/chat/${profileId}`,
+            avatarUrl: src,
+            lastSeen: new Date().toISOString(),
+            metadata: {},
+          }],
+        }).catch(() => {});
+        count++;
+      });
+      sendResponse({ ok: true, count });
+      return true;
+    }
     return false;
   });
 } catch { contextValid = false; }

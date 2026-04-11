@@ -56,6 +56,24 @@ async function handleMessage(msg: any): Promise<any> {
       return { ok: true, messages: matches };
     }
     case 'NAVIGATE_TO_CONVERSATION': { await navigateToConversation(msg.platform, msg.contactId); return { ok: true }; }
+    case 'SYNC_PROFILE_PICS': {
+      // Send scrape request to all platform tabs
+      const platformHosts = ['sniffies.com', 'web.grindr.com', 'doublelist.com', 'adam4adam.com'];
+      const allTabs = await chrome.tabs.query({});
+      let tabCount = 0;
+      let totalScraped = 0;
+      for (const tab of allTabs) {
+        if (!tab.id || !tab.url) continue;
+        const isMatch = platformHosts.some(h => tab.url!.includes(h));
+        if (!isMatch) continue;
+        tabCount++;
+        try {
+          const res = await chrome.tabs.sendMessage(tab.id, { type: 'SCRAPE_AVATARS' });
+          totalScraped += res?.count || 0;
+        } catch {}
+      }
+      return { ok: true, count: totalScraped, tabs: tabCount };
+    }
     case 'CLEAR_THREAD_MESSAGES': {
       const db = await getDB();
       const result = await db.find({ selector: { docType: 'message', contactId: msg.contactId } });

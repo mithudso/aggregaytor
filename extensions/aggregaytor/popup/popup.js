@@ -9,6 +9,32 @@ const PROVIDER_INFO = {
   openai: 'GPT-4o-mini. Get key at platform.openai.com',
 };
 
+// ── Sync profile pics ───────────────────────────────────────────────────────
+
+document.getElementById('sync-pics')?.addEventListener('click', async () => {
+  const status = document.getElementById('sync-status');
+  const btn = document.getElementById('sync-pics');
+  btn.disabled = true;
+  btn.textContent = 'Syncing...';
+  status.textContent = 'Sending scrape request to all platform tabs...';
+
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'SYNC_PROFILE_PICS' });
+    if (res?.ok) {
+      status.textContent = `Done! Scraped ${res.count || 0} avatars from ${res.tabs || 0} tab(s).`;
+      status.style.color = '#34d399';
+    } else {
+      status.textContent = res?.error || 'No platform tabs open. Open Sniffies or Grindr first.';
+      status.style.color = '#f87171';
+    }
+  } catch (err) {
+    status.textContent = 'Failed: ' + (err.message || err);
+    status.style.color = '#f87171';
+  }
+  btn.disabled = false;
+  btn.textContent = 'Sync Profile Pictures';
+});
+
 // Section toggle handlers (no inline onclick — CSP disallows it in MV3)
 document.querySelectorAll('[data-toggle]').forEach(el => {
   el.addEventListener('click', () => {

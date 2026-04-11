@@ -46,6 +46,38 @@ try {
       sendResponse({ ok: true });
       return true;
     }
+    if (message.type === 'SCRAPE_AVATARS') {
+      // Tell MAIN world to scrape and report back via events
+      window.dispatchEvent(new CustomEvent('__aggregaytor_scrape_avatars'));
+      // Also scrape from ISOLATED world (can see the DOM)
+      let count = 0;
+      document.querySelectorAll('[style*="sniffiesassets"], .maplibregl-marker, .marker-avatar-image').forEach(el => {
+        const bg = (el as HTMLElement).style?.backgroundImage || '';
+        const match = bg.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/i);
+        if (!match) return;
+        const url = match[1];
+        const idMatch = url.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+        if (!idMatch) return;
+        const profileId = idMatch[1].toLowerCase();
+        chrome.runtime.sendMessage({
+          type: 'ADAPTER_CONTACTS',
+          platform: 'sniffies',
+          payload: [{
+            id: `sniffies:${profileId}`,
+            platform: 'sniffies',
+            platformUserId: profileId,
+            displayName: '',
+            profileUrl: `https://sniffies.com/profile/${profileId}`,
+            avatarUrl: url,
+            lastSeen: new Date().toISOString(),
+            metadata: {},
+          }],
+        }).catch(() => {});
+        count++;
+      });
+      sendResponse({ ok: true, count });
+      return true;
+    }
     return false;
   });
 } catch {
