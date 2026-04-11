@@ -7,7 +7,7 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      width: 300px;
+      width: 320px;
       font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
       background: #0f1419;
       color: #e7e9ea;
@@ -15,34 +15,61 @@
       padding: 16px;
     }
     h1 { font-size: 16px; margin-bottom: 12px; }
+    h2 { font-size: 13px; font-weight: 600; color: #9ca3af; margin: 14px 0 8px; }
     .stat {
-      display: flex;
-      justify-content: space-between;
-      padding: 6px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.06);
+      display: flex; justify-content: space-between;
+      padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.06);
     }
     .stat-label { color: #9ca3af; }
     .stat-value { font-weight: 600; }
     .btn {
-      display: block;
-      width: 100%;
-      margin-top: 12px;
-      padding: 8px;
-      border-radius: 8px;
-      border: 1px solid rgba(59, 130, 246, 0.4);
-      background: rgba(59, 130, 246, 0.15);
-      color: #93c5fd;
-      font-size: 13px;
-      cursor: pointer;
-      text-align: center;
+      display: block; width: 100%; margin-top: 10px; padding: 8px;
+      border-radius: 8px; border: 1px solid rgba(59,130,246,0.4);
+      background: rgba(59,130,246,0.15); color: #93c5fd;
+      font-size: 13px; cursor: pointer; text-align: center;
     }
-    .btn:hover { background: rgba(59, 130, 246, 0.25); }
+    .btn:hover { background: rgba(59,130,246,0.25); }
+    label { display: block; font-size: 12px; color: #9ca3af; margin-bottom: 4px; }
+    select, input[type="password"], input[type="text"] {
+      width: 100%; padding: 6px 8px; border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.15);
+      background: rgba(255,255,255,0.06); color: #e7e9ea;
+      font-size: 12px; font-family: inherit; margin-bottom: 8px;
+    }
+    select:focus, input:focus { outline: none; border-color: rgba(59,130,246,0.5); }
+    .saved { color: #10b981; font-size: 11px; display: none; margin-top: 4px; }
+    .saved.show { display: block; }
+    .provider-info { font-size: 11px; color: #6b7280; margin-bottom: 8px; line-height: 1.3; }
   </style>
 </head>
 <body>
   <h1>Aggregaytor</h1>
   <div id="stats"></div>
   <button class="btn" id="open-panel">Open Inbox</button>
+
+  <h2>AI Response Suggestions</h2>
+  <label for="provider">Provider</label>
+  <select id="provider">
+    <option value="local">Local (no API key needed)</option>
+    <option value="anthropic">Claude (Anthropic)</option>
+    <option value="gemini">Gemini (Google)</option>
+    <option value="openai">OpenAI</option>
+  </select>
+  <div id="provider-info" class="provider-info"></div>
+
+  <div id="api-key-section" style="display:none">
+    <label for="api-key">API Key</label>
+    <input type="password" id="api-key" placeholder="Enter your API key">
+  </div>
+
+  <div id="model-section" style="display:none">
+    <label for="model">Model (optional)</label>
+    <input type="text" id="model" placeholder="Leave blank for default">
+  </div>
+
+  <button class="btn" id="save-btn" style="display:none">Save Settings</button>
+  <div class="saved" id="saved-msg">Settings saved</div>
+
   <script src="popup.js"></script>
 </body>
 </html>

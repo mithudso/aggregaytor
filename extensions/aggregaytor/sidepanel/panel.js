@@ -164,107 +164,43 @@ async function generateSuggestions() {
 
   const suggestionsEl = document.getElementById('suggestions');
 
-  // Build context from recent messages
-  const recent = currentMessages.slice(-20);
-  const contextLines = recent.map(m =>
-    `${m.direction === 'out' ? 'You' : 'Them'}: ${m.body}`
-  );
-
-  // Generate suggestions based on conversation patterns
-  const suggestions = generateLocalSuggestions(contextLines, recent);
-
-  suggestionsEl.innerHTML = '<div class="label">Suggested responses</div>' +
-    suggestions.map(s =>
-      `<div class="suggestion-chip">${esc(s)}</div>`
-    ).join('');
-  suggestionsEl.classList.add('active');
-
-  suggestionsEl.querySelectorAll('.suggestion-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      document.getElementById('response-input').value = chip.textContent;
-      suggestionsEl.classList.remove('active');
+  try {
+    // Send to service worker which calls the configured LLM
+    const res = await chrome.runtime.sendMessage({
+      type: 'GENERATE_SUGGESTIONS',
+      messages: currentMessages.slice(-30).map(m => ({
+        direction: m.direction,
+        body: m.body,
+        timestamp: m.timestamp,
+      })),
+      contactName: currentThread.displayName || stripPrefix(currentThread.contactId),
+      platform: currentThread.platform,
     });
-  });
+
+    const suggestions = res?.suggestions || ['Hey', 'Sounds good', 'What do you think?'];
+    const provider = res?.provider || 'local';
+    const providerLabel = provider === 'local' ? '' : ` via ${provider}`;
+
+    suggestionsEl.innerHTML = `<div class="label">Suggested responses${providerLabel}${res?.error ? ' (fallback)' : ''}</div>` +
+      suggestions.map(s =>
+        `<div class="suggestion-chip">${esc(s)}</div>`
+      ).join('');
+    suggestionsEl.classList.add('active');
+
+    suggestionsEl.querySelectorAll('.suggestion-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        document.getElementById('response-input').value = chip.textContent;
+        suggestionsEl.classList.remove('active');
+      });
+    });
+  } catch (err) {
+    console.error('[Aggregaytor:Panel] Suggestion error:', err);
+    suggestionsEl.innerHTML = '<div class="label">Could not generate suggestions</div>';
+    suggestionsEl.classList.add('active');
+  }
 
   btn.disabled = false;
   btn.textContent = 'Suggest';
-}
-
-/**
- * Local suggestion generator — analyzes conversation context to produce
- * relevant response options without requiring an external API.
- */
-function generateLocalSuggestions(contextLines, messages) {
-  const lastMsg = messages[messages.length - 1];
-  const lastBody = (lastMsg?.body || '').toLowerCase().trim();
-  const lastDir = lastMsg?.direction;
-  const suggestions = [];
-
-  // If last message was from them, suggest contextual replies
-  if (lastDir === 'in') {
-    // Greeting patterns
-    if (/^(hey|hi|hello|howdy|sup|what'?s up|yo)\b/i.test(lastBody)) {
-      suggestions.push('Hey! How are you?');
-      suggestions.push("What's up?");
-      suggestions.push('Hey there, how\'s your night going?');
-    }
-    // Question patterns
-    else if (/\?$/.test(lastBody)) {
-      if (/host|place|where|location/i.test(lastBody)) {
-        suggestions.push('I can host');
-        suggestions.push("Can't host, can you?");
-        suggestions.push('Let me check and get back to you');
-      }
-      else if (/when|tonight|now|free|available|time/i.test(lastBody)) {
-        suggestions.push("I'm free now");
-        suggestions.push('Later tonight works');
-        suggestions.push("What time works for you?");
-      }
-      else if (/looking for|into|what do you like/i.test(lastBody)) {
-        suggestions.push('Open to whatever, wbu?');
-        suggestions.push('Check my profile, wbu?');
-      }
-      else {
-        suggestions.push('Yeah for sure');
-        suggestions.push('Let me think about it');
-        suggestions.push('What about you?');
-      }
-    }
-    // Compliment / interest
-    else if (/hot|sexy|cute|handsome|nice|good looking/i.test(lastBody)) {
-      suggestions.push('Thanks! You too');
-      suggestions.push('Appreciate that, you\'re not bad yourself');
-    }
-    // Location/logistics
-    else if (/address|come over|on my way|omw|heading/i.test(lastBody)) {
-      suggestions.push('Sounds good, see you soon');
-      suggestions.push('Let me know when you\'re close');
-    }
-    // Generic fallbacks
-    else {
-      suggestions.push('Nice');
-      suggestions.push('Tell me more');
-      suggestions.push('Sounds good');
-    }
-  }
-  // If we sent the last message, suggest follow-ups
-  else if (lastDir === 'out') {
-    const timeSince = Date.now() - new Date(lastMsg.timestamp).getTime();
-    if (timeSince > 30 * 60_000) {
-      suggestions.push('Still interested?');
-      suggestions.push('Let me know if you\'re still around');
-    } else {
-      suggestions.push('So what do you think?');
-    }
-  }
-
-  // Always add a few universal options
-  if (suggestions.length < 3) {
-    suggestions.push("What are you looking for?");
-    suggestions.push("Got any pics?");
-  }
-
-  return suggestions.slice(0, 4);
 }
 
 // ── Event listeners ─────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ import {
   upsertMessages, upsertContact, getUnreadCount, getThreadSummaries,
   getMessagesByContact, markThreadRead,
 } from '@aggregaytor/store';
+import { generateSuggestions, getLLMConfig, saveLLMConfig } from './llm.js';
 import type { ThreadSummary } from '@aggregaytor/store';
 
 const LOG = '[Aggregaytor:SW]';
@@ -68,6 +69,27 @@ chrome.runtime.onMessage.addListener(
           updateBadgeCount();
           sendResponse({ ok: true, count });
         })
+        .catch(err => sendResponse({ ok: false, error: (err as Error).message }));
+      return true;
+    }
+
+    if (message.type === 'GENERATE_SUGGESTIONS') {
+      generateSuggestions(message.messages, message.contactName, message.platform)
+        .then(result => sendResponse({ ok: true, ...result }))
+        .catch(err => sendResponse({ ok: false, error: (err as Error).message }));
+      return true;
+    }
+
+    if (message.type === 'GET_LLM_CONFIG') {
+      getLLMConfig()
+        .then(config => sendResponse({ ok: true, config }))
+        .catch(err => sendResponse({ ok: false, error: (err as Error).message }));
+      return true;
+    }
+
+    if (message.type === 'SAVE_LLM_CONFIG') {
+      saveLLMConfig(message.config)
+        .then(() => sendResponse({ ok: true }))
         .catch(err => sendResponse({ ok: false, error: (err as Error).message }));
       return true;
     }
