@@ -1,9 +1,11 @@
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, type Plugin, build as viteBuild } from 'vite';
 import { resolve } from 'path';
-import { copyFileSync, cpSync, mkdirSync, existsSync } from 'fs';
+import { copyFileSync, cpSync, mkdirSync, existsSync, writeFileSync } from 'fs';
 
 /**
- * Plugin that copies static extension assets into dist/ after build.
+ * Plugin that:
+ * 1. Copies static extension assets into dist/ after build
+ * 2. Builds content scripts as separate IIFE bundles (no shared chunks)
  */
 function copyExtensionAssets(): Plugin {
   return {
@@ -12,10 +14,8 @@ function copyExtensionAssets(): Plugin {
       const src = resolve(__dirname);
       const dist = resolve(__dirname, 'dist');
 
-      // Copy manifest
       copyFileSync(resolve(src, 'manifest.json'), resolve(dist, 'manifest.json'));
 
-      // Copy static dirs
       for (const dir of ['sidepanel', 'popup', 'icons']) {
         const srcDir = resolve(src, dir);
         const destDir = resolve(dist, dir);
@@ -28,8 +28,58 @@ function copyExtensionAssets(): Plugin {
   };
 }
 
+/**
+ * Plugin that builds each MAIN world content script as a separate
+ * self-contained IIFE bundle after the main build completes.
+ * This prevents shared chunks that break in MAIN world injection.
+ */
+function buildContentScriptsIIFE(): Plugin {
+  return {
+    name: 'build-content-iife',
+    async closeBundle() {
+      const contentScripts = [
+        { name: 'sniffies', entry: resolve(__dirname, 'content/sniffies.ts') },
+        { name: 'grindr', entry: resolve(__dirname, 'content/grindr.ts') },
+      ];
+
+      for (const { name, entry } of contentScripts) {
+        await viteBuild({
+          configFile: false,
+          build: {
+            outDir: resolve(__dirname, 'dist/content'),
+            emptyOutDir: false,
+            sourcemap: true,
+            target: 'es2022',
+            minify: false,
+            lib: {
+              entry,
+              name: `aggregaytor_${name}`,
+              formats: ['iife'],
+              fileName: () => `${name}.js`,
+            },
+            rollupOptions: {
+              output: {
+                inlineDynamicImports: true,
+              },
+            },
+          },
+          resolve: {
+            alias: {
+              '@aggregaytor/context-engine': resolve(__dirname, '../../packages/context-engine/src/index.ts'),
+              '@aggregaytor/adapter-core': resolve(__dirname, '../../packages/adapter-core/src/index.ts'),
+              '@aggregaytor/adapter-sniffies': resolve(__dirname, '../../adapters/sniffies/src/index.ts'),
+              '@aggregaytor/adapter-grindr': resolve(__dirname, '../../adapters/grindr/src/index.ts'),
+            },
+          },
+          logLevel: 'warn',
+        });
+      }
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [copyExtensionAssets()],
+  plugins: [copyExtensionAssets(), buildContentScriptsIIFE()],
   build: {
     outDir: 'dist',
     emptyOutDir: true,
@@ -37,11 +87,13 @@ export default defineConfig({
     target: 'es2022',
     minify: false,
     rollupOptions: {
+      // Only build service worker + bridge/migrate scripts in the main build.
+      // MAIN world content scripts (sniffies.js, grindr.js) are built separately as IIFE.
       input: {
         'background/service-worker': resolve(__dirname, 'background/service-worker.ts'),
-        'content/sniffies': resolve(__dirname, 'content/sniffies.ts'),
         'content/sniffies-bridge': resolve(__dirname, 'content/sniffies-bridge.ts'),
         'content/sniffies-migrate': resolve(__dirname, 'content/sniffies-migrate.ts'),
+        'content/grindr-bridge': resolve(__dirname, 'content/grindr-bridge.ts'),
       },
       output: {
         entryFileNames: '[name].js',
@@ -52,15 +104,14 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      // Polyfill Node.js 'events' module for PouchDB in the service worker
       events: 'events',
       '@aggregaytor/context-engine': resolve(__dirname, '../../packages/context-engine/src/index.ts'),
       '@aggregaytor/adapter-core': resolve(__dirname, '../../packages/adapter-core/src/index.ts'),
       '@aggregaytor/store': resolve(__dirname, '../../packages/store/src/index.ts'),
       '@aggregaytor/adapter-sniffies': resolve(__dirname, '../../adapters/sniffies/src/index.ts'),
+      '@aggregaytor/adapter-grindr': resolve(__dirname, '../../adapters/grindr/src/index.ts'),
     },
   },
-  // Don't externalize 'events' — PouchDB needs it
   ssr: {
     noExternal: ['events'],
   },

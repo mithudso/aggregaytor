@@ -1,10 +1,8 @@
 /**
- * sniffies-bridge.ts — ISOLATED world bridge for Sniffies.
- *
- * Listens for CustomEvents from MAIN world, forwards to service worker.
+ * grindr-bridge.ts — ISOLATED world bridge for Grindr Web.
  */
 
-const LOG = '[Aggregaytor:Bridge:Sniffies]';
+const LOG = '[Aggregaytor:Bridge:Grindr]';
 
 window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
   const detail = event.detail;
@@ -27,10 +25,9 @@ window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
   }
 }) as EventListener);
 
-// Inject MAIN world script
 console.log(`${LOG} Injecting MAIN world script...`);
 const script = document.createElement('script');
-script.src = chrome.runtime.getURL('content/sniffies.js');
+script.src = chrome.runtime.getURL('content/grindr.js');
 (document.head || document.documentElement).appendChild(script);
 script.onload = () => {
   console.log(`${LOG} MAIN world script loaded`);

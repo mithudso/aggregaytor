@@ -101,6 +101,9 @@ importers:
       '@aggregaytor/adapter-core':
         specifier: workspace:*
         version: link:../../packages/adapter-core
+      '@aggregaytor/adapter-grindr':
+        specifier: workspace:*
+        version: link:../../adapters/grindr
       '@aggregaytor/adapter-sniffies':
         specifier: workspace:*
         version: link:../../adapters/sniffies

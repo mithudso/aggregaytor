@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Aggregaytor",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Unified message inbox across platforms",
   "permissions": [
     "storage",
@@ -32,12 +32,21 @@
       "matches": ["https://sniffies.com/*"],
       "js": ["content/sniffies-bridge.js", "content/sniffies-migrate.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://web.grindr.com/*"],
+      "js": ["content/grindr-bridge.js"],
+      "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
       "resources": ["content/sniffies.js"],
       "matches": ["https://sniffies.com/*"]
+    },
+    {
+      "resources": ["content/grindr.js"],
+      "matches": ["https://web.grindr.com/*"]
     }
   ],
   "action": {

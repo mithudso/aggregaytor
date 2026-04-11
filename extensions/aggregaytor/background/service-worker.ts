@@ -1,37 +1,52 @@
 /**
  * service-worker.ts — Extension background service worker.
- *
- * Routes messages from content scripts to PouchDB store,
- * manages badge counts, and serves UI queries.
  */
-
-// Note: In the final Vite build, these imports will be bundled.
-// For now, this serves as the architectural reference.
 
 import type { UnifiedMessage, UnifiedContact, Platform } from '@aggregaytor/adapter-core';
 import { upsertMessages, upsertContact, getUnreadCount, getThreadSummaries } from '@aggregaytor/store';
 import type { ThreadSummary } from '@aggregaytor/store';
 
-// Message routing from content scripts
+const LOG = '[Aggregaytor:SW]';
+
+console.log(`${LOG} Service worker starting...`);
+
 chrome.runtime.onMessage.addListener(
-  (message: any, _sender: chrome.runtime.MessageSender, sendResponse: (response: any) => void) => {
+  (message: any, sender: chrome.runtime.MessageSender, sendResponse: (response: any) => void) => {
+    console.log(`${LOG} Received message:`, message.type, message.platform || '', 'from tab:', sender.tab?.id);
+
     if (message.type === 'ADAPTER_MESSAGES') {
-      handleIncomingMessages(message.payload as UnifiedMessage[], message.platform as Platform)
-        .then(result => sendResponse({ ok: true, ...result }))
-        .catch(err => sendResponse({ ok: false, error: (err as Error).message }));
-      return true; // async response
+      const msgs = message.payload as UnifiedMessage[];
+      console.log(`${LOG} Processing ${msgs.length} messages from ${message.platform}`);
+      handleIncomingMessages(msgs, message.platform as Platform)
+        .then(result => {
+          console.log(`${LOG} Stored: ${result.created} new, ${result.updated} updated`);
+          sendResponse({ ok: true, ...result });
+        })
+        .catch(err => {
+          console.error(`${LOG} Store error:`, err);
+          sendResponse({ ok: false, error: (err as Error).message });
+        });
+      return true;
     }
 
     if (message.type === 'ADAPTER_CONTACTS') {
-      handleIncomingContacts(message.payload as UnifiedContact[])
+      const contacts = message.payload as UnifiedContact[];
+      console.log(`${LOG} Processing ${contacts.length} contacts from ${message.platform}`);
+      handleIncomingContacts(contacts)
         .then(() => sendResponse({ ok: true }))
-        .catch(err => sendResponse({ ok: false, error: (err as Error).message }));
+        .catch(err => {
+          console.error(`${LOG} Contact store error:`, err);
+          sendResponse({ ok: false, error: (err as Error).message });
+        });
       return true;
     }
 
     if (message.type === 'GET_THREAD_SUMMARIES') {
       getThreadSummaries(message.opts)
-        .then((summaries: ThreadSummary[]) => sendResponse({ ok: true, summaries }))
+        .then((summaries: ThreadSummary[]) => {
+          console.log(`${LOG} Returning ${summaries.length} thread summaries`);
+          sendResponse({ ok: true, summaries });
+        })
         .catch(err => sendResponse({ ok: false, error: (err as Error).message }));
       return true;
     }
@@ -53,13 +68,8 @@ async function handleIncomingMessages(
 ): Promise<{ created: number; updated: number }> {
   const result = await upsertMessages(messages);
   await updateBadgeCount();
-  // Notify side panel of new messages
   try {
-    chrome.runtime.sendMessage({
-      type: 'NEW_MESSAGES',
-      platform,
-      count: result.created,
-    });
+    chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform, count: result.created });
   } catch {
     // side panel may not be open
   }
@@ -73,18 +83,20 @@ async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void>
 }
 
 async function updateBadgeCount(): Promise<void> {
-  const count = await getUnreadCount();
-  chrome.action.setBadgeText({ text: count > 0 ? String(count) : '' });
-  chrome.action.setBadgeBackgroundColor({ color: '#FF6B6B' });
+  try {
+    const count = await getUnreadCount();
+    chrome.action.setBadgeText({ text: count > 0 ? String(count) : '' });
+    chrome.action.setBadgeBackgroundColor({ color: '#FF6B6B' });
+  } catch (err) {
+    console.warn(`${LOG} Badge update failed:`, err);
+  }
 }
 
-// Update badge on startup
 updateBadgeCount().catch(() => {});
 
-// Periodic badge refresh
 chrome.alarms.create('badge-refresh', { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'badge-refresh') {
-    updateBadgeCount().catch(() => {});
-  }
+  if (alarm.name === 'badge-refresh') updateBadgeCount().catch(() => {});
 });
+
+console.log(`${LOG} Service worker ready`);

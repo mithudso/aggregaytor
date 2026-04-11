@@ -1,6 +1,6 @@
 {
   "name": "@aggregaytor/extension",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@aggregaytor/adapter-core": "workspace:*",
+    "@aggregaytor/adapter-grindr": "workspace:*",
     "@aggregaytor/adapter-sniffies": "workspace:*",
     "@aggregaytor/context-engine": "workspace:*",
     "@aggregaytor/store": "workspace:*",
