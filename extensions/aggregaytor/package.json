@@ -1,6 +1,6 @@
 {
   "name": "@aggregaytor/extension",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
     "@aggregaytor/adapter-sniffies": "workspace:*",
     "@aggregaytor/context-engine": "workspace:*",
     "@aggregaytor/store": "workspace:*",
+    "events": "^3.3.0",
     "pouchdb-browser": "^9.0.0",
     "pouchdb-find": "^9.0.0"
   },

@@ -52,10 +52,19 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      // Polyfill Node.js 'events' module for PouchDB in the service worker
+      events: 'events',
       '@aggregaytor/context-engine': resolve(__dirname, '../../packages/context-engine/src/index.ts'),
       '@aggregaytor/adapter-core': resolve(__dirname, '../../packages/adapter-core/src/index.ts'),
       '@aggregaytor/store': resolve(__dirname, '../../packages/store/src/index.ts'),
       '@aggregaytor/adapter-sniffies': resolve(__dirname, '../../adapters/sniffies/src/index.ts'),
     },
+  },
+  // Don't externalize 'events' — PouchDB needs it
+  ssr: {
+    noExternal: ['events'],
+  },
+  optimizeDeps: {
+    include: ['events', 'pouchdb-browser', 'pouchdb-find'],
   },
 });
