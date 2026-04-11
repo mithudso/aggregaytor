@@ -17,7 +17,7 @@ import {
   getContact,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
-import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, getLLMConfig, saveLLMConfig } from './llm.js';
+import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus } from './llm.js';
 import { getDossier, upsertDossier, setAutoExtractedField } from '@aggregaytor/store';
 
 const LOG = '[Aggregaytor:SW]';
@@ -79,6 +79,9 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GENERATE_SUGGESTIONS': return { ok: true, ...(await generateSuggestions(msg.messages, msg.contactName, msg.platform)) };
     case 'GET_LLM_CONFIG': return { ok: true, config: await getLLMConfig() };
     case 'SAVE_LLM_CONFIG': { await saveLLMConfig(msg.config); return { ok: true }; }
+    case 'GET_LLM_RATE_SETTINGS': return { ok: true, settings: await getLLMRateSettings() };
+    case 'SAVE_LLM_RATE_SETTINGS': { await saveLLMRateSettings(msg.settings); return { ok: true }; }
+    case 'GET_LLM_QUEUE_STATUS': return { ok: true, status: getLLMQueueStatus() };
 
     // Session summary
     case 'GENERATE_SESSION_SUMMARY': {

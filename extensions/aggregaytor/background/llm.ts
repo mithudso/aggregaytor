@@ -31,6 +31,7 @@ interface SuggestionResult {
 }
 
 const SETTINGS_KEY = 'aggregaytor_llm_settings';
+const RATE_SETTINGS_KEY = 'aggregaytor_llm_rate_settings';
 
 const DEFAULT_MODELS: Record<LLMProvider, string> = {
   gemini: 'gemini-2.0-flash',
@@ -39,6 +40,173 @@ const DEFAULT_MODELS: Record<LLMProvider, string> = {
   local: 'local',
 };
 
+// ── Rate limiting + backoff ─────────────────────────────────────────────────
+
+export interface LLMRateSettings {
+  enabled: boolean;                // master toggle for LLM calls
+  maxRequestsPerMinute: number;    // 0 = unlimited
+  enableAutoRespond: boolean;      // allow auto-respond LLM calls
+  enableSuggestions: boolean;      // allow suggestion LLM calls
+  enableDossierExtract: boolean;   // allow dossier extraction calls
+  enableNicknames: boolean;        // allow nickname generation calls
+  enableSummaries: boolean;        // allow conversation summary calls
+}
+
+const DEFAULT_RATE_SETTINGS: LLMRateSettings = {
+  enabled: true,
+  maxRequestsPerMinute: 10,
+  enableAutoRespond: true,
+  enableSuggestions: true,
+  enableDossierExtract: true,
+  enableNicknames: true,
+  enableSummaries: true,
+};
+
+export async function getLLMRateSettings(): Promise<LLMRateSettings> {
+  const data = await chrome.storage.local.get(RATE_SETTINGS_KEY);
+  return { ...DEFAULT_RATE_SETTINGS, ...(data[RATE_SETTINGS_KEY] || {}) };
+}
+
+export async function saveLLMRateSettings(settings: Partial<LLMRateSettings>): Promise<void> {
+  const existing = await getLLMRateSettings();
+  await chrome.storage.local.set({ [RATE_SETTINGS_KEY]: { ...existing, ...settings } });
+}
+
+// Request queue with exponential backoff
+interface QueuedRequest {
+  id: string;
+  execute: () => Promise<Response>;
+  resolve: (res: Response) => void;
+  reject: (err: Error) => void;
+  retries: number;
+  feature: string;
+}
+
+const requestQueue: QueuedRequest[] = [];
+let queueProcessing = false;
+let requestTimestamps: number[] = [];
+let backoffUntil = 0;
+const MAX_RETRIES = 3;
+const BASE_BACKOFF_MS = 2000;
+
+function isRateLimited(maxPerMin: number): boolean {
+  if (maxPerMin <= 0) return false;
+  const now = Date.now();
+  requestTimestamps = requestTimestamps.filter(t => now - t < 60_000);
+  return requestTimestamps.length >= maxPerMin;
+}
+
+async function processQueue(): Promise<void> {
+  if (queueProcessing) return;
+  queueProcessing = true;
+
+  while (requestQueue.length > 0) {
+    const rateSettings = await getLLMRateSettings();
+
+    // Check global backoff
+    if (Date.now() < backoffUntil) {
+      const wait = backoffUntil - Date.now();
+      console.log(`${LOG} Backoff: waiting ${Math.round(wait / 1000)}s`);
+      await new Promise(r => setTimeout(r, wait));
+    }
+
+    // Check rate limit
+    if (isRateLimited(rateSettings.maxRequestsPerMinute)) {
+      console.log(`${LOG} Rate limited (${rateSettings.maxRequestsPerMinute}/min), waiting 5s`);
+      await new Promise(r => setTimeout(r, 5000));
+      continue;
+    }
+
+    const req = requestQueue.shift()!;
+    requestTimestamps.push(Date.now());
+
+    try {
+      const res = await req.execute();
+
+      if (res.status === 429) {
+        // Rate limited by provider — exponential backoff
+        const backoffMs = BASE_BACKOFF_MS * Math.pow(2, req.retries);
+        backoffUntil = Date.now() + backoffMs;
+        console.warn(`${LOG} 429 from provider, backoff ${backoffMs}ms (retry ${req.retries + 1}/${MAX_RETRIES})`);
+
+        if (req.retries < MAX_RETRIES) {
+          req.retries++;
+          requestQueue.unshift(req); // put back at front
+          await new Promise(r => setTimeout(r, backoffMs));
+          continue;
+        } else {
+          req.reject(new Error(`Rate limited after ${MAX_RETRIES} retries`));
+          continue;
+        }
+      }
+
+      if (res.status >= 500) {
+        // Server error — retry with backoff
+        if (req.retries < MAX_RETRIES) {
+          req.retries++;
+          const backoffMs = BASE_BACKOFF_MS * Math.pow(2, req.retries);
+          console.warn(`${LOG} Server error ${res.status}, retry ${req.retries}/${MAX_RETRIES} in ${backoffMs}ms`);
+          requestQueue.unshift(req);
+          await new Promise(r => setTimeout(r, backoffMs));
+          continue;
+        }
+      }
+
+      req.resolve(res);
+    } catch (err) {
+      if (req.retries < MAX_RETRIES) {
+        req.retries++;
+        const backoffMs = BASE_BACKOFF_MS * Math.pow(2, req.retries);
+        console.warn(`${LOG} Network error, retry ${req.retries}/${MAX_RETRIES} in ${backoffMs}ms`);
+        requestQueue.unshift(req);
+        await new Promise(r => setTimeout(r, backoffMs));
+      } else {
+        req.reject(err as Error);
+      }
+    }
+  }
+
+  queueProcessing = false;
+}
+
+/**
+ * Queue a fetch request through the rate limiter + backoff system.
+ */
+async function queuedFetch(url: string, init: RequestInit, feature: string): Promise<Response> {
+  const rateSettings = await getLLMRateSettings();
+
+  // Check if LLM is globally disabled
+  if (!rateSettings.enabled) {
+    throw new Error('LLM calls disabled');
+  }
+
+  // Check feature-specific toggles
+  const featureMap: Record<string, keyof LLMRateSettings> = {
+    'auto-respond': 'enableAutoRespond',
+    'suggestions': 'enableSuggestions',
+    'dossier': 'enableDossierExtract',
+    'nickname': 'enableNicknames',
+    'summary': 'enableSummaries',
+    'greeting': 'enableAutoRespond',
+  };
+  const toggle = featureMap[feature];
+  if (toggle && !rateSettings[toggle]) {
+    throw new Error(`LLM feature '${feature}' is disabled`);
+  }
+
+  return new Promise((resolve, reject) => {
+    requestQueue.push({
+      id: `${feature}-${Date.now()}`,
+      execute: () => fetch(url, init),
+      resolve,
+      reject,
+      retries: 0,
+      feature,
+    });
+    processQueue();
+  });
+}
+
 export async function getLLMConfig(): Promise<LLMConfig> {
   const data = await chrome.storage.local.get(SETTINGS_KEY);
   const settings = data[SETTINGS_KEY] || {};
@@ -46,6 +214,15 @@ export async function getLLMConfig(): Promise<LLMConfig> {
     provider: settings.provider || 'local',
     apiKey: settings.apiKey || '',
     model: settings.model || '',
+  };
+}
+
+export function getLLMQueueStatus(): { queueLength: number; requestsLastMinute: number; backoffUntil: number } {
+  const now = Date.now();
+  return {
+    queueLength: requestQueue.length,
+    requestsLastMinute: requestTimestamps.filter(t => now - t < 60_000).length,
+    backoffUntil: Math.max(0, backoffUntil - now),
   };
 }
 
@@ -82,99 +259,102 @@ function buildConversationContext(messages: Message[], contactName: string): str
   ).join('\n');
 }
 
-// ── Gemini ──────────────────────────────────────────────────────────────────
+// ── Centralized provider call (all LLM requests go through here) ────────────
 
-async function callGemini(config: LLMConfig, systemPrompt: string, conversation: string): Promise<string[]> {
-  const model = config.model || DEFAULT_MODELS.gemini;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.apiKey}`;
+/**
+ * Make an LLM API call through the rate-limited queue with backoff.
+ * Returns the raw response text from the provider.
+ */
+async function callProvider(
+  config: LLMConfig,
+  systemPrompt: string,
+  userPrompt: string,
+  feature: string,
+  opts?: { temperature?: number; maxTokens?: number; jsonMode?: boolean },
+): Promise<string> {
+  const temp = opts?.temperature ?? 0.9;
+  const maxTokens = opts?.maxTokens ?? 256;
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      system_instruction: { parts: [{ text: systemPrompt }] },
-      contents: [{
-        parts: [{ text: `Here is the conversation:\n\n${conversation}\n\nGenerate 3-4 suggested responses as a JSON array of strings.` }],
-      }],
-      generationConfig: {
-        temperature: 0.9,
-        maxOutputTokens: 256,
-        responseMimeType: 'application/json',
-      },
-    }),
-  });
+  let url: string;
+  let init: RequestInit;
+
+  switch (config.provider) {
+    case 'gemini': {
+      const model = config.model || DEFAULT_MODELS.gemini;
+      url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.apiKey}`;
+      init = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...(systemPrompt ? { system_instruction: { parts: [{ text: systemPrompt }] } } : {}),
+          contents: [{ parts: [{ text: userPrompt }] }],
+          generationConfig: { temperature: temp, maxOutputTokens: maxTokens, ...(opts?.jsonMode ? { responseMimeType: 'application/json' } : {}) },
+        }),
+      };
+      break;
+    }
+    case 'openai': {
+      const model = config.model || DEFAULT_MODELS.openai;
+      url = 'https://api.openai.com/v1/chat/completions';
+      const msgs: any[] = [];
+      if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
+      msgs.push({ role: 'user', content: userPrompt });
+      init = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
+        body: JSON.stringify({ model, messages: msgs, temperature: temp, max_tokens: maxTokens, ...(opts?.jsonMode ? { response_format: { type: 'json_object' } } : {}) }),
+      };
+      break;
+    }
+    case 'anthropic': {
+      const model = config.model || DEFAULT_MODELS.anthropic;
+      url = 'https://api.anthropic.com/v1/messages';
+      init = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+        body: JSON.stringify({ model, max_tokens: maxTokens, ...(systemPrompt ? { system: systemPrompt } : {}), messages: [{ role: 'user', content: userPrompt }] }),
+      };
+      break;
+    }
+    default:
+      throw new Error(`Unknown provider: ${config.provider}`);
+  }
+
+  const res = await queuedFetch(url, init, feature);
 
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Gemini ${res.status}: ${err.slice(0, 200)}`);
+    throw new Error(`${config.provider} ${res.status}: ${err.slice(0, 200)}`);
   }
 
   const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  return parseJsonArray(text);
+  switch (config.provider) {
+    case 'gemini': return data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    case 'openai': return data?.choices?.[0]?.message?.content || '';
+    case 'anthropic': return data?.content?.[0]?.text || '';
+    default: return '';
+  }
 }
 
-// ── OpenAI ──────────────────────────────────────────────────────────────────
+// Legacy wrappers for backward compatibility
+async function callGemini(config: LLMConfig, systemPrompt: string, conversation: string): Promise<string[]> {
+  const text = await callProvider(config, systemPrompt,
+    `Here is the conversation:\n\n${conversation}\n\nGenerate 3-4 suggested responses as a JSON array of strings.`,
+    'suggestions', { jsonMode: true });
+  return parseJsonArray(text);
+}
 
 async function callOpenAI(config: LLMConfig, systemPrompt: string, conversation: string): Promise<string[]> {
-  const model = config.model || DEFAULT_MODELS.openai;
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Here is the conversation:\n\n${conversation}\n\nGenerate 3-4 suggested responses as a JSON array of strings.` },
-      ],
-      temperature: 0.9,
-      max_tokens: 256,
-      response_format: { type: 'json_object' },
-    }),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`OpenAI ${res.status}: ${err.slice(0, 200)}`);
-  }
-
-  const data = await res.json();
-  const text = data?.choices?.[0]?.message?.content || '';
+  const text = await callProvider(config, systemPrompt,
+    `Here is the conversation:\n\n${conversation}\n\nGenerate 3-4 suggested responses as a JSON array of strings.`,
+    'suggestions', { jsonMode: true });
   return parseJsonArray(text);
 }
 
-// ── Anthropic ───────────────────────────────────────────────────────────────
-
 async function callAnthropic(config: LLMConfig, systemPrompt: string, conversation: string): Promise<string[]> {
-  const model = config.model || DEFAULT_MODELS.anthropic;
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': config.apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 256,
-      system: systemPrompt,
-      messages: [
-        { role: 'user', content: `Here is the conversation:\n\n${conversation}\n\nGenerate 3-4 suggested responses as a JSON array of strings.` },
-      ],
-    }),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Anthropic ${res.status}: ${err.slice(0, 200)}`);
-  }
-
-  const data = await res.json();
-  const text = data?.content?.[0]?.text || '';
+  const text = await callProvider(config, systemPrompt,
+    `Here is the conversation:\n\n${conversation}\n\nGenerate 3-4 suggested responses as a JSON array of strings.`,
+    'suggestions');
   return parseJsonArray(text);
 }
 
@@ -349,56 +529,10 @@ export async function generateAutoResponse(
 
   try {
     let text: string;
-    switch (config.provider) {
-      case 'gemini': {
-        const model = config.model || DEFAULT_MODELS.gemini;
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.apiKey}`;
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            system_instruction: { parts: [{ text: systemPrompt }] },
-            contents: [{ parts: [{ text: userPrompt }] }],
-            generationConfig: { temperature: 0.9, maxOutputTokens: 128 },
-          }),
-        });
-        if (!res.ok) throw new Error(`Gemini ${res.status}`);
-        const data = await res.json();
-        text = (data?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
-        break;
-      }
-      case 'openai': {
-        const model = config.model || DEFAULT_MODELS.openai;
-        const res = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
-          body: JSON.stringify({
-            model, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
-            temperature: 0.9, max_tokens: 128,
-          }),
-        });
-        if (!res.ok) throw new Error(`OpenAI ${res.status}`);
-        const data = await res.json();
-        text = (data?.choices?.[0]?.message?.content || '').trim();
-        break;
-      }
-      case 'anthropic': {
-        const model = config.model || DEFAULT_MODELS.anthropic;
-        const res = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json', 'x-api-key': config.apiKey,
-            'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true',
-          },
-          body: JSON.stringify({ model, max_tokens: 128, system: systemPrompt, messages: [{ role: 'user', content: userPrompt }] }),
-        });
-        if (!res.ok) throw new Error(`Anthropic ${res.status}`);
-        const data = await res.json();
-        text = (data?.content?.[0]?.text || '').trim();
-        break;
-      }
-      default:
-        text = localSuggestions(messages)[0] || 'Hey';
+    if (config.provider === 'local') {
+      text = localSuggestions(messages)[0] || 'Hey';
+    } else {
+      text = (await callProvider(config, systemPrompt, userPrompt, 'auto-respond', { maxTokens: 128 })).trim();
     }
 
     // Parse the JSON response to extract tier + picture suggestion
@@ -497,33 +631,7 @@ Examples: "Athletic Top", "Chill Bear", "Uptown Jock", "Night Owl", "Tatted Musc
 Return ONLY the nickname, nothing else.`;
 
   try {
-    let text = '';
-    switch (config.provider) {
-      case 'gemini': {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${config.model || 'gemini-2.0-flash'}:generateContent?key=${config.apiKey}`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 1.0, maxOutputTokens: 20 } }),
-        });
-        if (res.ok) text = (await res.json())?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        break;
-      }
-      case 'openai': {
-        const res = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
-          body: JSON.stringify({ model: config.model || 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }], temperature: 1.0, max_tokens: 20 }),
-        });
-        if (res.ok) text = (await res.json())?.choices?.[0]?.message?.content || '';
-        break;
-      }
-      case 'anthropic': {
-        const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-          body: JSON.stringify({ model: config.model || 'claude-haiku-4-5-20251001', max_tokens: 20, messages: [{ role: 'user', content: prompt }] }),
-        });
-        if (res.ok) text = (await res.json())?.content?.[0]?.text || '';
-        break;
-      }
-    }
+    const text = await callProvider(config, '', prompt, 'nickname', { temperature: 1.0, maxTokens: 20 });
     return text.replace(/^["']|["']$/g, '').trim().slice(0, 30) || `${platform} Guy`;
   } catch {
     return `${platform.charAt(0).toUpperCase() + platform.slice(1)} Guy`;
@@ -580,33 +688,7 @@ Extract ANY of these fields IF they are mentioned or can be inferred from what $
 Return ONLY a JSON object with the fields you found new info for. Omit fields with no new info. Example: {"realName":"Mike","position":"vers top","hasTransportation":"true"}`;
 
   try {
-    let text = '';
-    switch (config.provider) {
-      case 'gemini': {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${config.model || 'gemini-2.0-flash'}:generateContent?key=${config.apiKey}`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.2, maxOutputTokens: 512, responseMimeType: 'application/json' } }),
-        });
-        if (res.ok) text = (await res.json())?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        break;
-      }
-      case 'openai': {
-        const res = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
-          body: JSON.stringify({ model: config.model || 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }], temperature: 0.2, max_tokens: 512, response_format: { type: 'json_object' } }),
-        });
-        if (res.ok) text = (await res.json())?.choices?.[0]?.message?.content || '';
-        break;
-      }
-      case 'anthropic': {
-        const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-          body: JSON.stringify({ model: config.model || 'claude-haiku-4-5-20251001', max_tokens: 512, messages: [{ role: 'user', content: prompt }] }),
-        });
-        if (res.ok) text = (await res.json())?.content?.[0]?.text || '';
-        break;
-      }
-    }
+    const text = await callProvider(config, '', prompt, 'dossier', { temperature: 0.2, maxTokens: 512, jsonMode: true });
     try {
       const parsed = JSON.parse(text);
       const result: Record<string, string> = {};
@@ -681,35 +763,7 @@ ${conversation}
 Return ONLY the JSON object.`;
 
   try {
-    let text: string;
-    switch (config.provider) {
-      case 'gemini': {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model || 'gemini-2.0-flash'}:generateContent?key=${config.apiKey}`;
-        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.3, maxOutputTokens: 256, responseMimeType: 'application/json' } }) });
-        if (!res.ok) throw new Error(`Gemini ${res.status}`);
-        text = (await res.json())?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        break;
-      }
-      case 'openai': {
-        const res = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
-          body: JSON.stringify({ model: config.model || 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }], temperature: 0.3, max_tokens: 256, response_format: { type: 'json_object' } }) });
-        if (!res.ok) throw new Error(`OpenAI ${res.status}`);
-        text = (await res.json())?.choices?.[0]?.message?.content || '';
-        break;
-      }
-      case 'anthropic': {
-        const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-          body: JSON.stringify({ model: config.model || 'claude-haiku-4-5-20251001', max_tokens: 256, messages: [{ role: 'user', content: prompt }] }) });
-        if (!res.ok) throw new Error(`Anthropic ${res.status}`);
-        text = (await res.json())?.content?.[0]?.text || '';
-        break;
-      }
-      default: return localSummary(messages);
-    }
-
+    const text = await callProvider(config, '', prompt, 'summary', { temperature: 0.3, maxTokens: 256, jsonMode: true });
     try {
       const parsed = JSON.parse(text);
       return {

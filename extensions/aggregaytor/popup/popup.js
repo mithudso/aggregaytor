@@ -70,6 +70,50 @@ document.getElementById('save-llm').addEventListener('click', async () => {
   msg.classList.add('show'); setTimeout(() => msg.classList.remove('show'), 2000);
 });
 
+// ── Rate settings ───────────────────────────────────────────────────────────
+
+async function loadRateSettings() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_LLM_RATE_SETTINGS' });
+    if (res?.ok) {
+      const s = res.settings;
+      document.getElementById('llm-enabled').checked = s.enabled !== false;
+      document.getElementById('llm-rpm').value = s.maxRequestsPerMinute || 10;
+      document.getElementById('llm-feat-ar').checked = s.enableAutoRespond !== false;
+      document.getElementById('llm-feat-suggest').checked = s.enableSuggestions !== false;
+      document.getElementById('llm-feat-dossier').checked = s.enableDossierExtract !== false;
+      document.getElementById('llm-feat-nick').checked = s.enableNicknames !== false;
+      document.getElementById('llm-feat-summary').checked = s.enableSummaries !== false;
+    }
+  } catch {}
+  // Show queue status
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_LLM_QUEUE_STATUS' });
+    if (res?.ok) {
+      const s = res.status;
+      document.getElementById('llm-queue-status').textContent =
+        `Queue: ${s.queueLength} | Last min: ${s.requestsLastMinute} req` +
+        (s.backoffUntil > 0 ? ` | Backoff: ${Math.round(s.backoffUntil / 1000)}s` : '');
+    }
+  } catch {}
+}
+
+document.getElementById('save-rate').addEventListener('click', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_LLM_RATE_SETTINGS',
+    settings: {
+      enabled: document.getElementById('llm-enabled').checked,
+      maxRequestsPerMinute: parseInt(document.getElementById('llm-rpm').value) || 10,
+      enableAutoRespond: document.getElementById('llm-feat-ar').checked,
+      enableSuggestions: document.getElementById('llm-feat-suggest').checked,
+      enableDossierExtract: document.getElementById('llm-feat-dossier').checked,
+      enableNicknames: document.getElementById('llm-feat-nick').checked,
+      enableSummaries: document.getElementById('llm-feat-summary').checked,
+    },
+  });
+  loadRateSettings();
+});
+
 // ── Calendar ────────────────────────────────────────────────────────────────
 
 document.getElementById('cal-connect').addEventListener('click', async () => {
@@ -255,6 +299,7 @@ document.getElementById('open-panel').addEventListener('click', async () => {
 
 loadStats();
 loadLLMSettings();
+loadRateSettings();
 loadCalendarSettings();
 loadPictures();
 loadRules();
