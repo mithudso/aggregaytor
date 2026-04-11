@@ -1323,6 +1323,21 @@ function updateTotalUnread(count) {
 
 // ── Settings button ─────────────────────────────────────────────────────────
 
+// ── Sync pics from header ───────────────────────────────────────────────────
+
+document.getElementById('sync-pics-header').addEventListener('click', async () => {
+  const btn = document.getElementById('sync-pics-header');
+  btn.textContent = '⏳';
+  btn.disabled = true;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'SYNC_PROFILE_PICS' });
+    btn.textContent = res?.count ? `✓${res.count}` : '📷';
+  } catch {
+    btn.textContent = '❌';
+  }
+  setTimeout(() => { btn.textContent = '📷'; btn.disabled = false; }, 3000);
+});
+
 let settingsTabId = null;
 document.getElementById('open-settings').addEventListener('click', async () => {
   // Toggle: if settings tab is open, close it; otherwise open it

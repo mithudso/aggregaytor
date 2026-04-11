@@ -6,6 +6,12 @@
  */
 
 import { SniffiesAdapter } from '@aggregaytor/adapter-sniffies';
+import { setLogLevel } from '@aggregaytor/adapter-core';
+
+// Listen for log level changes from bridge
+window.addEventListener('__aggregaytor_set_log_level', ((event: CustomEvent) => {
+  if (event.detail) setLogLevel(event.detail);
+}) as EventListener);
 
 function sendToBridge(message: Record<string, unknown>): void {
   try {

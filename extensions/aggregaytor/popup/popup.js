@@ -68,6 +68,14 @@ async function loadLLMSettings() {
   } catch {}
 }
 
+// Log level
+document.getElementById('log-level').addEventListener('change', async (e) => {
+  await chrome.runtime.sendMessage({ type: 'SET_LOG_LEVEL', level: e.target.value });
+});
+chrome.storage.local.get('aggregaytor_log_level').then(data => {
+  if (data.aggregaytor_log_level) document.getElementById('log-level').value = data.aggregaytor_log_level;
+});
+
 function updateProviderUI(provider) {
   document.getElementById('provider-info').textContent = PROVIDER_INFO[provider] || '';
   const show = provider !== 'local';

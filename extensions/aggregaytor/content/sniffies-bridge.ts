@@ -39,6 +39,12 @@ window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
 // Listen for auto-send requests from the service worker
 try {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message.type === 'SET_LOG_LEVEL') {
+      // Forward to MAIN world
+      window.dispatchEvent(new CustomEvent('__aggregaytor_set_log_level', { detail: message.level }));
+      sendResponse({ ok: true });
+      return true;
+    }
     if (message.type === 'SEND_AUTO_RESPONSE') {
       window.dispatchEvent(new CustomEvent('__aggregaytor_send_message', {
         detail: { text: message.text, contactId: message.contactId },

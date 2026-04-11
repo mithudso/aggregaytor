@@ -108,6 +108,14 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GENERATE_SUGGESTIONS': return { ok: true, ...(await generateSuggestions(msg.messages, msg.contactName, msg.platform)) };
     case 'GET_LLM_CONFIG': return { ok: true, config: await getLLMConfig() };
     case 'SAVE_LLM_CONFIG': { await saveLLMConfig(msg.config); return { ok: true }; }
+    case 'SET_LOG_LEVEL': {
+      await chrome.storage.local.set({ aggregaytor_log_level: msg.level });
+      const allTabs = await chrome.tabs.query({});
+      for (const tab of allTabs) {
+        if (tab.id) chrome.tabs.sendMessage(tab.id, { type: 'SET_LOG_LEVEL', level: msg.level }).catch(() => {});
+      }
+      return { ok: true };
+    }
     case 'GET_LLM_RATE_SETTINGS': return { ok: true, settings: await getLLMRateSettings() };
     case 'SAVE_LLM_RATE_SETTINGS': { await saveLLMRateSettings(msg.settings); return { ok: true }; }
     case 'GET_LLM_QUEUE_STATUS': return { ok: true, status: getLLMQueueStatus() };

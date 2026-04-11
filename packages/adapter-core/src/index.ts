@@ -49,3 +49,7 @@ export { createDOMExtractor } from './dom-observer.js';
 
 // API replay sender
 export { captureAuthHeaders, getCapturedAuth, sendViaApi } from './api-sender.js';
+
+// Logger
+export { createLogger, setLogLevel, getLogLevel, loadLogLevel, saveLogLevel } from './logger.js';
+export type { LogLevel } from './logger.js';

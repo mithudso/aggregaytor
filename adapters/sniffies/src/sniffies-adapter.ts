@@ -11,12 +11,13 @@
 import {
   BaseAdapter,
   walkPayload,
+  createLogger,
 } from '@aggregaytor/adapter-core';
 import type { Platform, UnifiedMessage, UnifiedContact } from '@aggregaytor/adapter-core';
 import { parseSocketIOFrame } from './ws-parser.js';
 import { findLikelyProfileId, normalizeProfileId, extractProfileIdFromUrl } from './profile-resolver.js';
 
-const LOG = '[Aggregaytor:Sniffies]';
+const log = createLogger('[Aggregaytor:Sniffies]');
 
 // ── Profile attribute values to reject as message bodies ────────────────────
 const PROFILE_ATTRIBUTE_VALUES = new Set([
@@ -161,7 +162,7 @@ export class SniffiesAdapter extends BaseAdapter {
   private captureCount = 0;
 
   async init(): Promise<void> {
-    console.log(`${LOG} Initializing adapter...`);
+    log.info('Initializing adapter...');
     this.selfIds.seedFromWindow(window as Window & typeof globalThis);
     this.seedSelfIdsFromPage();
     this.setupNetworkInterception(window as Window & typeof globalThis);
@@ -171,7 +172,7 @@ export class SniffiesAdapter extends BaseAdapter {
     }, 60_000);
     // Initial avatar scrape after DOM settles
     setTimeout(() => this.scrapeAvatarsFromDOM(), 5000);
-    console.log(`${LOG} Adapter initialized. Self IDs:`, [...this.selfIds.ids]);
+    log.info('Adapter initialized. Self IDs:', [...this.selfIds.ids]);
   }
 
   async destroy(): Promise<void> {
@@ -208,7 +209,7 @@ export class SniffiesAdapter extends BaseAdapter {
       const match = url.match(/\/profile\/([0-9a-f]{6,})/i) || url.match(/\/([0-9a-f]{6,})/i);
       if (match) {
         const profileId = match[1].toLowerCase();
-        console.log(`${LOG} Block detected for ${profileId}: ${error || status}`);
+        log.info(`Block detected for ${profileId}: ${error || status}`);
         this.emit({
           type: 'error',
           payload: new Error(`BLOCKED:${profileId}`),
@@ -280,10 +281,14 @@ export class SniffiesAdapter extends BaseAdapter {
         if (PROFILE_ATTRIBUTE_VALUES.has(body.toLowerCase())) return;
 
         const ts = extractTimestampFromObj(obj);
-        if (!ts || !profileId) return;
+        if (!ts || !profileId) {
+          log.debug('Skipped message-like object: missing', !ts ? 'timestamp' : 'profileId', 'body:', body.slice(0, 40), 'keys:', Object.keys(obj).join(','));
+          return;
+        }
 
         const direction = detectDirection(obj, this.selfIds.ids);
         const msgId = String(obj.id || obj._id || obj.messageId || obj.message_id || `${profileId}:${ts}`);
+        log.debug(`Message: contactId=sniffies:${profileId} dir=${direction} body="${body.slice(0, 30)}..." keys=${Object.keys(obj).slice(0, 8).join(',')}`);
 
         // Detect global/group chat context
         const isGlobal = url.includes('global') || url.includes('group') ||
@@ -329,7 +334,7 @@ export class SniffiesAdapter extends BaseAdapter {
 
     if (messages.length) {
       this.captureCount += messages.length;
-      console.log(`${LOG} Captured ${messages.length} messages from ${url} (total: ${this.captureCount})`);
+      log.info(`Captured ${messages.length} messages from ${url} (total: ${this.captureCount})`);
     }
     if (contacts.length) {
       this.emit({ type: 'contacts', payload: contacts });
