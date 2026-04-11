@@ -3,50 +3,47 @@
  */
 
 import type { UnifiedMessage, UnifiedContact, Platform } from '@aggregaytor/adapter-core';
-import { upsertMessages, upsertContact, getUnreadCount, getThreadSummaries } from '@aggregaytor/store';
+import {
+  upsertMessages, upsertContact, getUnreadCount, getThreadSummaries,
+  getMessagesByContact, markThreadRead,
+} from '@aggregaytor/store';
 import type { ThreadSummary } from '@aggregaytor/store';
 
 const LOG = '[Aggregaytor:SW]';
 
 console.log(`${LOG} Service worker starting...`);
 
+/** Platform → base URL for opening conversations. */
+const PLATFORM_URLS: Record<string, (contactId: string) => string> = {
+  sniffies: (id) => `https://sniffies.com/profile/${id.replace('sniffies:', '')}/chat`,
+  grindr: (id) => `https://web.grindr.com/chat/${id.replace('grindr:', '')}`,
+  doublelist: (_id) => `https://doublelist.com/inbox/`,
+  adam4adam: (id) => `https://www.adam4adam.com/messages/${id.replace('adam4adam:', '')}`,
+  gmail: (_id) => `https://mail.google.com/mail/`,
+  yahoo: (_id) => `https://mail.yahoo.com/`,
+};
+
 chrome.runtime.onMessage.addListener(
   (message: any, sender: chrome.runtime.MessageSender, sendResponse: (response: any) => void) => {
-    console.log(`${LOG} Received message:`, message.type, message.platform || '', 'from tab:', sender.tab?.id);
+    console.log(`${LOG} Received:`, message.type, message.platform || '');
 
     if (message.type === 'ADAPTER_MESSAGES') {
-      const msgs = message.payload as UnifiedMessage[];
-      console.log(`${LOG} Processing ${msgs.length} messages from ${message.platform}`);
-      handleIncomingMessages(msgs, message.platform as Platform)
-        .then(result => {
-          console.log(`${LOG} Stored: ${result.created} new, ${result.updated} updated`);
-          sendResponse({ ok: true, ...result });
-        })
-        .catch(err => {
-          console.error(`${LOG} Store error:`, err);
-          sendResponse({ ok: false, error: (err as Error).message });
-        });
+      handleIncomingMessages(message.payload as UnifiedMessage[], message.platform as Platform)
+        .then(result => sendResponse({ ok: true, ...result }))
+        .catch(err => sendResponse({ ok: false, error: (err as Error).message }));
       return true;
     }
 
     if (message.type === 'ADAPTER_CONTACTS') {
-      const contacts = message.payload as UnifiedContact[];
-      console.log(`${LOG} Processing ${contacts.length} contacts from ${message.platform}`);
-      handleIncomingContacts(contacts)
+      handleIncomingContacts(message.payload as UnifiedContact[])
         .then(() => sendResponse({ ok: true }))
-        .catch(err => {
-          console.error(`${LOG} Contact store error:`, err);
-          sendResponse({ ok: false, error: (err as Error).message });
-        });
+        .catch(err => sendResponse({ ok: false, error: (err as Error).message }));
       return true;
     }
 
     if (message.type === 'GET_THREAD_SUMMARIES') {
       getThreadSummaries(message.opts)
-        .then((summaries: ThreadSummary[]) => {
-          console.log(`${LOG} Returning ${summaries.length} thread summaries`);
-          sendResponse({ ok: true, summaries });
-        })
+        .then((summaries: ThreadSummary[]) => sendResponse({ ok: true, summaries }))
         .catch(err => sendResponse({ ok: false, error: (err as Error).message }));
       return true;
     }
@@ -54,6 +51,30 @@ chrome.runtime.onMessage.addListener(
     if (message.type === 'GET_UNREAD_COUNT') {
       getUnreadCount(message.platform)
         .then((count: number) => sendResponse({ ok: true, count }))
+        .catch(err => sendResponse({ ok: false, error: (err as Error).message }));
+      return true;
+    }
+
+    if (message.type === 'GET_MESSAGES_BY_CONTACT') {
+      getMessagesByContact(message.contactId, { limit: message.limit || 200 })
+        .then(messages => sendResponse({ ok: true, messages }))
+        .catch(err => sendResponse({ ok: false, error: (err as Error).message }));
+      return true;
+    }
+
+    if (message.type === 'MARK_THREAD_READ') {
+      markThreadRead(message.threadId)
+        .then(count => {
+          updateBadgeCount();
+          sendResponse({ ok: true, count });
+        })
+        .catch(err => sendResponse({ ok: false, error: (err as Error).message }));
+      return true;
+    }
+
+    if (message.type === 'NAVIGATE_TO_CONVERSATION') {
+      navigateToConversation(message.platform, message.contactId)
+        .then(() => sendResponse({ ok: true }))
         .catch(err => sendResponse({ ok: false, error: (err as Error).message }));
       return true;
     }
@@ -70,9 +91,7 @@ async function handleIncomingMessages(
   await updateBadgeCount();
   try {
     chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform, count: result.created });
-  } catch {
-    // side panel may not be open
-  }
+  } catch { /* side panel may not be open */ }
   return result;
 }
 
@@ -82,18 +101,35 @@ async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void>
   }
 }
 
+async function navigateToConversation(platform: string, contactId: string): Promise<void> {
+  const urlFn = PLATFORM_URLS[platform];
+  if (!urlFn) return;
+  const url = urlFn(contactId);
+
+  // Try to find an existing tab for this platform
+  const tabs = await chrome.tabs.query({});
+  const platformHost = new URL(url).hostname;
+  const existing = tabs.find(t => {
+    try { return t.url && new URL(t.url).hostname === platformHost; } catch { return false; }
+  });
+
+  if (existing?.id) {
+    await chrome.tabs.update(existing.id, { url, active: true });
+    if (existing.windowId) await chrome.windows.update(existing.windowId, { focused: true });
+  } else {
+    await chrome.tabs.create({ url });
+  }
+}
+
 async function updateBadgeCount(): Promise<void> {
   try {
     const count = await getUnreadCount();
     chrome.action.setBadgeText({ text: count > 0 ? String(count) : '' });
     chrome.action.setBadgeBackgroundColor({ color: '#FF6B6B' });
-  } catch (err) {
-    console.warn(`${LOG} Badge update failed:`, err);
-  }
+  } catch { /* ignore */ }
 }
 
 updateBadgeCount().catch(() => {});
-
 chrome.alarms.create('badge-refresh', { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'badge-refresh') updateBadgeCount().catch(() => {});
