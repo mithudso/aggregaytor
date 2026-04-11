@@ -241,7 +241,7 @@ function checkUrlChange() {
   }
 }
 // Poll for SPA navigation (pushState doesn't fire popstate)
-setInterval(checkUrlChange, 1000);
+setInterval(checkUrlChange, 3000);
 // Also listen for popstate
 window.addEventListener('popstate', checkUrlChange);
 

@@ -92,7 +92,7 @@ function checkUrlChange() {
     } catch {}
   }
 }
-setInterval(checkUrlChange, 1000);
+setInterval(checkUrlChange, 3000);
 window.addEventListener('popstate', checkUrlChange);
 
 if (checkContext()) {

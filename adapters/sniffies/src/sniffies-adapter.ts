@@ -160,6 +160,7 @@ export class SniffiesAdapter extends BaseAdapter {
   readonly platform: Platform = 'sniffies';
   private storageTimer: ReturnType<typeof setInterval> | null = null;
   private captureCount = 0;
+  private seenMessageIds = new Set<string>(); // dedupe — don't re-emit captured messages
 
   async init(): Promise<void> {
     log.info('Initializing adapter...');
@@ -332,15 +333,28 @@ export class SniffiesAdapter extends BaseAdapter {
       },
     });
 
-    if (messages.length) {
-      this.captureCount += messages.length;
-      log.info(`Captured ${messages.length} messages from ${url} (total: ${this.captureCount})`);
+    // Deduplicate — only emit messages we haven't seen before
+    const newMessages = messages.filter(m => {
+      if (this.seenMessageIds.has(m.id)) return false;
+      this.seenMessageIds.add(m.id);
+      return true;
+    });
+
+    // Cap the seen set to prevent unbounded growth
+    if (this.seenMessageIds.size > 5000) {
+      const arr = [...this.seenMessageIds];
+      this.seenMessageIds = new Set(arr.slice(-3000));
+    }
+
+    if (newMessages.length) {
+      this.captureCount += newMessages.length;
+      log.info(`Captured ${newMessages.length} new messages from ${url} (${messages.length - newMessages.length} dupes skipped, total: ${this.captureCount})`);
     }
     if (contacts.length) {
       this.emit({ type: 'contacts', payload: contacts });
     }
 
-    return messages;
+    return newMessages;
   }
 
   protected parseWebSocketFrame(data: string | ArrayBuffer): UnifiedMessage[] {
