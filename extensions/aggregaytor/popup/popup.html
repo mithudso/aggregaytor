@@ -67,6 +67,20 @@
     <div class="saved" id="llm-saved">Saved</div>
   </div>
 
+  <h2 data-toggle="cal-section">Google Calendar</h2>
+  <div id="cal-section" class="section">
+    <div class="info">Connect your calendar so auto-respond knows your availability.</div>
+    <button class="btn" id="cal-connect">Connect Google Calendar</button>
+    <div id="cal-status" class="info" style="margin-top:6px"></div>
+    <div id="cal-settings-fields" style="display:none">
+      <label>Prep time (minutes)</label>
+      <input type="number" id="cal-prep" value="30" min="0" max="120">
+      <label>Travel time (minutes)</label>
+      <input type="number" id="cal-travel" value="15" min="0" max="120">
+      <button class="btn" id="cal-save">Save Calendar Settings</button>
+    </div>
+  </div>
+
   <h2 data-toggle="pic-section">Picture Library</h2>
   <div id="pic-section" class="section">
     <div class="info">Upload pictures to send in conversations. Tag them for smart auto-selection.</div>

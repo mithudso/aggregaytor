@@ -70,6 +70,49 @@ document.getElementById('save-llm').addEventListener('click', async () => {
   msg.classList.add('show'); setTimeout(() => msg.classList.remove('show'), 2000);
 });
 
+// ── Calendar ────────────────────────────────────────────────────────────────
+
+document.getElementById('cal-connect').addEventListener('click', async () => {
+  const status = document.getElementById('cal-status');
+  status.textContent = 'Connecting...';
+  const res = await chrome.runtime.sendMessage({ type: 'AUTHENTICATE_CALENDAR' });
+  if (res?.ok && res.success) {
+    status.textContent = 'Connected!';
+    status.style.color = '#34d399';
+    document.getElementById('cal-settings-fields').style.display = '';
+    loadCalendarSettings();
+  } else {
+    status.textContent = 'Failed to connect. Make sure you approve the Google sign-in.';
+    status.style.color = '#f87171';
+  }
+});
+
+document.getElementById('cal-save').addEventListener('click', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_CALENDAR_SETTINGS',
+    settings: {
+      enabled: true,
+      prepTimeMinutes: parseInt(document.getElementById('cal-prep').value) || 30,
+      travelTimeMinutes: parseInt(document.getElementById('cal-travel').value) || 15,
+    },
+  });
+  document.getElementById('cal-status').textContent = 'Settings saved!';
+  document.getElementById('cal-status').style.color = '#34d399';
+});
+
+async function loadCalendarSettings() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_CALENDAR_SETTINGS' });
+    if (res?.ok && res.settings?.enabled) {
+      document.getElementById('cal-settings-fields').style.display = '';
+      document.getElementById('cal-prep').value = res.settings.prepTimeMinutes || 30;
+      document.getElementById('cal-travel').value = res.settings.travelTimeMinutes || 15;
+      document.getElementById('cal-status').textContent = 'Calendar connected';
+      document.getElementById('cal-status').style.color = '#34d399';
+    }
+  } catch {}
+}
+
 // ── Picture library ─────────────────────────────────────────────────────────
 
 async function loadPictures() {
@@ -212,5 +255,6 @@ document.getElementById('open-panel').addEventListener('click', async () => {
 
 loadStats();
 loadLLMSettings();
+loadCalendarSettings();
 loadPictures();
 loadRules();

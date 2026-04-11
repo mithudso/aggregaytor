@@ -45,6 +45,11 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_MESSAGES_BY_CONTACT': return { ok: true, messages: await getMessagesByContact(msg.contactId, { limit: msg.limit || 200 }) };
     case 'MARK_THREAD_READ': { const c = await markThreadRead(msg.threadId); await updateBadgeCount(); return { ok: true, count: c }; }
     case 'NAVIGATE_TO_CONVERSATION': { await navigateToConversation(msg.platform, msg.contactId); return { ok: true }; }
+    case 'ACTIVE_PROFILE_CHANGED': {
+      // Relay to side panel so it can highlight the active conversation
+      try { chrome.runtime.sendMessage({ type: 'ACTIVE_PROFILE_CHANGED', contactId: msg.contactId, platform: msg.platform }); } catch {}
+      return { ok: true };
+    }
 
     // Thread meta
     case 'GET_THREAD_META': return { ok: true, meta: await getThreadMeta(msg.contactId) };
@@ -60,6 +65,25 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GENERATE_SUGGESTIONS': return { ok: true, ...(await generateSuggestions(msg.messages, msg.contactName, msg.platform)) };
     case 'GET_LLM_CONFIG': return { ok: true, config: await getLLMConfig() };
     case 'SAVE_LLM_CONFIG': { await saveLLMConfig(msg.config); return { ok: true }; }
+
+    // Session summary
+    case 'GENERATE_SESSION_SUMMARY': {
+      const summaries = await getThreadSummaries({ limit: 20 });
+      const activeCount = summaries.filter(s => {
+        const lastTs = new Date(s.lastMessage?.timestamp || 0).getTime();
+        return Date.now() - lastTs < 48 * 3600_000; // active in last 48h
+      }).length;
+      const config = await getLLMConfig();
+      if (config.provider === 'local' || !config.apiKey) {
+        return { ok: true, summary: `${activeCount} active conversations in the last 48 hours. Auto-respond will handle incoming messages with contextual replies.` };
+      }
+      try {
+        const res = await generateConversationSummary([], 'all contacts', 'all platforms');
+        return { ok: true, summary: `${activeCount} active conversations. ${res.text || 'Auto-respond ready.'}` };
+      } catch {
+        return { ok: true, summary: `${activeCount} active conversations. Auto-respond ready.` };
+      }
+    }
 
     // Nickname
     case 'GENERATE_NICKNAME': {

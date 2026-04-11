@@ -10,6 +10,7 @@ let currentThread = null;
 let currentMessages = [];
 let currentMeta = null;
 let allThreadMeta = new Map();
+let activeOnSiteContactId = null; // which conversation is open on the actual site
 
 let filters = {
   searchText: '', bodyType: [], position: [], minDeleteCount: 0,
@@ -103,8 +104,9 @@ function renderThreads(summaries) {
       ? `<div class="avatar"><img src="${esc(avatarUrl)}" alt="" class="avatar-img"><span class="platform-dot ${esc(t.platform)}"></span></div>`
       : `<div class="avatar">${esc(initial)}<span class="platform-dot ${esc(t.platform)}"></span></div>`;
 
+    const isActiveSite = activeOnSiteContactId === t.contactId;
     return `
-      <div class="thread-item${unread ? ' unread' : ''}"
+      <div class="thread-item${unread ? ' unread' : ''}${isActiveSite ? ' active-on-site' : ''}"
            data-contact-id="${esc(t.contactId)}" data-platform="${esc(t.platform)}" data-name="${esc(name)}">
         ${avatarHtml}${platformIcon(t.platform)}
         <div class="thread-content">
@@ -754,6 +756,16 @@ chrome.runtime.onMessage.addListener((message) => {
     loadDrafts();
   }
   if (message.type === 'DRAFTS_UPDATED') loadDrafts();
+  if (message.type === 'ACTIVE_PROFILE_CHANGED') {
+    // A profile/conversation was opened on the actual site
+    activeOnSiteContactId = message.contactId || null;
+    if (document.body.classList.contains('view-inbox')) loadThreads();
+    // Scroll the active item into view
+    setTimeout(() => {
+      const active = document.querySelector('.thread-item.active-on-site');
+      if (active) active.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 100);
+  }
   if (message.type === 'COMMITMENT_ALERT') {
     // Flash the screen and play alert sound
     document.body.style.animation = 'commitFlash 0.5s ease 3';
@@ -794,23 +806,91 @@ async function generateNickname(contactId, platform, contact, lastMessage) {
 
 const globalARCheckbox = document.getElementById('global-ar-checkbox');
 globalARCheckbox.addEventListener('change', async () => {
-  const enabled = globalARCheckbox.checked;
-  // Toggle auto-respond on ALL threads
+  if (globalARCheckbox.checked) {
+    // Show session startup dialog instead of immediately enabling
+    globalARCheckbox.checked = false; // revert until confirmed
+    showSessionDialog();
+  } else {
+    // Disable all auto-respond
+    await toggleAllAutoRespond(false);
+    document.getElementById('session-dialog').style.display = 'none';
+  }
+});
+
+async function toggleAllAutoRespond(enabled) {
   const metaRes = await chrome.runtime.sendMessage({ type: 'GET_ALL_THREAD_META' });
   const summRes = await chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} });
   const allContacts = new Set();
   for (const s of summRes?.summaries || []) allContacts.add(s.contactId + ':' + s.platform);
   for (const m of metaRes?.metas || []) allContacts.add(m.contactId + ':' + m.platform);
-
   for (const key of allContacts) {
     const [contactId, platform] = [key.substring(0, key.lastIndexOf(':')), key.substring(key.lastIndexOf(':') + 1)];
-    await chrome.runtime.sendMessage({
-      type: 'TOGGLE_AUTO_RESPOND', contactId, platform, enabled,
-    });
+    await chrome.runtime.sendMessage({ type: 'TOGGLE_AUTO_RESPOND', contactId, platform, enabled });
   }
-  // Also save as global default so new conversations pick it up
   await chrome.storage.local.set({ aggregaytor_global_autorespond: enabled });
   loadThreads();
+}
+
+async function showSessionDialog() {
+  const dialog = document.getElementById('session-dialog');
+  dialog.style.display = '';
+
+  // Load calendar availability
+  const slotsEl = document.getElementById('session-slots');
+  slotsEl.textContent = 'Checking calendar...';
+  try {
+    const deadline = getDeadlineHours();
+    const from = new Date().toISOString();
+    const to = new Date(Date.now() + deadline * 3600_000).toISOString();
+    const res = await chrome.runtime.sendMessage({ type: 'GET_AVAILABLE_SLOTS', from, to });
+    if (res?.ok && res.slots?.length) {
+      slotsEl.innerHTML = res.slots.map(s => `<span class="slot">${s.label}</span>`).join('');
+    } else {
+      slotsEl.innerHTML = '<span style="color:#6b7280">No calendar connected or all slots free</span>';
+    }
+  } catch {
+    slotsEl.innerHTML = '<span style="color:#6b7280">Calendar not connected</span>';
+  }
+
+  // Generate preference summary via LLM
+  const summaryEl = document.getElementById('session-summary');
+  summaryEl.textContent = 'Generating summary...';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GENERATE_SESSION_SUMMARY' });
+    if (res?.ok) {
+      summaryEl.textContent = res.summary || 'Ready to auto-respond to all conversations.';
+    } else {
+      summaryEl.textContent = 'Ready to auto-respond to all active conversations.';
+    }
+  } catch {
+    summaryEl.textContent = 'Ready to auto-respond to all active conversations.';
+  }
+}
+
+function getDeadlineHours() {
+  const val = document.getElementById('session-deadline').value;
+  if (val === '0') { // "Tonight" — calculate hours until midnight
+    const now = new Date();
+    return Math.max(1, (24 - now.getHours()));
+  }
+  if (val === '-1') return 24; // no deadline = 24h
+  return parseInt(val) || 2;
+}
+
+document.getElementById('session-confirm').addEventListener('click', async () => {
+  globalARCheckbox.checked = true;
+  document.getElementById('session-dialog').style.display = 'none';
+  await toggleAllAutoRespond(true);
+});
+
+document.getElementById('session-cancel').addEventListener('click', () => {
+  document.getElementById('session-dialog').style.display = 'none';
+  globalARCheckbox.checked = false;
+});
+
+document.getElementById('session-deadline').addEventListener('change', () => {
+  // Refresh calendar slots when deadline changes
+  showSessionDialog();
 });
 
 // Load global AR state

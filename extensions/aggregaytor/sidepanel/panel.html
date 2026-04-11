@@ -32,6 +32,33 @@
     </div>
   </div>
 
+  <!-- Session startup dialog -->
+  <div id="session-dialog" class="session-dialog" style="display:none">
+    <div class="session-header">Start Auto-Respond Session</div>
+    <div class="session-field">
+      <label>Looking by when?</label>
+      <select id="session-deadline">
+        <option value="1">Next hour</option>
+        <option value="2" selected>Next 2 hours</option>
+        <option value="4">Next 4 hours</option>
+        <option value="0">Tonight</option>
+        <option value="-1">No deadline</option>
+      </select>
+    </div>
+    <div class="session-field">
+      <label>Available slots</label>
+      <div id="session-slots" class="session-slots">Checking calendar...</div>
+    </div>
+    <div class="session-field">
+      <label>What are you looking for?</label>
+      <div id="session-summary" class="session-summary">Generating summary...</div>
+    </div>
+    <div class="session-actions">
+      <button class="session-btn confirm" id="session-confirm">Start Session</button>
+      <button class="session-btn cancel" id="session-cancel">Cancel</button>
+    </div>
+  </div>
+
   <!-- Advanced filters -->
   <div class="filter-bar" id="filter-bar">
     <div class="filter-toggle" id="filter-toggle">Filters <span id="filter-count"></span></div>

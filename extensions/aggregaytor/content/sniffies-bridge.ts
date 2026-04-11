@@ -52,6 +52,27 @@ try {
   contextValid = false;
 }
 
+// Watch for URL changes (user opening profiles/conversations on the site)
+let lastUrl = location.href;
+function checkUrlChange() {
+  if (!contextValid) return;
+  const url = location.href;
+  if (url === lastUrl) return;
+  lastUrl = url;
+  // Extract profile ID from Sniffies URL: /profile/{hex}/chat or /profile/{hex}
+  const match = url.match(/\/profile\/([0-9a-f]{6,})(?:\/chat)?/i);
+  if (match) {
+    const contactId = `sniffies:${match[1].toLowerCase()}`;
+    try {
+      chrome.runtime.sendMessage({ type: 'ACTIVE_PROFILE_CHANGED', contactId, platform: 'sniffies' }).catch(() => {});
+    } catch {}
+  }
+}
+// Poll for SPA navigation (pushState doesn't fire popstate)
+setInterval(checkUrlChange, 1000);
+// Also listen for popstate
+window.addEventListener('popstate', checkUrlChange);
+
 // Inject MAIN world script
 if (checkContext()) {
   const script = document.createElement('script');

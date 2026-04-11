@@ -31,6 +31,25 @@ try {
   });
 } catch { contextValid = false; }
 
+// Watch for URL changes (user opening conversations on Grindr web)
+let lastUrl = location.href;
+function checkUrlChange() {
+  if (!contextValid) return;
+  const url = location.href;
+  if (url === lastUrl) return;
+  lastUrl = url;
+  // Grindr URL: /chat/{conversationId}
+  const match = url.match(/\/chat\/([^/?#]+)/i);
+  if (match) {
+    const contactId = `grindr:${match[1]}`;
+    try {
+      chrome.runtime.sendMessage({ type: 'ACTIVE_PROFILE_CHANGED', contactId, platform: 'grindr' }).catch(() => {});
+    } catch {}
+  }
+}
+setInterval(checkUrlChange, 1000);
+window.addEventListener('popstate', checkUrlChange);
+
 if (checkContext()) {
   const script = document.createElement('script');
   script.src = chrome.runtime.getURL('content/grindr.js');
