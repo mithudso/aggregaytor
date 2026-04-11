@@ -17,7 +17,7 @@ import {
   getContact,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
-import { generateSuggestions, generateAutoResponse, generateGreeting, getLLMConfig, saveLLMConfig } from './llm.js';
+import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, getLLMConfig, saveLLMConfig } from './llm.js';
 
 const LOG = '[Aggregaytor:SW]';
 console.log(`${LOG} Service worker starting...`);
@@ -60,6 +60,12 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GENERATE_SUGGESTIONS': return { ok: true, ...(await generateSuggestions(msg.messages, msg.contactName, msg.platform)) };
     case 'GET_LLM_CONFIG': return { ok: true, config: await getLLMConfig() };
     case 'SAVE_LLM_CONFIG': { await saveLLMConfig(msg.config); return { ok: true }; }
+
+    // Nickname
+    case 'GENERATE_NICKNAME': {
+      const nickname = await llmNickname(msg.metadata, msg.lastMessageBody, msg.platform);
+      return { ok: true, nickname };
+    }
 
     // Greeting
     case 'SEND_GREETING': {

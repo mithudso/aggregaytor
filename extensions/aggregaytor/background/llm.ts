@@ -463,6 +463,73 @@ export async function generateGreeting(
   }
 }
 
+// ── Nickname generation ──────────────────────────────────────────────────────
+
+export async function generateNickname(
+  metadata: Record<string, unknown>,
+  lastMessageBody: string,
+  platform: string,
+): Promise<string> {
+  const config = await getLLMConfig();
+
+  // Build context clues
+  const clues: string[] = [];
+  if (metadata.bodyType || metadata.body) clues.push(`Body: ${metadata.bodyType || metadata.body}`);
+  if (metadata.attitude || metadata.position) clues.push(`Position: ${metadata.attitude || metadata.position}`);
+  if (metadata.age) clues.push(`Age: ${metadata.age}`);
+  if (metadata.ethnicity) clues.push(`Ethnicity: ${metadata.ethnicity}`);
+  if (lastMessageBody) clues.push(`Last message: "${lastMessageBody.slice(0, 60)}"`);
+
+  if (config.provider === 'local' || !config.apiKey) {
+    // Generate a simple descriptive nickname locally
+    const parts: string[] = [];
+    if (metadata.bodyType || metadata.body) parts.push(String(metadata.bodyType || metadata.body));
+    if (metadata.attitude || metadata.position) parts.push(String(metadata.attitude || metadata.position));
+    if (parts.length) return parts.join(' ').replace(/\b\w/g, c => c.toUpperCase());
+    return `${platform.charAt(0).toUpperCase() + platform.slice(1)} Guy`;
+  }
+
+  const prompt = `Generate a SHORT, descriptive, memorable nickname (2-3 words max) for a person on ${platform} based on these clues:
+${clues.join('\n')}
+
+The nickname should be friendly, descriptive, and help identify this person at a glance.
+Examples: "Athletic Top", "Chill Bear", "Uptown Jock", "Night Owl", "Tatted Muscle"
+Return ONLY the nickname, nothing else.`;
+
+  try {
+    let text = '';
+    switch (config.provider) {
+      case 'gemini': {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${config.model || 'gemini-2.0-flash'}:generateContent?key=${config.apiKey}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 1.0, maxOutputTokens: 20 } }),
+        });
+        if (res.ok) text = (await res.json())?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        break;
+      }
+      case 'openai': {
+        const res = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
+          body: JSON.stringify({ model: config.model || 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }], temperature: 1.0, max_tokens: 20 }),
+        });
+        if (res.ok) text = (await res.json())?.choices?.[0]?.message?.content || '';
+        break;
+      }
+      case 'anthropic': {
+        const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+          body: JSON.stringify({ model: config.model || 'claude-haiku-4-5-20251001', max_tokens: 20, messages: [{ role: 'user', content: prompt }] }),
+        });
+        if (res.ok) text = (await res.json())?.content?.[0]?.text || '';
+        break;
+      }
+    }
+    return text.replace(/^["']|["']$/g, '').trim().slice(0, 30) || `${platform} Guy`;
+  } catch {
+    return `${platform.charAt(0).toUpperCase() + platform.slice(1)} Guy`;
+  }
+}
+
 // ── Conversation summary ────────────────────────────────────────────────────
 
 export async function generateConversationSummary(

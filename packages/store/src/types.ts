@@ -74,8 +74,9 @@ export interface ThreadMetaDoc {
   deletedChatCount: number;
   autoRespondEnabled: boolean;
   autoRespondSettings: AutoRespondSettings;
+  generatedNickname: string;       // LLM-generated nickname when no username
   sentiment: SentimentScore | null;
-  preferenceScore: number | null;  // ML prediction: 0-1 likelihood of liking
+  preferenceScore: number | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -79,9 +79,17 @@ function renderThreads(summaries) {
   let totalUnread = 0;
   container.innerHTML = summaries.map(t => {
     const meta = allThreadMeta.get(t.contactId) || {};
-    const name = meta.alias || t.contact?.displayName || stripPrefix(t.contactId) || '?';
+    const rawName = meta.alias || t.contact?.displayName || '';
+    const hexId = stripPrefix(t.contactId);
+    // If name is just a hex ID or empty, we need a nickname
+    const isHexOnly = !rawName || /^[0-9a-f]{6,}$/i.test(rawName);
+    const name = isHexOnly ? (meta.generatedNickname || hexId.slice(0, 8)) : rawName;
     const initial = name.charAt(0).toUpperCase();
     const preview = t.lastMessage?.body || '';
+    // Queue nickname generation for hex-only names
+    if (isHexOnly && !meta.generatedNickname) {
+      generateNickname(t.contactId, t.platform, t.contact, t.lastMessage);
+    }
     const time = formatTime(t.lastMessage?.timestamp);
     const unread = t.unreadCount || 0;
     totalUnread += unread;
@@ -90,10 +98,15 @@ function renderThreads(summaries) {
     if (meta.bookmarked) badges += '<span class="meta-badge bookmarked">★</span>';
     if (meta.autoRespondEnabled) badges += '<span class="meta-badge autorespond">🤖</span>';
 
+    const avatarUrl = t.contact?.avatarUrl;
+    const avatarHtml = avatarUrl
+      ? `<div class="avatar"><img src="${esc(avatarUrl)}" alt="" class="avatar-img"><span class="platform-dot ${esc(t.platform)}"></span></div>`
+      : `<div class="avatar">${esc(initial)}<span class="platform-dot ${esc(t.platform)}"></span></div>`;
+
     return `
       <div class="thread-item${unread ? ' unread' : ''}"
            data-contact-id="${esc(t.contactId)}" data-platform="${esc(t.platform)}" data-name="${esc(name)}">
-        <div class="avatar">${esc(initial)}<span class="platform-dot ${esc(t.platform)}"></span></div>${platformIcon(t.platform)}
+        ${avatarHtml}${platformIcon(t.platform)}
         <div class="thread-content">
           <div class="thread-header">
             <span class="thread-name">${esc(name)}</span>
@@ -102,12 +115,14 @@ function renderThreads(summaries) {
           <div class="thread-preview">${esc(truncate(preview, 70))}</div>
         </div>
         <div class="thread-actions">
+          <span class="action-icon" data-action="like" title="Like">👍</span>
+          <span class="action-icon" data-action="dislike" title="Pass & hide">👎</span>
           <span class="action-icon${meta.bookmarked ? ' active' : ''}" data-action="bookmark" title="Bookmark">${meta.bookmarked ? '★' : '☆'}</span>
           <span class="action-icon" data-action="notes" title="Notes">📝</span>
           <span class="action-icon" data-action="archive" title="Archive">📦</span>
           <span class="action-icon" data-action="hide" title="Hide until reply">🙈</span>
           <span class="action-icon" data-action="greet" title="Send greeting">👋</span>
-          <span class="action-icon${meta.autoRespondEnabled ? ' active' : ''}" data-action="autorespond" title="Auto-respond">${meta.autoRespondEnabled ? '🤖' : '🤖'}</span>
+          <span class="action-icon${meta.autoRespondEnabled ? ' active' : ''}" data-action="autorespond" title="Auto-respond">🤖</span>
         </div>
         <div class="hover-preview" data-preview-for="${esc(t.contactId)}"></div>
       </div>`;
@@ -229,6 +244,18 @@ async function loadHoverPreview(contactId, platform, previewEl, threadEl) {
 
 async function handleAction(action, contactId, platform) {
   switch (action) {
+    case 'like':
+      await chrome.runtime.sendMessage({ type: 'RECORD_PREFERENCE', contactId, platform, liked: true });
+      break;
+    case 'dislike':
+      // Record dislike + archive + hide
+      await chrome.runtime.sendMessage({ type: 'RECORD_PREFERENCE', contactId, platform, liked: false });
+      await chrome.runtime.sendMessage({
+        type: 'UPSERT_THREAD_META', contactId, platform,
+        updates: { archived: true, hidden: true },
+      });
+      loadThreads();
+      break;
     case 'bookmark': {
       const meta = allThreadMeta.get(contactId) || {};
       await chrome.runtime.sendMessage({
@@ -734,6 +761,34 @@ chrome.runtime.onMessage.addListener((message) => {
     try { new Audio('data:audio/wav;base64,UklGRlQFAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YTAFAABkAGQA').play(); } catch {}
   }
 });
+
+// ── Nickname generation ─────────────────────────────────────────────────────
+
+const nicknameQueue = new Set();
+
+async function generateNickname(contactId, platform, contact, lastMessage) {
+  if (nicknameQueue.has(contactId)) return;
+  nicknameQueue.add(contactId);
+
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'GENERATE_NICKNAME',
+      contactId, platform,
+      metadata: contact?.metadata || {},
+      lastMessageBody: lastMessage?.body || '',
+      avatarUrl: contact?.avatarUrl || '',
+    });
+    if (res?.ok && res.nickname) {
+      await chrome.runtime.sendMessage({
+        type: 'UPSERT_THREAD_META', contactId, platform,
+        updates: { generatedNickname: res.nickname },
+      });
+      // Refresh the thread list to show the new nickname
+      loadThreads();
+    }
+  } catch {}
+  nicknameQueue.delete(contactId);
+}
 
 // ── Global auto-respond ─────────────────────────────────────────────────────
 
