@@ -56,6 +56,7 @@ async function handleMessage(msg: any): Promise<any> {
       return { ok: true, messages: matches };
     }
     case 'NAVIGATE_TO_CONVERSATION': { await navigateToConversation(msg.platform, msg.contactId); return { ok: true }; }
+    case 'OPEN_ALL_SITES': { await openAllSites(); return { ok: true }; }
     case 'SYNC_PROFILE_PICS': {
       // Send scrape request to all platform tabs
       const platformHosts = ['sniffies.com', 'web.grindr.com', 'doublelist.com', 'adam4adam.com'];
@@ -516,7 +517,143 @@ updateBadgeCount().catch(() => {});
 chrome.alarms.create('badge-refresh', { periodInMinutes: 1 });
 chrome.alarms.create('reminder-check', { periodInMinutes: 0.25 });
 
-// Open side panel when extension icon is clicked (no popup)
+// Open side panel when extension icon is clicked
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+
+// ── Right-click context menu ────────────────────────────────────────────────
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.contextMenus.create({ id: 'open-settings', title: 'Settings', contexts: ['action'] });
+  chrome.contextMenus.create({ id: 'open-all-sites', title: 'Open all sites', contexts: ['action'] });
+  chrome.contextMenus.create({ id: 'sync-pics', title: 'Sync profile pictures', contexts: ['action'] });
+  chrome.contextMenus.create({ id: 'sep1', type: 'separator', contexts: ['action'] });
+  chrome.contextMenus.create({ id: 'toggle-autorespond', title: 'Toggle auto-respond all', contexts: ['action'] });
+  chrome.contextMenus.create({ id: 'sep2', type: 'separator', contexts: ['action'] });
+  chrome.contextMenus.create({ id: 'open-archive', title: 'View archive', contexts: ['action'] });
+});
+
+chrome.contextMenus.onClicked.addListener(async (info) => {
+  switch (info.menuItemId) {
+    case 'open-settings':
+      chrome.tabs.create({ url: chrome.runtime.getURL('popup/popup.html') });
+      break;
+    case 'open-all-sites':
+      await openAllSites();
+      break;
+    case 'sync-pics': {
+      const allTabs = await chrome.tabs.query({});
+      const platformHosts = ['sniffies.com', 'web.grindr.com', 'doublelist.com', 'adam4adam.com'];
+      for (const tab of allTabs) {
+        if (!tab.id || !tab.url) continue;
+        if (platformHosts.some(h => tab.url!.includes(h))) {
+          chrome.tabs.sendMessage(tab.id, { type: 'SCRAPE_AVATARS' }).catch(() => {});
+        }
+      }
+      break;
+    }
+    case 'toggle-autorespond': {
+      const data = await chrome.storage.local.get('aggregaytor_global_autorespond');
+      const newState = !data.aggregaytor_global_autorespond;
+      await chrome.storage.local.set({ aggregaytor_global_autorespond: newState });
+      // Toggle on all threads
+      const summRes = await getThreadSummaries({});
+      for (const s of summRes) {
+        await upsertThreadMeta(s.contactId, s.platform, { autoRespondEnabled: newState });
+      }
+      chrome.notifications.create('ar-toggle', {
+        type: 'basic', iconUrl: 'icons/icon-128.png',
+        title: 'Auto-respond', message: newState ? 'Enabled for all conversations' : 'Disabled',
+      });
+      break;
+    }
+    case 'open-archive':
+      // Open side panel — the user can click the archive tab
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id) chrome.sidePanel.open({ tabId: tab.id }).catch(() => {});
+      break;
+  }
+});
+
+// ── Open all sites ──────────────────────────────────────────────────────────
+
+const ALL_SITES = [
+  'https://sniffies.com',
+  'https://web.grindr.com',
+  'https://doublelist.com',
+  'https://www.adam4adam.com',
+  'https://mail.google.com',
+];
+
+async function openAllSites(): Promise<void> {
+  const tabs = await chrome.tabs.query({});
+  for (const siteUrl of ALL_SITES) {
+    const host = new URL(siteUrl).hostname;
+    const existing = tabs.find(t => { try { return t.url && new URL(t.url).hostname === host; } catch { return false; } });
+    if (existing?.id) {
+      // Already open — just make sure it's not stale
+      await chrome.tabs.update(existing.id, { active: false });
+    } else {
+      await chrome.tabs.create({ url: siteUrl, active: false });
+    }
+  }
+}
+
+// ── Grindr auto-relogin check ───────────────────────────────────────────────
+
+chrome.alarms.create('grindr-login-check', { periodInMinutes: 2 });
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== 'grindr-login-check') return;
+  try {
+    const tabs = await chrome.tabs.query({});
+    const grindrTab = tabs.find(t => t.url?.includes('web.grindr.com'));
+    if (!grindrTab?.id) return;
+
+    // Check if Grindr is showing login page
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId: grindrTab.id },
+      func: () => {
+        // Grindr shows a login page with specific elements when logged out
+        const isLoginPage = !!document.querySelector('[data-testid="login-button"], .login-page, button[aria-label="Sign in"], [class*="login"]')
+          || document.title.toLowerCase().includes('login')
+          || document.title.toLowerCase().includes('sign in');
+        return { isLoginPage, url: location.href };
+      },
+    });
+
+    if (result?.result?.isLoginPage) {
+      console.log(`${LOG} Grindr logged out detected, attempting relogin...`);
+      chrome.notifications.create('grindr-relogin', {
+        type: 'basic', iconUrl: 'icons/icon-128.png',
+        title: 'Grindr logged out',
+        message: 'Attempting to log back in via Apple Sign-In...',
+        requireInteraction: true,
+      });
+
+      // Try clicking the Apple Sign-In button
+      await chrome.scripting.executeScript({
+        target: { tabId: grindrTab.id },
+        func: () => {
+          // Look for Apple sign-in button
+          const appleBtn = document.querySelector<HTMLElement>(
+            'button[data-testid="apple-login"], [aria-label*="Apple"], [class*="apple"], button:has(svg[class*="apple"])'
+          );
+          if (appleBtn) {
+            appleBtn.click();
+            return 'clicked';
+          }
+          // Fallback: look for any "Sign in" or "Log in" button and click it first
+          const signInBtn = document.querySelector<HTMLElement>(
+            'button[data-testid="login-button"], button:has(span:text("Sign in")), a[href*="login"]'
+          );
+          if (signInBtn) signInBtn.click();
+          return 'no-apple-button';
+        },
+      });
+    }
+  } catch (err) {
+    // Tab might not be accessible (e.g., chrome:// page)
+  }
+});
 chrome.alarms.create('block-rule-check', { periodInMinutes: 5 });
 console.log(`${LOG} Service worker ready`);

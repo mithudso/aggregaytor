@@ -11,6 +11,13 @@ body {
   display: flex; align-items: center; gap: 8px; flex-shrink: 0;
 }
 .header h1 { font-size: 15px; font-weight: 700; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.header-title-clickable { cursor: pointer; }
+.header-title-clickable:hover { color: #93c5fd; }
+.sync-pic-btn {
+  display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 10px; cursor: pointer;
+  border: 1px solid rgba(59,130,246,0.3); background: rgba(59,130,246,0.1); color: #93c5fd; margin-top: 4px;
+}
+.sync-pic-btn:hover { background: rgba(59,130,246,0.2); }
 .header-back { display: none; background: none; border: none; color: #93c5fd; font-size: 13px; cursor: pointer; padding: 4px 0; }
 .header-actions { display: none; gap: 2px; flex-shrink: 0; }
 .header-settings {

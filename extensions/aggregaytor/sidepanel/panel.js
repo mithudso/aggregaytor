@@ -424,8 +424,33 @@ async function loadProfileInfo(contactId) {
         </div>
       </div>
       ${pics.length > 1 ? `<div class="profile-pics">${pics.map(p => `<div class="profile-pic"><img src="${esc(p)}" alt=""></div>`).join('')}</div>` : ''}
+      ${!avatar ? `<button class="sync-pic-btn" id="sync-this-pic">📷 Sync photos for this profile</button>` : ''}
       ${meta.notes ? `<div style="font-size:11px;color:#9ca3af;margin-top:4px;border-top:1px solid rgba(255,255,255,0.06);padding-top:4px">${esc(meta.notes)}</div>` : ''}
     `;
+
+    // Per-profile sync handler
+    const syncBtn = el.querySelector('#sync-this-pic');
+    if (syncBtn) {
+      syncBtn.addEventListener('click', async () => {
+        syncBtn.textContent = '📷 Syncing...';
+        syncBtn.disabled = true;
+        // Navigate to the profile page to load their photos
+        await chrome.runtime.sendMessage({
+          type: 'NAVIGATE_TO_CONVERSATION',
+          platform: contact?.platform || currentThread?.platform,
+          contactId,
+        });
+        // Wait for the page to load, then scrape
+        setTimeout(async () => {
+          try {
+            await chrome.runtime.sendMessage({ type: 'SYNC_PROFILE_PICS' });
+            syncBtn.textContent = '📷 Done! Reload to see.';
+          } catch {
+            syncBtn.textContent = '📷 Failed — try opening their profile manually';
+          }
+        }, 4000);
+      });
+    }
   } catch {
     el.classList.remove('active');
   }
@@ -1233,6 +1258,14 @@ function updateTotalUnread(count) {
 
 document.getElementById('open-settings').addEventListener('click', () => {
   chrome.tabs.create({ url: chrome.runtime.getURL('popup/popup.html') });
+});
+
+// ── Open all sites on title click ───────────────────────────────────────────
+
+document.getElementById('header-title').addEventListener('click', (e) => {
+  // Only in inbox view (not thread detail where it shows contact name)
+  if (!document.body.classList.contains('view-inbox')) return;
+  chrome.runtime.sendMessage({ type: 'OPEN_ALL_SITES' }).catch(() => {});
 });
 
 // ── Global search ───────────────────────────────────────────────────────────
