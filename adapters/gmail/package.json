@@ -1,6 +1,6 @@
 {
   "name": "@aggregaytor/adapter-gmail",
-  "version": "0.21.3",
+  "version": "0.21.4",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",

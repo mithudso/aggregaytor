@@ -89,7 +89,6 @@ export async function getMessagesByContact(
   const store = db || await getDB();
   const result = await store.find({
     selector: { docType: 'message', contactId },
-    use_index: ['docType', 'contactId'],
     limit: opts?.limit || 100,
   });
   // Filter client-side as safety — PouchDB find can return wrong results without proper index
