@@ -36,9 +36,16 @@ async function loadThreads() {
 }
 
 function applyFilters(summaries) {
+  const showingArchive = currentPlatform === 'archived';
   return summaries.filter(t => {
     const meta = allThreadMeta.get(t.contactId) || {};
-    // Hide archived and hidden-until-response
+
+    // Archive tab: show ONLY archived. All other tabs: hide archived.
+    if (showingArchive) {
+      if (!meta.archived) return false;
+      // In archive view, skip other filters — just show all archived
+      return true;
+    }
     if (meta.archived) return false;
     if (meta.hiddenUntilResponse && meta.hidden) return false;
 
@@ -81,8 +88,11 @@ function applyFilters(summaries) {
 
 function renderThreads(summaries) {
   const container = document.getElementById('thread-list');
+  const showingArchive = currentPlatform === 'archived';
   if (!summaries?.length) {
-    container.innerHTML = '<div class="empty-state"><h2>No conversations match</h2><p>Try adjusting your filters.</p></div>';
+    container.innerHTML = showingArchive
+      ? '<div class="empty-state"><h2>Archive empty</h2><p>Archived conversations will appear here.</p></div>'
+      : '<div class="empty-state"><h2>No conversations match</h2><p>Try adjusting your filters.</p></div>';
     updateTotalUnread(0);
     return;
   }
@@ -132,14 +142,16 @@ function renderThreads(summaries) {
           <div class="thread-preview">${dirArrow}${esc(truncate(preview, 65))}</div>
         </div>
         <div class="thread-actions">
-          <span class="action-icon" data-action="like" title="Like">👍</span>
-          <span class="action-icon" data-action="dislike" title="Pass & hide">👎</span>
-          <span class="action-icon${meta.bookmarked ? ' active' : ''}" data-action="bookmark" title="Bookmark">${meta.bookmarked ? '★' : '☆'}</span>
-          <span class="action-icon" data-action="notes" title="Notes">📝</span>
-          <span class="action-icon" data-action="archive" title="Archive">📦</span>
-          <span class="action-icon" data-action="hide" title="Hide until reply">🙈</span>
-          <span class="action-icon" data-action="greet" title="Send greeting">👋</span>
-          <span class="action-icon${meta.autoRespondEnabled ? ' active' : ''}" data-action="autorespond" title="Auto-respond">🤖</span>
+          ${showingArchive
+            ? `<span class="action-icon" data-action="unarchive" title="Unarchive">↩</span>`
+            : `<span class="action-icon" data-action="like" title="Like">👍</span>
+               <span class="action-icon" data-action="dislike" title="Pass & hide">👎</span>
+               <span class="action-icon${meta.bookmarked ? ' active' : ''}" data-action="bookmark" title="Bookmark">${meta.bookmarked ? '★' : '☆'}</span>
+               <span class="action-icon" data-action="notes" title="Notes">📝</span>
+               <span class="action-icon" data-action="archive" title="Archive & hide">📦</span>
+               <span class="action-icon" data-action="hide" title="Hide until reply">🙈</span>
+               <span class="action-icon" data-action="greet" title="Send greeting">👋</span>
+               <span class="action-icon${meta.autoRespondEnabled ? ' active' : ''}" data-action="autorespond" title="Auto-respond">🤖</span>`}
         </div>
         <div class="hover-preview" data-preview-for="${esc(t.contactId)}"></div>
       </div>`;
@@ -282,11 +294,18 @@ async function handleAction(action, contactId, platform) {
       loadThreads();
       break;
     }
+    case 'unarchive':
+      await chrome.runtime.sendMessage({
+        type: 'UPSERT_THREAD_META', contactId, platform,
+        updates: { archived: false, hidden: false },
+      });
+      loadThreads();
+      break;
     case 'archive':
-      if (confirm('Archive this conversation?')) {
+      {
         await chrome.runtime.sendMessage({
           type: 'UPSERT_THREAD_META', contactId, platform,
-          updates: { archived: true },
+          updates: { archived: true, hidden: true },
         });
         loadThreads();
       }
@@ -704,6 +723,17 @@ document.getElementById('btn-resync').addEventListener('click', async () => {
     btn.textContent = '↻ Resync';
     btn.disabled = false;
   }, 4000);
+});
+
+document.getElementById('btn-archive-thread').addEventListener('click', async () => {
+  if (!currentThread) return;
+  await chrome.runtime.sendMessage({
+    type: 'UPSERT_THREAD_META',
+    contactId: currentThread.contactId,
+    platform: currentThread.platform,
+    updates: { archived: true, hidden: true },
+  });
+  goBack();
 });
 
 document.getElementById('btn-clear-thread').addEventListener('click', async () => {
