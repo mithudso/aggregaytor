@@ -34,7 +34,7 @@ const SETTINGS_KEY = 'aggregaytor_llm_settings';
 const RATE_SETTINGS_KEY = 'aggregaytor_llm_rate_settings';
 
 const DEFAULT_MODELS: Record<LLMProvider, string> = {
-  gemini: 'gemini-2.0-flash',
+  gemini: 'gemini-2.5-flash-lite',
   openai: 'gpt-4o-mini',
   anthropic: 'claude-haiku-4-5-20251001',
   groq: 'llama-3.1-8b-instant',
@@ -45,14 +45,15 @@ const DEFAULT_MODELS: Record<LLMProvider, string> = {
 };
 
 // Known rate limits per provider (requests per minute on free/tier-1)
+// Sources: provider docs as of April 2026
 const PROVIDER_RPM: Record<string, number> = {
-  gemini: 15,       // Free tier: 15 RPM
-  openai: 60,       // Tier 1: ~60 RPM for gpt-4o-mini
-  anthropic: 50,    // Tier 1: ~50 RPM
-  groq: 30,         // Free: 30 RPM
-  perplexity: 20,   // ~20 RPM
-  mistral: 60,      // ~60 RPM
-  copilot: 10,      // Conservative estimate
+  gemini: 15,       // Free: 15 RPM (gemini-2.5-flash-lite), gemini-2.0-flash deprecated June 2026
+  openai: 500,      // Tier 1 ($5): 500 RPM. Free tier only 3 RPM.
+  anthropic: 50,    // Tier 1 ($5): 50 RPM all models
+  groq: 30,         // Free: 30 RPM, 14400 RPD, very fast LPU inference
+  perplexity: 50,   // Tier 0: 50 RPM (pay-as-you-go, no free tier)
+  mistral: 2,       // Free "Experiment": 2 RPM (paid tiers much higher)
+  copilot: 10,      // No public API — community proxy only, rate undisclosed
 };
 
 // Per-provider request tracking for proactive cycling
