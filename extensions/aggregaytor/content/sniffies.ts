@@ -1,189 +1,65 @@
 /**
  * sniffies.ts — MAIN world content script for sniffies.com.
  *
- * Runs in the page's JS context so it can patch fetch/XHR/WebSocket.
- * Communicates with the ISOLATED world bridge via CustomEvents.
+ * This script MUST run in the MAIN world (the page's own JS context) because
+ * it needs to monkey-patch native browser APIs — specifically fetch, XHR, and
+ * WebSocket — at the prototype level. The ISOLATED world has its own set of
+ * these globals, so patching there would never intercept the page's network
+ * traffic. Running in MAIN world lets us sit between the Sniffies SPA and the
+ * browser, capturing all message/chat data as it flows through.
+ *
+ * Communication with the extension (which needs chrome.runtime access) happens
+ * via CustomEvents on `window`. This script dispatches __aggregaytor_message
+ * events that the ISOLATED world bridge (sniffies-bridge.ts) picks up and
+ * forwards to the service worker.
  */
 
 import { SniffiesAdapter } from '@aggregaytor/adapter-sniffies';
-import { isGlobalChatEvent, isPresenceEvent } from '@aggregaytor/adapter-sniffies';
 import { setLogLevel } from '@aggregaytor/adapter-core';
 
-// ── WS Debug Logger ──────────────────────────────────────────────────────────
-// Writes WebSocket frames to localStorage so we can inspect them later
-// (DevTools can't be open during page load on Sniffies without blocking it)
-const WS_DEBUG_KEY = '__aggregaytor_ws_debug';
-const WS_DEBUG_MAX = 150; // keep last 150 frames
+// ── Bridge Communication ─────────────────────────────────────────────────────
+// The MAIN world cannot call chrome.runtime.*, so all communication with the
+// extension goes through CustomEvents on `window`. The bridge (sniffies-bridge.ts)
+// in ISOLATED world listens for __aggregaytor_message events and relays them
+// to the service worker via chrome.runtime.sendMessage.
 
-function wsDebugLog(entry: Record<string, unknown>): void {
-  try {
-    const raw = localStorage.getItem(WS_DEBUG_KEY);
-    const log: unknown[] = raw ? JSON.parse(raw) : [];
-    log.push({ ...entry, t: new Date().toISOString() });
-    // Keep only the last N entries
-    while (log.length > WS_DEBUG_MAX) log.shift();
-    localStorage.setItem(WS_DEBUG_KEY, JSON.stringify(log));
-  } catch { /* localStorage full or unavailable */ }
-}
-
-function parseFrameForDebug(text: string): { event: string; keys: string[]; hasBody: boolean; snippet: string } | null {
-  if (!text || typeof text !== 'string') return null;
-  const t = text.trim();
-  if (!t || /^\d{1,2}$/.test(t)) return null; // heartbeat
-  try {
-    if (t.startsWith('42')) {
-      const arr = JSON.parse(t.slice(2));
-      if (Array.isArray(arr)) {
-        const event = typeof arr[0] === 'string' ? arr[0] : '';
-        const data = arr[1];
-        const keys = data && typeof data === 'object' ? Object.keys(data).slice(0, 20) : [];
-        const hasBody = data && typeof data === 'object' && ('body' in data || 'text' in data || 'message' in data || 'content' in data);
-        return { event, keys, hasBody, snippet: t.slice(0, 300) };
-      }
-    }
-    if (t.startsWith('{')) {
-      const data = JSON.parse(t);
-      if (data && typeof data === 'object') {
-        // Sniffies format: {"eventName":"...", "data":{...}}
-        const event = typeof data.eventName === 'string' ? data.eventName : '(json-obj)';
-        const innerData = data.data;
-        const innerKeys = innerData && typeof innerData === 'object' && !Array.isArray(innerData)
-          ? Object.keys(innerData).slice(0, 20) : [];
-        const outerKeys = Object.keys(data).slice(0, 20);
-        const hasBody = (innerData && typeof innerData === 'object' &&
-          ('body' in innerData || 'text' in innerData || 'message' in innerData || 'content' in innerData));
-        return { event, keys: innerKeys.length ? innerKeys : outerKeys, hasBody, snippet: t.slice(0, 400) };
-      }
-    }
-    if (t.startsWith('[')) {
-      const data = JSON.parse(t);
-      if (Array.isArray(data) && data.length >= 2 && typeof data[0] === 'string') {
-        return { event: data[0], keys: [], hasBody: false, snippet: t.slice(0, 400) };
-      }
-      return { event: '(array)', keys: [], hasBody: false, snippet: t.slice(0, 300) };
-    }
-  } catch { /* not parseable */ }
-  return null;
-}
-
-// Install a STANDALONE WebSocket interceptor for debug logging
-// This must run BEFORE the adapter patches WebSocket so we get the native constructor
-const _NativeWS = window.WebSocket;
-const _OrigProtoAddListener = WebSocket.prototype.addEventListener;
-
-// Prototype-level hook: catches ALL sockets (even created before our constructor wrapper)
-const hookedSockets = new WeakSet<WebSocket>();
-WebSocket.prototype.addEventListener = function(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) {
-  if (type === 'message' && !hookedSockets.has(this)) {
-    hookedSockets.add(this);
-    // Piggyback a debug logger — skip presence spam, log everything else
-    _OrigProtoAddListener.call(this, 'message', function(ev: MessageEvent) {
-      const frame = parseFrameForDebug(ev.data);
-      if (!frame) return;
-      const presence = isPresenceEvent(frame.event);
-      // Only log non-presence events (chat, DM, global, unknown) to avoid spam
-      // Also log presence events with hasBody (unusual — might be a mis-classification)
-      if (!presence || frame.hasBody) {
-        const isGlobal = isGlobalChatEvent(frame.event);
-        wsDebugLog({
-          src: 'proto-hook',
-          event: frame.event,
-          isGlobal,
-          isPresence: presence,
-          keys: frame.keys,
-          hasBody: frame.hasBody,
-          snippet: frame.snippet,
-        });
-      }
-    });
-  }
-  return _OrigProtoAddListener.call(this, type, listener, options);
-};
-
-// Also hook onmessage setter for sockets that use ws.onmessage = fn
-const origOnMsgDesc = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'onmessage');
-if (origOnMsgDesc) {
-  Object.defineProperty(WebSocket.prototype, 'onmessage', {
-    set(fn) {
-      if (!hookedSockets.has(this) && fn) {
-        hookedSockets.add(this);
-        _OrigProtoAddListener.call(this, 'message', function(ev: MessageEvent) {
-          const frame = parseFrameForDebug(ev.data);
-          if (!frame) return;
-          const presence = isPresenceEvent(frame.event);
-          if (!presence || frame.hasBody) {
-            const isGlobal = isGlobalChatEvent(frame.event);
-            wsDebugLog({
-              src: 'onmsg-hook',
-              event: frame.event,
-              isGlobal,
-              isPresence: presence,
-              keys: frame.keys,
-              hasBody: frame.hasBody,
-              snippet: frame.snippet,
-            });
-          }
-        });
-      }
-      origOnMsgDesc!.set!.call(this, fn);
-    },
-    get() { return origOnMsgDesc!.get!.call(this); },
-    configurable: true,
-  });
-}
-
-wsDebugLog({ src: 'init', msg: 'WS debug logger installed', hookType: 'proto+onmsg' });
-
-// Listen for log level changes from bridge
+// Receive log-level changes forwarded by the bridge (originating from the service
+// worker / popup). This lets us dynamically adjust adapter verbosity at runtime.
 window.addEventListener('__aggregaytor_set_log_level', ((event: CustomEvent) => {
   if (event.detail) setLogLevel(event.detail);
 }) as EventListener);
 
+/**
+ * Send a message to the ISOLATED world bridge via CustomEvent.
+ * JSON.parse(JSON.stringify(...)) is used to create a structured-clone-safe
+ * copy of the payload — CustomEvent.detail must be serializable across
+ * world boundaries (MAIN -> ISOLATED).
+ */
 function sendToBridge(message: Record<string, unknown>): void {
   try {
     window.dispatchEvent(
       new CustomEvent('__aggregaytor_message', {
-        detail: JSON.parse(JSON.stringify(message)), // structured clone safe
+        detail: JSON.parse(JSON.stringify(message)),
       }),
     );
   } catch {
-    // silently ignore
+    // Silently ignore — bridge may not be loaded yet or context invalidated
   }
 }
 
+// ── Adapter Initialization ──────────────────────────────────────────────────
+// The SniffiesAdapter patches fetch/XHR/WebSocket to intercept Sniffies API
+// calls and WebSocket events. It emits normalized 'messages', 'contacts', and
+// 'error' events that we relay to the bridge below.
 const adapter = new SniffiesAdapter({ platform: 'sniffies' });
 
-// ── Fetch/XHR Debug Logger ─────────────────────────────────────────────────
-// Log every message the adapter produces with its source URL, contactId, threadId
-// This replaces the WS debug key since chat comes via HTTP, not WebSocket
-const FETCH_DEBUG_KEY = '__aggregaytor_fetch_debug';
-const FETCH_DEBUG_MAX = 200;
+// ── Adapter Event Listeners ─────────────────────────────────────────────────
+// The adapter emits three event types. Each handler wraps the payload in a
+// typed message and dispatches it to the bridge, which relays it to the
+// service worker for storage in PouchDB.
 
-function fetchDebugLog(entry: Record<string, unknown>): void {
-  try {
-    const raw = localStorage.getItem(FETCH_DEBUG_KEY);
-    const log: unknown[] = raw ? JSON.parse(raw) : [];
-    log.push({ ...entry, t: new Date().toISOString() });
-    while (log.length > FETCH_DEBUG_MAX) log.shift();
-    localStorage.setItem(FETCH_DEBUG_KEY, JSON.stringify(log));
-  } catch { /* full */ }
-}
-
+// 'messages' — normalized chat messages extracted from intercepted API responses.
 adapter.on('messages', (event) => {
-  // Debug: log each message with its routing info
-  const msgs = event.payload as Array<{ id: string; threadId: string; contactId: string; body: string; direction: string; metadata?: Record<string, unknown> }>;
-  for (const m of msgs) {
-    fetchDebugLog({
-      id: m.id?.slice(0, 40),
-      threadId: m.threadId,
-      contactId: m.contactId,
-      dir: m.direction,
-      body: m.body?.slice(0, 80),
-      url: (m.metadata as any)?.url?.slice(0, 120),
-      isGlobal: m.contactId === 'sniffies:global-chat',
-      keys: m.metadata ? Object.keys(m.metadata).slice(0, 10) : [],
-    });
-  }
   sendToBridge({
     type: 'ADAPTER_MESSAGES',
     platform: 'sniffies',
@@ -191,6 +67,7 @@ adapter.on('messages', (event) => {
   });
 });
 
+// 'contacts' — user profile data extracted from API responses and WebSocket events.
 adapter.on('contacts', (event) => {
   sendToBridge({
     type: 'ADAPTER_CONTACTS',
@@ -199,6 +76,7 @@ adapter.on('contacts', (event) => {
   });
 });
 
+// 'error' — adapter-level errors (network failures, parse errors, block detection).
 adapter.on('error', (event) => {
   const err = event.payload as Error;
   sendToBridge({
@@ -212,26 +90,33 @@ adapter.init().catch((err) => {
   console.error('[Aggregaytor] Sniffies adapter init failed:', err);
 });
 
-// Listen for auto-send requests from bridge
+// ── Auto-Send Mechanism ────────────────────────────────────────────────────
+// When the service worker wants to auto-send a message (from the auto-respond
+// system), it sends a command through the bridge, which dispatches this event.
+// We type the text into the chat input using React-compatible event dispatching
+// (native setter + input/change events), then find and click the send button.
 window.addEventListener('__aggregaytor_send_message', ((event: CustomEvent) => {
   const { text } = event.detail || {};
   if (!text) return;
   console.log('[Aggregaytor:Sniffies] Auto-sending:', text.slice(0, 30));
-  // Find the chat input — try multiple selectors
+  // Find the chat input — try multiple selectors for different UI states
   const input = document.querySelector<HTMLTextAreaElement | HTMLInputElement>(
     'textarea[placeholder*="message"], textarea[placeholder*="Message"], ' +
     '[contenteditable="true"], ' +
     'input[placeholder*="message"], input[placeholder*="Message"]'
   );
   if (!input) { console.warn('[Aggregaytor:Sniffies] Chat input not found'); return; }
-  // Set value with React-compatible events
+  // Set value with React-compatible events (React overrides the native setter,
+  // so we must use the original HTMLTextAreaElement.prototype.value setter to
+  // bypass React's synthetic event system and actually update the DOM value).
   const nativeSet = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
     || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
   if (nativeSet) nativeSet.call(input, text);
   else (input as any).value = text;
+  // Dispatch input + change events so React/Angular picks up the new value
   input.dispatchEvent(new Event('input', { bubbles: true }));
   input.dispatchEvent(new Event('change', { bubbles: true }));
-  // Find and click the send button after a short delay
+  // Find and click the send button after a short delay (allows UI to update)
   setTimeout(() => {
     const sendBtn = document.querySelector<HTMLButtonElement>(
       'button[aria-label*="send" i], button[aria-label*="Send"], ' +
