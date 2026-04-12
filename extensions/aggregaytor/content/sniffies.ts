@@ -153,7 +153,37 @@ function sendToBridge(message: Record<string, unknown>): void {
 
 const adapter = new SniffiesAdapter({ platform: 'sniffies' });
 
+// ── Fetch/XHR Debug Logger ─────────────────────────────────────────────────
+// Log every message the adapter produces with its source URL, contactId, threadId
+// This replaces the WS debug key since chat comes via HTTP, not WebSocket
+const FETCH_DEBUG_KEY = '__aggregaytor_fetch_debug';
+const FETCH_DEBUG_MAX = 200;
+
+function fetchDebugLog(entry: Record<string, unknown>): void {
+  try {
+    const raw = localStorage.getItem(FETCH_DEBUG_KEY);
+    const log: unknown[] = raw ? JSON.parse(raw) : [];
+    log.push({ ...entry, t: new Date().toISOString() });
+    while (log.length > FETCH_DEBUG_MAX) log.shift();
+    localStorage.setItem(FETCH_DEBUG_KEY, JSON.stringify(log));
+  } catch { /* full */ }
+}
+
 adapter.on('messages', (event) => {
+  // Debug: log each message with its routing info
+  const msgs = event.payload as Array<{ id: string; threadId: string; contactId: string; body: string; direction: string; metadata?: Record<string, unknown> }>;
+  for (const m of msgs) {
+    fetchDebugLog({
+      id: m.id?.slice(0, 40),
+      threadId: m.threadId,
+      contactId: m.contactId,
+      dir: m.direction,
+      body: m.body?.slice(0, 80),
+      url: (m.metadata as any)?.url?.slice(0, 120),
+      isGlobal: m.contactId === 'sniffies:global-chat',
+      keys: m.metadata ? Object.keys(m.metadata).slice(0, 10) : [],
+    });
+  }
   sendToBridge({
     type: 'ADAPTER_MESSAGES',
     platform: 'sniffies',

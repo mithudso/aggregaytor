@@ -186,8 +186,9 @@ export class SniffiesAdapter extends BaseAdapter {
 
   protected shouldInterceptUrl(url: string): boolean {
     const s = String(url).toLowerCase();
-    // Skip explicit global chat pages — the bridge DOM scraper handles those
-    if (s.includes('global-chat') || s.includes('cruising-update')) return false;
+    // Intercept ALL sniffies.com URLs — including global chat and cruising endpoints
+    // (Previously we skipped global-chat/cruising-update URLs, but that was wrong —
+    //  those URLs are the ONLY signal we have to route messages to Global Chat)
     return s.includes('sniffies.com') || s.includes('sniffies');
   }
 
