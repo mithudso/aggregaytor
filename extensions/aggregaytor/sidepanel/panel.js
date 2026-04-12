@@ -1718,16 +1718,20 @@ async function loadBlockRules() {
     const res = await chrome.runtime.sendMessage({ type: 'GET_ALL_BLOCK_RULES' });
     const list = document.getElementById('sp-rule-list');
     if (!res?.ok || !res.rules?.length) { list.innerHTML = '<div class="settings-info">No rules yet.</div>'; return; }
-    list.innerHTML = res.rules.map(r => `
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:11px">
-        <span>${esc(r.name)} ${r.enabled ? '' : '(off)'}</span>
-        <span style="color:#6b7280;font-size:10px">${r.executedCount}x</span>
-        <div style="display:flex;gap:4px">
-          <button class="settings-btn" data-toggle-rule="${r._id}" data-enabled="${!r.enabled}">${r.enabled ? 'Off' : 'On'}</button>
-          <button class="settings-btn" style="border-color:rgba(239,68,68,0.3);color:#f87171" data-delete-rule="${r._id}">✕</button>
-        </div>
-      </div>
-    `).join('');
+    list.innerHTML = res.rules.map(r => {
+      const statusColor = r.enabled ? '#34d399' : '#6b7280';
+      const statusDot = r.enabled ? '🟢' : '⚪';
+      const statusLabel = r.enabled ? 'Active' : 'Disabled';
+      const toggleLabel = r.enabled ? 'Disable' : 'Enable';
+      return `
+      <div style="display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:11px">
+        <span style="font-size:10px" title="${statusLabel}">${statusDot}</span>
+        <span style="flex:1">${esc(r.name)}</span>
+        <span style="color:#6b7280;font-size:9px" title="Times this rule has triggered">${r.executedCount} triggered</span>
+        <button class="settings-btn" data-toggle-rule="${r._id}" data-enabled="${!r.enabled}" style="font-size:10px;padding:2px 6px">${toggleLabel}</button>
+        <button class="settings-btn" style="border-color:rgba(239,68,68,0.3);color:#f87171;font-size:10px;padding:2px 6px" data-delete-rule="${r._id}">✕</button>
+      </div>`;
+    }).join('');
     list.querySelectorAll('[data-toggle-rule]').forEach(btn => {
       btn.addEventListener('click', async () => {
         await chrome.runtime.sendMessage({ type: 'UPDATE_BLOCK_RULE', id: btn.dataset.toggleRule, updates: { enabled: btn.dataset.enabled === 'true' } });
