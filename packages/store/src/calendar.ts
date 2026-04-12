@@ -40,6 +40,7 @@ export interface CalendarSettings {
   prepTimeMinutes: number;     // buffer before events (default 30)
   travelTimeMinutes: number;   // travel buffer (default 15)
   calendarId: string;          // default 'primary'
+  bookingUrl: string;          // Google Calendar booking page URL
 }
 
 export interface CalendarToken {
@@ -53,6 +54,7 @@ const DEFAULT_CAL_SETTINGS: CalendarSettings = {
   prepTimeMinutes: 30,
   travelTimeMinutes: 15,
   calendarId: 'primary',
+  bookingUrl: '',
 };
 
 export async function getCalendarSettings(): Promise<CalendarSettings> {

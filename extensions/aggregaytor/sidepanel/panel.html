@@ -257,13 +257,13 @@
       </div>
       <div class="settings-section">
         <h3 class="settings-heading">Google Calendar</h3>
-        <button class="settings-btn" id="sp-cal-connect">Connect Google Calendar</button>
+        <div class="settings-info">Paste your Google Calendar booking page URL to show availability to the auto-responder.</div>
+        <input type="text" id="sp-cal-booking-url" class="settings-input" placeholder="https://calendar.app.google/... or scheduling iframe URL">
+        <label class="settings-label">Prep time (min): <input type="number" id="sp-cal-prep" value="30" class="settings-num"></label>
+        <label class="settings-label">Travel time (min): <input type="number" id="sp-cal-travel" value="15" class="settings-num"></label>
+        <button class="settings-btn" id="sp-cal-save">Save Calendar Settings</button>
         <div id="sp-cal-status" class="settings-info" style="margin-top:4px"></div>
-        <div id="sp-cal-fields" style="display:none;margin-top:6px">
-          <label class="settings-label">Prep time (min): <input type="number" id="sp-cal-prep" value="30" class="settings-num"></label>
-          <label class="settings-label">Travel time (min): <input type="number" id="sp-cal-travel" value="15" class="settings-num"></label>
-          <button class="settings-btn" id="sp-cal-save">Save Calendar Settings</button>
-        </div>
+        <div id="sp-cal-preview" style="margin-top:8px"></div>
       </div>
     </div>
 

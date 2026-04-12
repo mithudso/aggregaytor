@@ -1826,31 +1826,39 @@ document.getElementById('sp-sync-pics')?.addEventListener('click', async () => {
 async function loadCalendarStatus() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_CALENDAR_SETTINGS' });
-    if (res?.ok && res.settings?.enabled) {
-      document.getElementById('sp-cal-fields').style.display = '';
-      document.getElementById('sp-cal-prep').value = res.settings.prepTimeMinutes || 30;
-      document.getElementById('sp-cal-travel').value = res.settings.travelTimeMinutes || 15;
-      document.getElementById('sp-cal-status').textContent = 'Connected';
-      document.getElementById('sp-cal-status').style.color = '#34d399';
+    if (res?.ok) {
+      const s = res.settings;
+      document.getElementById('sp-cal-booking-url').value = s.bookingUrl || '';
+      document.getElementById('sp-cal-prep').value = s.prepTimeMinutes || 30;
+      document.getElementById('sp-cal-travel').value = s.travelTimeMinutes || 15;
+      if (s.bookingUrl) {
+        document.getElementById('sp-cal-status').textContent = 'Booking page configured';
+        document.getElementById('sp-cal-status').style.color = '#34d399';
+      }
     }
   } catch {}
 }
-document.getElementById('sp-cal-connect')?.addEventListener('click', async () => {
-  const status = document.getElementById('sp-cal-status');
-  status.textContent = 'Connecting...';
-  const res = await chrome.runtime.sendMessage({ type: 'AUTHENTICATE_CALENDAR' });
-  if (res?.ok && res.success) {
-    status.textContent = 'Connected!'; status.style.color = '#34d399';
-    document.getElementById('sp-cal-fields').style.display = '';
-  } else {
-    status.textContent = 'Failed'; status.style.color = '#f87171';
-  }
-});
 document.getElementById('sp-cal-save')?.addEventListener('click', async () => {
+  const bookingUrl = document.getElementById('sp-cal-booking-url').value.trim();
+  const status = document.getElementById('sp-cal-status');
+
+  // Extract the scheduling iframe URL if they pasted the full iframe embed
+  let cleanUrl = bookingUrl;
+  const iframeMatch = bookingUrl.match(/src="([^"]+)"/);
+  if (iframeMatch) cleanUrl = iframeMatch[1];
+
   await chrome.runtime.sendMessage({
     type: 'SAVE_CALENDAR_SETTINGS',
-    settings: { enabled: true, prepTimeMinutes: parseInt(document.getElementById('sp-cal-prep').value) || 30, travelTimeMinutes: parseInt(document.getElementById('sp-cal-travel').value) || 15 },
+    settings: {
+      enabled: !!cleanUrl,
+      bookingUrl: cleanUrl,
+      prepTimeMinutes: parseInt(document.getElementById('sp-cal-prep').value) || 30,
+      travelTimeMinutes: parseInt(document.getElementById('sp-cal-travel').value) || 15,
+    },
   });
+  status.textContent = cleanUrl ? 'Saved!' : 'Cleared';
+  status.style.color = '#34d399';
+  setTimeout(() => { status.textContent = ''; }, 2000);
 });
 
 // Clear all data — two-click confirmation (confirm() is blocked in side panels)
