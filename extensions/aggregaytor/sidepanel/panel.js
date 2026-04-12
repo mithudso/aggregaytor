@@ -1692,7 +1692,15 @@ document.getElementById('sp-clear-all').addEventListener('click', async () => {
     await chrome.runtime.sendMessage({ type: 'CLEAR_ALL_DATA' });
     status.textContent = 'All data cleared!';
     status.style.color = '#34d399';
-    setTimeout(() => loadThreads(), 500);
+    // Clear local caches and switch to empty inbox
+    allThreadMeta.clear();
+    hoverPreviewCache.clear();
+    currentMessages = [];
+    currentThread = null;
+    setTimeout(() => {
+      closeSettings();
+      document.getElementById('thread-list').innerHTML = '<div class="empty-state"><h2>All data cleared</h2><p>Open your sites to start capturing messages again.</p></div>';
+    }, 500);
   } catch (err) {
     status.textContent = 'Failed: ' + err.message;
     status.style.color = '#f87171';
