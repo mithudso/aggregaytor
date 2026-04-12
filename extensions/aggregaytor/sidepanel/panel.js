@@ -208,10 +208,8 @@ function renderThreads(summaries) {
     const name = isHexOnly ? (meta.generatedNickname || hexId.slice(0, 8)) : rawName;
     const initial = name.charAt(0).toUpperCase();
     const preview = t.lastMessage?.body || '';
-    // Queue nickname generation only for Sniffies hex IDs — A4A/Grindr have real usernames
-    if (isHexOnly && !meta.generatedNickname && t.platform === 'sniffies') {
-      generateNickname(t.contactId, t.platform, t.contact, t.lastMessage);
-    }
+    // Don't generate nicknames eagerly on render — it floods the LLM queue
+    // Nicknames are generated lazily when hovering or opening a thread
     const time = formatTime(t.lastMessage?.timestamp);
     const unread = t.unreadCount || 0;
     totalUnread += unread;
@@ -491,6 +489,13 @@ async function openThread(contactId, platform, displayName) {
   const threadList = document.getElementById('thread-list');
   savedScrollTop = threadList.scrollTop;
   currentThread = { contactId, platform, displayName };
+
+  // Lazy nickname: generate only when user actually opens the thread
+  const hexId = stripPrefix(contactId);
+  if ((!displayName || /^[0-9a-f]{6,}$/i.test(displayName)) && platform === 'sniffies') {
+    generateNickname(contactId, platform, null, null);
+  }
+
   document.getElementById('header-title').textContent = displayName || stripPrefix(contactId);
   document.body.classList.remove('view-inbox');
   document.body.classList.add('view-thread');
