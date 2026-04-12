@@ -94,14 +94,20 @@ async function handleMessage(msg: any): Promise<any> {
       return { ok: true, messages: matches };
     }
     case 'CLEAR_ALL_DATA': {
-      const db = await getDB();
-      const allDocs = await db.allDocs();
-      for (const row of allDocs.rows) {
-        try { await db.remove(row.id, row.value.rev); } catch {}
-      }
-      console.log(`${LOG} Cleared all data (${allDocs.rows.length} docs)`);
+      // Destroy and recreate the entire database — cleanest way to clear everything
+      const { destroyDB, getDB: regetDB } = await import('@aggregaytor/store');
+      await destroyDB();
+      // Force recreation on next access
+      await regetDB();
+      console.log(`${LOG} Cleared all data — database destroyed and recreated`);
       await updateBadgeCount();
-      return { ok: true, count: allDocs.rows.length };
+      // Re-seed global chat contact
+      await upsertContact({
+        id: 'sniffies:global-chat', platform: 'sniffies', platformUserId: 'global-chat',
+        displayName: '🌐 Global Chat', profileUrl: 'https://sniffies.com/global-chat',
+        avatarUrl: '', lastSeen: new Date().toISOString(), metadata: { isGlobalChat: true },
+      });
+      return { ok: true };
     }
     case 'NAVIGATE_TO_CONVERSATION': {
       await navigateToConversation(msg.platform, msg.contactId);
