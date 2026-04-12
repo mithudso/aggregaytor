@@ -298,10 +298,24 @@ export class SniffiesAdapter extends BaseAdapter {
         // CONFIRMED: Sniffies uses two distinct fetch endpoints:
         //   /api/post-authentication?timeThreshold=...  → Global chat (broadcast posts)
         //   /api/v2/post-authentication/chat-data       → DMs (private conversations)
+        //   BUT: chat-data also includes global posts mixed in! Need field-based detection.
         // WebSocket: "newGlobalMsg" event = global chat
+        //
+        // Global post structure (from WS newGlobalMsg):
+        //   { body, author, location, isDeleted, _id, createdAt, updatedAt, __v, partialUser }
+        // DM message structure:
+        //   Has conversationId, senderId, recipientId — global posts do NOT have these
+        const hasGlobalPostFields = (
+          ('author' in obj || 'partialUser' in obj) &&
+          ('location' in obj || 'isDeleted' in obj) &&
+          !('conversationId' in obj) && !('conversation_id' in obj) &&
+          !('recipientId' in obj) && !('recipient_id' in obj)
+        );
         const isGlobal = url === '[ws-global]' ||
           // URL-based: post-authentication WITHOUT /chat-data = global feed
           (url.includes('/post-authentication') && !url.includes('/chat-data')) ||
+          // Field-based: global post structure detected (catches posts mixed into chat-data)
+          hasGlobalPostFields ||
           // Keyword-based fallback
           url.includes('global') || url.includes('cruising') ||
           // Object field signals
