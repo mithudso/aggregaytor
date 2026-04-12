@@ -37,6 +37,7 @@
 
 import type { InterceptorOptions } from './types.js';
 import { captureAuthHeaders } from './api-sender.js';
+import { perf } from './perf.js';
 
 /**
  * Sentinel property attached to patched functions/prototypes to prevent
@@ -105,8 +106,12 @@ export function installFetchInterceptor(
       const ct = String(res.headers?.get('content-type') || '').toLowerCase();
       if (!ct.includes('json')) return res;
       // Clone before reading so the page's own .json() call still works.
+      const endParse = perf.start('fetch:clone+json');
       const data = await res.clone().json();
+      endParse();
+      const endCb = perf.start('fetch:onResponse');
       opts.onFetchResponse(url, data);
+      endCb();
     } catch {
       // Interception is best-effort; never break the page's own fetch.
     }
@@ -181,7 +186,11 @@ export function installXHRInterceptor(
             if (!text || text.length > 1_500_000) return;
             payload = JSON.parse(text);
           }
-          if (payload) opts.onXHRResponse(url, payload);
+          if (payload) {
+            const endCb = perf.start('xhr:onResponse');
+            opts.onXHRResponse(url, payload);
+            endCb();
+          }
         } catch {
           // Best-effort: never break the page's own XHR.
         }
@@ -276,7 +285,9 @@ export function installWebSocketInterceptor(
       || EventTarget.prototype.addEventListener;
     nativeAddListener.call(ws, 'message', (event: MessageEvent) => {
       try {
+        const endWs = perf.start('ws:onMessage');
         opts.onWebSocketMessage(event?.data, _source);
+        endWs();
       } catch {
         // Best-effort: never break the page's own WebSocket handling.
       }

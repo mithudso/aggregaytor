@@ -15,7 +15,14 @@
  */
 
 import { SniffiesAdapter } from '@aggregaytor/adapter-sniffies';
-import { setLogLevel } from '@aggregaytor/adapter-core';
+import { setLogLevel, perf } from '@aggregaytor/adapter-core';
+
+// ── Performance Counters ────────────────────────────────────────────────────
+// Expose perf counters on window so you can inspect from DevTools console:
+//   __aggregaytor_perf.stats()   — show all counters sorted by CPU time
+//   __aggregaytor_perf.reset()   — clear all counters
+//   __aggregaytor_perf.uptimeMin() — minutes since page load
+(window as any).__aggregaytor_perf = perf;
 
 // ── Bridge Communication ─────────────────────────────────────────────────────
 // The MAIN world cannot call chrome.runtime.*, so all communication with the

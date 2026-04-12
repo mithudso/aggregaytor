@@ -35,6 +35,7 @@ import {
   BaseAdapter,
   walkPayload,
   createLogger,
+  perf,
 } from '@aggregaytor/adapter-core';
 import type { Platform, UnifiedMessage, UnifiedContact } from '@aggregaytor/adapter-core';
 import { parseSocketIOFrame, isGlobalChatEvent, isPresenceEvent } from './ws-parser.js';
@@ -383,6 +384,7 @@ export class SniffiesAdapter extends BaseAdapter {
    * @param payload The parsed JSON body of the response
    */
   protected parseApiResponse(url: string, payload: unknown): UnifiedMessage[] {
+    const endParseApi = perf.start('parseApiResponse');
     // Check for block/error responses before message extraction
     this.detectBlockSignals(url, payload);
 
@@ -563,6 +565,7 @@ export class SniffiesAdapter extends BaseAdapter {
       this.emit({ type: 'contacts', payload: contacts });
     }
 
+    endParseApi();
     return newMessages;
   }
 
@@ -582,10 +585,11 @@ export class SniffiesAdapter extends BaseAdapter {
    *     parseApiResponse with the synthetic URL `[ws-dm]`.
    */
   protected parseWebSocketFrame(data: string | ArrayBuffer): UnifiedMessage[] {
+    const endWsFrame = perf.start('parseWebSocketFrame');
     const text = typeof data === 'string' ? data : '';
-    if (!text) return [];
+    if (!text) { endWsFrame(); return []; }
     const frame = parseSocketIOFrame(text);
-    if (!frame) return [];
+    if (!frame) { endWsFrame(); return []; }
 
     // ── Presence events: skip for messages but extract contacts ──────────
     if (isPresenceEvent(frame.eventName)) {
@@ -628,16 +632,17 @@ export class SniffiesAdapter extends BaseAdapter {
           }
         }
       }
-      return [];
+      endWsFrame(); return [];
     }
 
     // Skip frames with no data payload
-    if (!frame.data) return [];
+    if (!frame.data) { endWsFrame(); return []; }
 
     // ── Global chat events: route with synthetic [ws-global] URL ─────────
     if (isGlobalChatEvent(frame.eventName)) {
       log.debug(`WS global event: "${frame.eventName}"`);
-      return this.parseApiResponse('[ws-global]', frame.data);
+      const result = this.parseApiResponse('[ws-global]', frame.data);
+      endWsFrame(); return result;
     }
 
     // Log unknown non-presence event names at debug level for discovery
@@ -646,7 +651,8 @@ export class SniffiesAdapter extends BaseAdapter {
     }
 
     // ── Default: assume DM traffic ──────────────────────────────────────
-    return this.parseApiResponse('[ws-dm]', frame.data);
+    const result = this.parseApiResponse('[ws-dm]', frame.data);
+    endWsFrame(); return result;
   }
 
   // ── Self-ID Detection ────────────────────────────────────────────────────
@@ -779,6 +785,7 @@ export class SniffiesAdapter extends BaseAdapter {
    * opens a conversation with them.
    */
   private scrapeAvatarsFromDOM(): void {
+    const endScrape = perf.start('scrapeAvatarsFromDOM');
     try {
       const markers = document.querySelectorAll('.maplibregl-marker, .marker-avatar-image, [style*="sniffiesassets"]');
       for (const el of markers) {
@@ -807,6 +814,7 @@ export class SniffiesAdapter extends BaseAdapter {
         }
       }
     } catch { /* DOM access can fail in certain contexts */ }
+    endScrape();
   }
 
   // ── localStorage Scanning ────────────────────────────────────────────────
@@ -821,6 +829,7 @@ export class SniffiesAdapter extends BaseAdapter {
    * are skipped to avoid blocking the main thread.
    */
   private scanStorage(): void {
+    const endScan = perf.start('scanStorage');
     try {
       const keys = Object.keys(localStorage);
       for (const key of keys) {
@@ -837,5 +846,6 @@ export class SniffiesAdapter extends BaseAdapter {
         } catch { /* not valid JSON -- skip */ }
       }
     } catch { /* localStorage not available in this context */ }
+    endScan();
   }
 }

@@ -487,30 +487,27 @@ async function processDossierExtractions(): Promise<void> {
   }
 }
 
+// Throttle CONTACTS_UPDATED notifications to at most once per 5 seconds
+// to avoid triggering expensive thread-list refreshes on every userJoined event.
+let lastContactsNotify = 0;
+let contactsNotifyTimer: ReturnType<typeof setTimeout> | null = null;
+
 async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void> {
-  let updated = 0;
   for (const c of contacts) {
     await upsertContact(c);
-    updated++;
-    // #17 Contact merge detection — log potential duplicates across platforms
-    if (c.displayName && c.displayName.length > 2) {
-      try {
-        const { getAllContacts } = await import('@aggregaytor/store');
-        const allContacts = await getAllContacts();
-        const dupes = allContacts.filter(existing =>
-          existing.displayName === c.displayName &&
-          existing.platform !== c.platform &&
-          existing._id !== `contact:${c.platform}:${c.platformUserId}`
-        );
-        if (dupes.length > 0) {
-          console.log(`${LOG} [MergeDetect] "${c.displayName}" on ${c.platform} matches: ${dupes.map(d => `${d.platform}:${d.platformUserId}`).join(', ')}`);
-        }
-      } catch {}
-    }
   }
-  // Notify side panel that contacts were updated (for avatar refresh)
-  if (updated > 0) {
-    chrome.runtime.sendMessage({ type: 'CONTACTS_UPDATED', count: updated }).catch(() => {});
+  // Debounced notification to avoid flooding the panel with refreshes.
+  // On a busy map, hundreds of contacts per minute flow through here.
+  const now = Date.now();
+  if (now - lastContactsNotify > 5000) {
+    lastContactsNotify = now;
+    chrome.runtime.sendMessage({ type: 'CONTACTS_UPDATED', count: contacts.length }).catch(() => {});
+  } else if (!contactsNotifyTimer) {
+    contactsNotifyTimer = setTimeout(() => {
+      contactsNotifyTimer = null;
+      lastContactsNotify = Date.now();
+      chrome.runtime.sendMessage({ type: 'CONTACTS_UPDATED', count: 1 }).catch(() => {});
+    }, 5000);
   }
 }
 

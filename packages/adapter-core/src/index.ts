@@ -53,3 +53,6 @@ export { captureAuthHeaders, getCapturedAuth, sendViaApi } from './api-sender.js
 // Logger
 export { createLogger, setLogLevel, getLogLevel, loadLogLevel, saveLogLevel } from './logger.js';
 export type { LogLevel } from './logger.js';
+
+// Performance counters
+export { perf } from './perf.js';
