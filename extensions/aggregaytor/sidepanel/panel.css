@@ -257,7 +257,9 @@ body {
 .thread-list { flex: 1; overflow-y: auto; }
 .thread-item {
   display: flex; gap: 10px; padding: 10px 12px;
-  border-bottom: 1px solid rgba(255,255,255,0.04); cursor: pointer; position: relative;
+  border-bottom: 1px solid rgba(255,255,255,0.04); cursor: pointer;
+  position: relative; /* anchor for absolute hover-preview + thread-actions */
+  overflow: visible; /* allow hover-preview to extend below */
 }
 .thread-item:hover { background: rgba(255,255,255,0.03); }
 .thread-item.unread { background: rgba(59,130,246,0.06); }
@@ -302,20 +304,27 @@ body {
 .thread-actions .action-icon { width: 24px; height: 24px; font-size: 12px; }
 
 /* ── Hover preview ── */
+/* Positioned absolutely so it overlays BELOW the thread item without
+   pushing the thread text or sibling items around. The thread-item
+   already has position:relative which creates the containing block. */
 .hover-preview {
   display: none;
-  width: 100%;
-  padding: 0;
+  position: absolute;
+  left: 0; right: 0;
+  top: 100%; /* directly below the thread item */
+  z-index: 20;
+  background: #1a1f2e;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 0 0 8px 8px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
   overflow: hidden;
-  transition: max-height 0.2s ease;
   max-height: 0;
+  transition: max-height 0.2s ease;
 }
 .hover-preview.active {
   display: block;
-  padding: 8px 0 4px;
+  padding: 8px 12px 4px;
   max-height: 400px;
-  border-top: 1px solid rgba(255,255,255,0.06);
-  margin-top: 8px;
 }
 .hp-loading { font-size: 11px; color: #6b7280; padding: 4px 0; }
 .hp-profile { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
