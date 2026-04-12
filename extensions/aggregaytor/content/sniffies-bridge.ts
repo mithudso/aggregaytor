@@ -275,8 +275,9 @@ function scrapeChatPanel() {
       const profileId = idMatch[1].toLowerCase();
       const avatarUrl = bgStyle.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/)?.[1] || '';
 
-      // Message preview text
-      const previewEl = row.querySelector('[data-testid="msgConversationPreview"] .content-preview span');
+      // Message preview text — msgConversationPreview IS the content-preview div
+      const previewEl = row.querySelector('[data-testid="msgConversationPreview"] span')
+        || row.querySelector('.content-preview span');
       let preview = previewEl?.textContent?.trim() || '';
       // Clean up Angular whitespace
       preview = preview.replace(/\s+/g, ' ').trim();

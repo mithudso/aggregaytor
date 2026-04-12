@@ -186,9 +186,9 @@ export class SniffiesAdapter extends BaseAdapter {
 
   protected shouldInterceptUrl(url: string): boolean {
     const s = String(url).toLowerCase();
-    // Skip global chat URLs — the bridge DOM scraper handles those
-    if (s.includes('global-chat') || s.includes('cruising-update') || s.includes('/feed')) return false;
-    return s.includes('sniffies.com');
+    // Skip explicit global chat pages — the bridge DOM scraper handles those
+    if (s.includes('global-chat') || s.includes('cruising-update')) return false;
+    return s.includes('sniffies.com') || s.includes('sniffies');
   }
 
   /**
@@ -293,21 +293,14 @@ export class SniffiesAdapter extends BaseAdapter {
         const msgId = String(obj.id || obj._id || obj.messageId || obj.message_id || `${profileId}:${ts}`);
         log.debug(`Message: contactId=sniffies:${profileId} dir=${direction} body="${body.slice(0, 30)}..." keys=${Object.keys(obj).slice(0, 8).join(',')}`);
 
-        // Detect global/group chat context
-        // Key signals: URL contains global/cruising/feed, OR object has broadcast fields,
-        // OR there's no conversationId/threadId (DMs always have one), OR it's a WebSocket
-        // frame with no reply context
-        const hasConversationId = !!(obj.conversationId || obj.conversation_id || obj.threadId || obj.thread_id || obj.chatId || obj.chat_id);
-        const hasDMSignals = !!(obj.recipientId || obj.recipient_id || obj.toId || obj.to_id);
+        // Detect global/group chat context — only based on explicit signals
+        // Do NOT infer from missing fields — DMs from chat-data API also lack conversationId
         const isGlobal = url.includes('global') || url.includes('group') ||
-          url.includes('cruising') || url.includes('feed') ||
-          url.includes('[ws]') || // WebSocket frames without conversation context
+          url.includes('cruising') ||
           (typeof obj.channel === 'string' && (obj.channel.includes('global') || obj.channel.includes('group'))) ||
-          (typeof obj.type === 'string' && (obj.type.includes('cruising') || obj.type.includes('global') || obj.type.includes('broadcast') || obj.type.includes('update'))) ||
+          (typeof obj.type === 'string' && (obj.type.includes('cruising') || obj.type.includes('global') || obj.type.includes('broadcast'))) ||
           (typeof obj.feedType === 'string') ||
-          (typeof obj.cruisingUpdate === 'object') ||
-          // No conversation context = likely a broadcast/cruising update
-          (!hasConversationId && !hasDMSignals && direction === 'in');
+          (typeof obj.cruisingUpdate === 'object');
         const threadKey = isGlobal ? 'global-chat' : profileId;
 
         // Collect sender attributes for global chat rendering
