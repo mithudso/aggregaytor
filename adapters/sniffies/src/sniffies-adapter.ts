@@ -294,9 +294,17 @@ export class SniffiesAdapter extends BaseAdapter {
         const msgId = String(obj.id || obj._id || obj.messageId || obj.message_id || `${profileId}:${ts}`);
         log.debug(`Message: contactId=sniffies:${profileId} dir=${direction} body="${body.slice(0, 30)}..." keys=${Object.keys(obj).slice(0, 8).join(',')}`);
 
-        // Detect global/group chat context — only based on explicit signals
-        const isGlobal = url.includes('global') || url.includes('group') ||
-          url.includes('cruising') || url === '[ws-global]' ||
+        // Detect global/group chat context
+        // CONFIRMED: Sniffies uses two distinct fetch endpoints:
+        //   /api/post-authentication?timeThreshold=...  → Global chat (broadcast posts)
+        //   /api/v2/post-authentication/chat-data       → DMs (private conversations)
+        // WebSocket: "newGlobalMsg" event = global chat
+        const isGlobal = url === '[ws-global]' ||
+          // URL-based: post-authentication WITHOUT /chat-data = global feed
+          (url.includes('/post-authentication') && !url.includes('/chat-data')) ||
+          // Keyword-based fallback
+          url.includes('global') || url.includes('cruising') ||
+          // Object field signals
           (typeof obj.channel === 'string' && (obj.channel.includes('global') || obj.channel.includes('group'))) ||
           (typeof obj.type === 'string' && (obj.type.includes('cruising') || obj.type.includes('global') || obj.type.includes('broadcast'))) ||
           (typeof obj.feedType === 'string') ||

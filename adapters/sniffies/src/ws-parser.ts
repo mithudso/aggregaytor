@@ -71,7 +71,9 @@ export function parseSocketIOFrame(text: string): ParsedSocketFrame | null {
 
 // Event names that indicate cruising/global chat (not DMs)
 export const GLOBAL_CHAT_EVENTS = new Set([
-  // Observed/expected Sniffies event names
+  // *** CONFIRMED from production WebSocket traffic (April 2025): ***
+  'newGlobalMsg',
+  // Other observed/expected Sniffies event names
   'cruisingUpdate', 'cruising-update', 'cruisingPost', 'cruising_update',
   'cruisingMessage', 'cruising-message', 'cruising_message',
   'post', 'feedUpdate', 'feed-update', 'feed_update',
@@ -98,12 +100,15 @@ export const PRESENCE_EVENTS = new Set([
 
 export function isGlobalChatEvent(eventName: string): boolean {
   if (!eventName) return false;
-  return GLOBAL_CHAT_EVENTS.has(eventName) ||
-    eventName.toLowerCase().includes('cruising') ||
-    eventName.toLowerCase().includes('broadcast') ||
-    eventName.toLowerCase().includes('feed') ||
-    eventName.toLowerCase().includes('globalchat') ||
-    eventName.toLowerCase().includes('publicmessage');
+  if (GLOBAL_CHAT_EVENTS.has(eventName)) return true;
+  const lower = eventName.toLowerCase();
+  return lower.includes('cruising') ||
+    lower.includes('broadcast') ||
+    lower.includes('feed') ||
+    lower.includes('globalchat') ||
+    lower.includes('globalmsg') ||
+    lower.includes('newglobal') ||
+    lower.includes('publicmessage');
 }
 
 export function isPresenceEvent(eventName: string): boolean {
