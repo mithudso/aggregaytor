@@ -281,9 +281,18 @@ export class SniffiesAdapter extends BaseAdapter {
    * Maps profileId → last-processed timestamp. Prevents the expensive
    * deepFindAvatarUrl recursive search from running on every presence
    * event (userJoined fires hundreds of times per minute on busy maps).
-   * Each profile is only processed once per 30 seconds.
+   * Each profile is only processed once per 60 seconds.
    */
   private userJoinedThrottle = new Map<string, number>();
+
+  /**
+   * Buffer for contacts extracted from userJoined events.
+   * Instead of emitting one chrome.runtime.sendMessage per contact,
+   * we batch them and flush every 5 seconds. This reduces the 25+
+   * ADAPTER_CONTACTS events/second we were seeing to ~1 batched event.
+   */
+  private userJoinedContactBuffer: UnifiedContact[] = [];
+  private userJoinedFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Set up network interception and periodic background tasks. */
   async init(): Promise<void> {
@@ -293,10 +302,11 @@ export class SniffiesAdapter extends BaseAdapter {
     this.seedSelfIdsFromPage();
     // Monkey-patch fetch/XHR/WebSocket to intercept traffic
     this.setupNetworkInterception(window as Window & typeof globalThis);
-    // Periodically scan localStorage for cached conversations and
-    // scrape map-marker DOM nodes for avatar URLs
+    // Periodically scrape map-marker DOM nodes for avatar URLs.
+    // NOTE: scanStorage() was removed — it cost 300ms+ per call scanning
+    // ALL localStorage keys and JSON.parsing matching ones. It was a legacy
+    // fallback from before fetch/XHR interception worked reliably.
     this.storageTimer = setInterval(() => {
-      this.scanStorage();
       this.scrapeAvatarsFromDOM();
     }, 60_000);
     // Initial avatar scrape after DOM settles (5s delay for SPA hydration)
@@ -604,7 +614,7 @@ export class SniffiesAdapter extends BaseAdapter {
         if (profileId && !this.selfIds.ids.has(profileId)) {
           const now = Date.now();
           const lastSeen = this.userJoinedThrottle.get(profileId) || 0;
-          if (now - lastSeen > 30_000) {
+          if (now - lastSeen > 60_000) {
             this.userJoinedThrottle.set(profileId, now);
             // Cap throttle map at 500 entries to prevent unbounded growth
             if (this.userJoinedThrottle.size > 500) {
@@ -615,19 +625,27 @@ export class SniffiesAdapter extends BaseAdapter {
             if (profileData && typeof profileData === 'object') {
               this.selfIds.detectFromPayload(profileData);
               const avatarUrl = this.resolveAvatarUrl(profileData, profileId);
-              this.emit({
-                type: 'contacts',
-                payload: [{
-                  id: `sniffies:${profileId}`,
-                  platform: 'sniffies' as const,
-                  platformUserId: profileId,
-                  displayName: '',
-                  profileUrl: `https://sniffies.com/profile/${profileId}`,
-                  avatarUrl,
-                  lastSeen: new Date().toISOString(),
-                  metadata: {},
-                }],
+              // Buffer contacts and flush every 5s to avoid flooding
+              // with 25+ chrome.runtime.sendMessage calls per second
+              this.userJoinedContactBuffer.push({
+                id: `sniffies:${profileId}`,
+                platform: 'sniffies' as const,
+                platformUserId: profileId,
+                displayName: '',
+                profileUrl: `https://sniffies.com/profile/${profileId}`,
+                avatarUrl,
+                lastSeen: new Date().toISOString(),
+                metadata: {},
               });
+              if (!this.userJoinedFlushTimer) {
+                this.userJoinedFlushTimer = setTimeout(() => {
+                  if (this.userJoinedContactBuffer.length) {
+                    this.emit({ type: 'contacts', payload: this.userJoinedContactBuffer });
+                    this.userJoinedContactBuffer = [];
+                  }
+                  this.userJoinedFlushTimer = null;
+                }, 5000);
+              }
             }
           }
         }

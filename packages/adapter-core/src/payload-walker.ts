@@ -66,6 +66,13 @@ export function walkPayload(
   const seen = new WeakSet();
   const queue: QueueItem[] = [{ value: payload, contextId, depth: 0 }];
 
+  // Node count cap: prevent unbounded traversal on very large payloads
+  // (e.g. Sniffies chat-data returning 100+ conversations × multiple messages
+  // = thousands of objects, each of which runs isLikelyMessage + findProfileId).
+  // 500 nodes is enough to cover any realistic conversation set.
+  let visited = 0;
+  const MAX_NODES = 500;
+
   while (queue.length) {
     const { value, contextId: ctx, depth } = queue.shift()!;
 
@@ -74,6 +81,9 @@ export function walkPayload(
     if (seen.has(value as object)) continue;
     seen.add(value as object);
     if (depth > maxDepth) continue;
+
+    // Stop if we've visited too many nodes (prevent 300ms+ spikes)
+    if (++visited > MAX_NODES) break;
 
     // Let the visitor inspect this node.
     visitor.onObject(value as Record<string, unknown>, ctx, depth);
