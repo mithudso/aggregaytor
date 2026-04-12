@@ -168,6 +168,7 @@ let requestTimestamps: number[] = [];
 let backoffUntil = 0;
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 2000;
+let rateLimitLoggedAt = 0;
 
 function isRateLimited(maxPerMin: number): boolean {
   if (maxPerMin <= 0) return false;
@@ -194,7 +195,6 @@ async function processQueue(): Promise<void> {
     // Check rate limit
     if (isRateLimited(rateSettings.maxRequestsPerMinute)) {
       // Drop background requests that have been queued — they can retry later
-      const beforeCount = requestQueue.length;
       const dropped = requestQueue.filter(r => FEATURE_PRIORITY[r.feature] !== 'interactive');
       for (const d of dropped) {
         requestQueue.splice(requestQueue.indexOf(d), 1);
@@ -202,12 +202,19 @@ async function processQueue(): Promise<void> {
       }
 
       if (requestQueue.length === 0) {
-        console.log(`${LOG} Rate limited (${rateSettings.maxRequestsPerMinute}/min), dropped ${dropped.length} background requests, queue empty`);
+        // Log at most once per 60 seconds
+        if (!rateLimitLoggedAt || Date.now() - rateLimitLoggedAt > 60_000) {
+          console.log(`${LOG} Rate limited (${rateSettings.maxRequestsPerMinute}/min), dropped ${dropped.length} background requests`);
+          rateLimitLoggedAt = Date.now();
+        }
         break;
       }
 
-      console.log(`${LOG} Rate limited (${rateSettings.maxRequestsPerMinute}/min), dropped ${dropped.length} background, waiting 2min for ${requestQueue.length} interactive`);
-      await new Promise(r => setTimeout(r, 120_000)); // 2 minutes
+      if (!rateLimitLoggedAt || Date.now() - rateLimitLoggedAt > 60_000) {
+        console.log(`${LOG} Rate limited, waiting 2min for ${requestQueue.length} interactive requests`);
+        rateLimitLoggedAt = Date.now();
+      }
+      await new Promise(r => setTimeout(r, 120_000));
       continue;
     }
 
@@ -286,6 +293,12 @@ async function queuedFetch(url: string, init: RequestInit, feature: string): Pro
   const toggle = featureMap[feature];
   if (toggle && !rateSettings[toggle]) {
     throw new Error(`LLM feature '${feature}' is disabled`);
+  }
+
+  // Reject background requests immediately if rate limited — don't even queue them
+  const priority = FEATURE_PRIORITY[feature] || 'background';
+  if (priority !== 'interactive' && isRateLimited(rateSettings.maxRequestsPerMinute)) {
+    throw new Error('Rate limited — background request rejected');
   }
 
   return new Promise((resolve, reject) => {
