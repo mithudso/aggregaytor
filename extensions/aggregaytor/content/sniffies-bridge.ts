@@ -245,90 +245,90 @@ function checkUrlChange() {
   }
 }
 /**
- * Scrape the Sniffies chat panel (/chat) for conversation list.
- * DOM-agnostic approach: scan the entire page for profile hex IDs
- * in links, background images, and nearby text.
+ * Scrape the Sniffies chat panel for conversation list.
+ * Uses exact selectors from the Angular DOM structure:
+ * - chat-list-vertical-item = each conversation row
+ * - .avatar-img background-image = profile photo with hex ID in URL
+ * - [data-testid="msgConversationPreview"] .content-preview = message text
+ * - .message-date = timestamp
+ * - .fa-thumbtack = pinned
+ * - .fa-reply = sent by you
+ * - .unread-count = unread badge
  */
 function scrapeChatPanel() {
   if (!contextValid || !checkContext()) return;
 
   const contacts: any[] = [];
   const messages: any[] = [];
-  const seenIds = new Set<string>();
 
-  // Strategy 1: Find all links containing profile hex IDs
-  document.querySelectorAll('a[href*="/profile/"]').forEach(link => {
-    const match = (link as HTMLAnchorElement).href.match(/\/profile\/([0-9a-f]{6,})/i);
-    if (!match) return;
-    const profileId = match[1].toLowerCase();
-    if (seenIds.has(profileId)) return;
-    seenIds.add(profileId);
+  // Each conversation is a chat-list-vertical-item element
+  const rows = document.querySelectorAll('chat-list-vertical-item');
 
-    // Look for avatar near this link
-    const container = link.closest('div') || link.parentElement;
-    let avatarUrl = '';
-    if (container) {
-      const img = container.querySelector('img') as HTMLImageElement;
-      if (img?.src?.startsWith('http')) avatarUrl = img.src;
-      // Check background images
-      container.querySelectorAll('*').forEach(el => {
-        const bg = (el as HTMLElement).style?.backgroundImage || '';
-        const bgMatch = bg.match(/url\(["']?(https?:\/\/[^"')]+sniffiesassets[^"')]+)["']?\)/);
-        if (bgMatch) avatarUrl = avatarUrl || bgMatch[1];
+  rows.forEach(row => {
+    try {
+      // Extract profile ID from avatar background-image URL
+      const avatarEl = row.querySelector('.avatar-img') as HTMLElement;
+      if (!avatarEl) return;
+      const bgStyle = avatarEl.style?.backgroundImage || '';
+      const idMatch = bgStyle.match(/profile\.sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+      if (!idMatch) return; // skip default avatars (site.sniffiesassets.com)
+      const profileId = idMatch[1].toLowerCase();
+      const avatarUrl = bgStyle.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/)?.[1] || '';
+
+      // Message preview text
+      const previewEl = row.querySelector('[data-testid="msgConversationPreview"] .content-preview span');
+      let preview = previewEl?.textContent?.trim() || '';
+      // Clean up Angular whitespace
+      preview = preview.replace(/\s+/g, ' ').trim();
+
+      // Direction: .fa-reply means sent by you
+      const sentByYou = !!row.querySelector('.fa-reply');
+      const direction = sentByYou ? 'out' : 'in';
+
+      // Timestamp
+      const timeEl = row.querySelector('.message-date');
+      const timeText = timeEl?.textContent?.trim() || '';
+
+      // Pinned status
+      const isPinned = !!row.querySelector('.fa-thumbtack');
+
+      // Unread count
+      const unreadEl = row.querySelector('.unread-count');
+      const unreadCount = parseInt(unreadEl?.textContent?.trim() || '0') || 0;
+
+      // Create contact
+      contacts.push({
+        id: `sniffies:${profileId}`,
+        platform: 'sniffies',
+        platformUserId: profileId,
+        displayName: '',
+        profileUrl: `https://sniffies.com/profile/${profileId}`,
+        avatarUrl,
+        lastSeen: new Date().toISOString(),
+        metadata: { isPinned },
       });
-    }
 
-    // Get nearby text for preview
-    const parent = link.closest('[class]')?.parentElement || link.parentElement?.parentElement;
-    const text = parent?.textContent?.trim() || link.textContent?.trim() || '';
-
-    contacts.push({
-      id: `sniffies:${profileId}`, platform: 'sniffies', platformUserId: profileId,
-      displayName: '', profileUrl: `https://sniffies.com/profile/${profileId}`,
-      avatarUrl, lastSeen: new Date().toISOString(), metadata: {},
-    });
-    if (text.length > 3) {
-      messages.push({
-        id: `sniffies:chatpanel-${profileId}-${Date.now()}`, platform: 'sniffies',
-        threadId: `sniffies:${profileId}`, contactId: `sniffies:${profileId}`,
-        direction: 'in', body: text.slice(0, 150), timestamp: new Date().toISOString(),
-        read: true, metadata: { profileId, source: 'chat-panel', avatarUrl },
-      });
-    }
+      // Create message from preview
+      if (preview.length > 1) {
+        messages.push({
+          id: `sniffies:chatpanel-${profileId}-${Date.now()}`,
+          platform: 'sniffies',
+          threadId: `sniffies:${profileId}`,
+          contactId: `sniffies:${profileId}`,
+          direction,
+          body: preview.slice(0, 200),
+          timestamp: new Date().toISOString(),
+          read: unreadCount === 0,
+          metadata: {
+            profileId, source: 'chat-panel', avatarUrl,
+            isPinned, unreadCount, timeText,
+          },
+        });
+      }
+    } catch {}
   });
 
-  // Strategy 2: Find all background images with sniffiesassets CDN URLs
-  document.querySelectorAll('*').forEach(el => {
-    const bg = (el as HTMLElement).style?.backgroundImage || '';
-    const match = bg.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
-    if (!match) return;
-    const profileId = match[1].toLowerCase();
-    if (seenIds.has(profileId)) return;
-    seenIds.add(profileId);
-    const avatarUrl = bg.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/)?.[1] || '';
-    contacts.push({
-      id: `sniffies:${profileId}`, platform: 'sniffies', platformUserId: profileId,
-      displayName: '', profileUrl: `https://sniffies.com/profile/${profileId}`,
-      avatarUrl, lastSeen: new Date().toISOString(), metadata: {},
-    });
-  });
-
-  // Strategy 3: Find all img elements with sniffiesassets URLs
-  document.querySelectorAll('img[src*="sniffiesassets"]').forEach(img => {
-    const src = (img as HTMLImageElement).src;
-    const match = src.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
-    if (!match) return;
-    const profileId = match[1].toLowerCase();
-    if (seenIds.has(profileId)) return;
-    seenIds.add(profileId);
-    contacts.push({
-      id: `sniffies:${profileId}`, platform: 'sniffies', platformUserId: profileId,
-      displayName: '', profileUrl: `https://sniffies.com/profile/${profileId}`,
-      avatarUrl: src, lastSeen: new Date().toISOString(), metadata: {},
-    });
-  });
-
-  console.log(`[Aggregaytor:Bridge:Sniffies] Chat panel scraped: ${contacts.length} contacts, ${messages.length} messages (${seenIds.size} unique profiles)`);
+  console.log(`[Aggregaytor:Bridge:Sniffies] Chat panel scraped: ${contacts.length} contacts, ${messages.length} messages from ${rows.length} rows`);
 
   if (contacts.length) {
     chrome.runtime.sendMessage({ type: 'ADAPTER_CONTACTS', platform: 'sniffies', payload: contacts }).catch(() => {});
