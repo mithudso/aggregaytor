@@ -203,9 +203,15 @@ function renderThreads(summaries) {
     const meta = allThreadMeta.get(t.contactId) || {};
     const rawName = meta.alias || t.contact?.displayName || '';
     const hexId = stripPrefix(t.contactId);
-    // If name is just a hex ID or empty, we need a nickname
+    // If name is just a hex ID or empty, build a display name:
+    // 1. User-set alias (from thread meta)
+    // 2. LLM-generated nickname (only after 10+ inbound messages)
+    // 3. Stats line from profile metadata (e.g. "M, 5'11", 170lb, athletic, top")
+    // 4. Truncated hex ID as last resort
     const isHexOnly = !rawName || /^[0-9a-f]{6,}$/i.test(rawName);
-    const name = isHexOnly ? (meta.generatedNickname || hexId.slice(0, 8)) : rawName;
+    const name = isHexOnly
+      ? (meta.generatedNickname || buildStatsLine(t.contact?.metadata) || hexId.slice(0, 8))
+      : rawName;
     const initial = name.charAt(0).toUpperCase();
     const preview = t.lastMessage?.body || '';
     // Don't generate nicknames eagerly on render — it floods the LLM queue
@@ -490,11 +496,11 @@ async function openThread(contactId, platform, displayName) {
   savedScrollTop = threadList.scrollTop;
   currentThread = { contactId, platform, displayName };
 
-  // Lazy nickname: generate only when user actually opens the thread
+  // Nickname generation: only call the LLM after 10+ inbound messages.
+  // Before that threshold, the thread list shows a stats line built from
+  // profile metadata (age, height, weight, body type, etc.) which is
+  // cheaper and more immediately useful than a hex ID stub.
   const hexId = stripPrefix(contactId);
-  if ((!displayName || /^[0-9a-f]{6,}$/i.test(displayName)) && platform === 'sniffies') {
-    generateNickname(contactId, platform, null, null);
-  }
 
   document.getElementById('header-title').textContent = displayName || stripPrefix(contactId);
   document.body.classList.remove('view-inbox');
@@ -532,7 +538,20 @@ async function openThread(contactId, platform, displayName) {
   // Load messages
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_MESSAGES_BY_CONTACT', contactId, limit: 500 });
-    if (res?.ok) { currentMessages = res.messages || []; renderMessages(currentMessages); loadThreadAnalysis(); }
+    if (res?.ok) {
+      currentMessages = res.messages || [];
+      renderMessages(currentMessages);
+      loadThreadAnalysis();
+      // Generate LLM nickname only after 10+ inbound messages from them
+      // (before that, the stats line from metadata is shown instead)
+      const inboundCount = currentMessages.filter(m => m.direction === 'in').length;
+      const meta = await chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId });
+      const hasMeta = meta?.meta;
+      if (inboundCount >= 10 && !hasMeta?.generatedNickname && !hasMeta?.alias &&
+          (!displayName || /^[0-9a-f]{6,}$/i.test(displayName)) && platform === 'sniffies') {
+        generateNickname(contactId, platform, null, currentMessages[currentMessages.length - 1]);
+      }
+    }
   } catch (err) { console.error('[Panel] Message load error:', err); }
 
   // After the platform tab navigates to this conversation, scrape all visible messages
@@ -1476,6 +1495,47 @@ function platformIcon(platform) {
 function stripPrefix(id) { return String(id || '').replace(/^[a-z]+:/, ''); }
 function truncate(str, len) { return !str ? '' : str.length > len ? str.slice(0, len) + '...' : str; }
 function esc(text) { const d = document.createElement('div'); d.textContent = String(text || ''); return d.innerHTML; }
+
+/**
+ * Build a compact stats line from contact metadata for display in the thread
+ * list when no proper name or LLM nickname is available yet.
+ * Output format: "M, 5'11", 170lb, athletic, top" (mimics Sniffies profile header)
+ * Returns empty string if no useful metadata is found.
+ */
+function buildStatsLine(metadata) {
+  if (!metadata || typeof metadata !== 'object') return '';
+  const parts = [];
+  // Age
+  const age = metadata.age || metadata.Age;
+  if (age) parts.push(String(age));
+  // Height
+  const height = metadata.height || metadata.Height;
+  if (height) parts.push(String(height));
+  // Weight
+  const weight = metadata.weight || metadata.Weight;
+  if (weight) {
+    const w = String(weight);
+    parts.push(w.includes('lb') || w.includes('kg') ? w : w + 'lb');
+  }
+  // Body type
+  const body = metadata.bodyType || metadata.body || metadata.build || metadata.Body;
+  if (body && typeof body === 'string' && body.length < 20) parts.push(body);
+  // Position/attitude
+  const pos = metadata.position || metadata.attitude || metadata.role || metadata.Position;
+  if (pos && typeof pos === 'string' && pos.length < 20) parts.push(pos);
+  // Distance
+  const dist = metadata.distance || metadata.Distance;
+  if (dist) parts.push(String(dist));
+  // Ethnicity (only if we have room — keeps the line short)
+  if (parts.length < 4) {
+    const eth = metadata.ethnicity || metadata.Ethnicity;
+    if (eth && typeof eth === 'string' && eth.length < 15) parts.push(eth);
+  }
+  if (!parts.length) return '';
+  // Cap at ~50 chars to fit the thread list row
+  const line = parts.join(', ');
+  return line.length > 50 ? line.slice(0, 47) + '...' : line;
+}
 function formatTime(iso) {
   if (!iso) return '';
   const d = new Date(iso), ms = Date.now() - d.getTime(), m = Math.floor(ms / 60000);
