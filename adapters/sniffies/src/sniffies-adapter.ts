@@ -186,6 +186,8 @@ export class SniffiesAdapter extends BaseAdapter {
 
   protected shouldInterceptUrl(url: string): boolean {
     const s = String(url).toLowerCase();
+    // Skip global chat URLs — the bridge DOM scraper handles those
+    if (s.includes('global-chat') || s.includes('cruising-update') || s.includes('/feed')) return false;
     return s.includes('sniffies.com');
   }
 

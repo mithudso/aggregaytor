@@ -20,11 +20,25 @@ let filters = {
 let currentSort = 'recent';
 let savedScrollTop = 0; // #13 scroll position memory
 
-// #2 debounce helper for NEW_MESSAGES batching
+// Debounce helpers — prevent rapid-fire reloads
 let _newMsgTimer = null;
 function debouncedLoadThreads() {
   clearTimeout(_newMsgTimer);
-  _newMsgTimer = setTimeout(() => loadThreads(), 300);
+  _newMsgTimer = setTimeout(() => loadThreads(), 500);
+}
+let _threadReloadTimer = null;
+function debouncedReloadThread() {
+  clearTimeout(_threadReloadTimer);
+  _threadReloadTimer = setTimeout(() => {
+    if (!currentThread) return;
+    chrome.runtime.sendMessage({ type: 'GET_MESSAGES_BY_CONTACT', contactId: currentThread.contactId, limit: 500 })
+      .then(res => { if (res?.ok) { currentMessages = res.messages || []; renderMessages(currentMessages); } }).catch(() => {});
+  }, 3000); // 3 second debounce — no need to reload faster
+}
+let _draftsTimer = null;
+function debouncedLoadDrafts() {
+  clearTimeout(_draftsTimer);
+  _draftsTimer = setTimeout(() => loadDrafts(), 2000);
 }
 
 // ── Inbox ───────────────────────────────────────────────────────────────────
@@ -194,8 +208,8 @@ function renderThreads(summaries) {
     const name = isHexOnly ? (meta.generatedNickname || hexId.slice(0, 8)) : rawName;
     const initial = name.charAt(0).toUpperCase();
     const preview = t.lastMessage?.body || '';
-    // Queue nickname generation for hex-only names
-    if (isHexOnly && !meta.generatedNickname) {
+    // Queue nickname generation only for Sniffies hex IDs — A4A/Grindr have real usernames
+    if (isHexOnly && !meta.generatedNickname && t.platform === 'sniffies') {
       generateNickname(t.contactId, t.platform, t.contact, t.lastMessage);
     }
     const time = formatTime(t.lastMessage?.timestamp);
@@ -1263,14 +1277,11 @@ textarea.addEventListener('input', () => {
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'NEW_MESSAGES') {
-    if (document.body.classList.contains('view-inbox')) debouncedLoadThreads(); // #2 debounced
+    if (document.body.classList.contains('view-inbox')) debouncedLoadThreads();
     else if (currentThread && message.platform === currentThread.platform) {
-      chrome.runtime.sendMessage({ type: 'GET_MESSAGES_BY_CONTACT', contactId: currentThread.contactId, limit: 500 })
-        .then(res => { if (res?.ok) { currentMessages = res.messages || []; renderMessages(currentMessages); } }).catch(() => {});
+      debouncedReloadThread();
     }
-    loadDrafts();
-    // #19 notification badge sync — update badge immediately on new messages
-    chrome.runtime.sendMessage({ type: 'GET_UNREAD_COUNT' }).catch(() => {});
+    debouncedLoadDrafts();
   }
   if (message.type === 'DRAFTS_UPDATED') loadDrafts();
   if (message.type === 'ACTIVE_PROFILE_CHANGED') {
@@ -1665,6 +1676,51 @@ document.getElementById('sp-log-level').addEventListener('change', (e) => {
 
 document.getElementById('sp-open-full-settings').addEventListener('click', () => {
   chrome.tabs.create({ url: chrome.runtime.getURL('popup/popup.html') });
+});
+
+// Clear all data
+document.getElementById('sp-clear-all').addEventListener('click', async () => {
+  if (!confirm('This will delete ALL messages, contacts, metadata, and dossiers. This cannot be undone. Continue?')) return;
+  const status = document.getElementById('sp-clear-status');
+  status.textContent = 'Clearing...';
+  try {
+    await chrome.runtime.sendMessage({ type: 'CLEAR_ALL_DATA' });
+    status.textContent = 'All data cleared!';
+    status.style.color = '#34d399';
+    setTimeout(() => loadThreads(), 500);
+  } catch (err) {
+    status.textContent = 'Failed: ' + err.message;
+    status.style.color = '#f87171';
+  }
+});
+
+// Developer activity log
+const devLogEl = document.getElementById('sp-devlog');
+let devLogVisible = false;
+const devLogMessages = [];
+
+document.getElementById('sp-toggle-devlog').addEventListener('click', () => {
+  devLogVisible = !devLogVisible;
+  devLogEl.style.display = devLogVisible ? '' : 'none';
+  document.getElementById('sp-toggle-devlog').textContent = devLogVisible ? 'Hide activity log' : 'Show activity log';
+  if (devLogVisible) renderDevLog();
+});
+
+function addDevLog(msg) {
+  devLogMessages.push(`${new Date().toLocaleTimeString()} ${msg}`);
+  if (devLogMessages.length > 200) devLogMessages.shift();
+  if (devLogVisible) renderDevLog();
+}
+
+function renderDevLog() {
+  devLogEl.innerHTML = devLogMessages.slice(-50).map(m => `<div>${esc(m)}</div>`).join('');
+  devLogEl.scrollTop = devLogEl.scrollHeight;
+}
+
+// Hook into message listener to populate dev log
+const origListener = chrome.runtime.onMessage._listeners?.[0];
+chrome.runtime.onMessage.addListener((message) => {
+  if (message.type) addDevLog(`← ${message.type} ${message.platform || ''} ${message.count || ''}`);
 });
 
 // ── Open all sites on title click ───────────────────────────────────────────

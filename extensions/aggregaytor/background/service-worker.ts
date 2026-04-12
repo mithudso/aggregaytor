@@ -80,7 +80,6 @@ async function handleMessage(msg: any): Promise<any> {
         }
       }
 
-      console.log(`${LOG} GET_MESSAGES_BY_CONTACT contactId="${msg.contactId}" → ${msgs.length} messages`);
       return { ok: true, messages: msgs };
     }
     case 'MARK_THREAD_READ': { const c = await markThreadRead(msg.threadId); await updateBadgeCount(); return { ok: true, count: c }; }
@@ -94,9 +93,18 @@ async function handleMessage(msg: any): Promise<any> {
         .slice(0, msg.limit || 50);
       return { ok: true, messages: matches };
     }
+    case 'CLEAR_ALL_DATA': {
+      const db = await getDB();
+      const allDocs = await db.allDocs();
+      for (const row of allDocs.rows) {
+        try { await db.remove(row.id, row.value.rev); } catch {}
+      }
+      console.log(`${LOG} Cleared all data (${allDocs.rows.length} docs)`);
+      await updateBadgeCount();
+      return { ok: true, count: allDocs.rows.length };
+    }
     case 'NAVIGATE_TO_CONVERSATION': {
       await navigateToConversation(msg.platform, msg.contactId);
-      // If navigating to global chat, scrape after page loads
       if (msg.contactId === 'sniffies:global-chat') {
         setTimeout(async () => {
           const tabs = await chrome.tabs.query({});
@@ -628,7 +636,7 @@ async function sendMessageToTab(platform: string, contactId: string, text: strin
 // ── Alarms + reminders ──────────────────────────────────────────────────────
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === 'keepalive') return; // #7 No-op keepalive
+  // keepalive removed — was causing CPU overhead
   if (alarm.name === 'badge-refresh') await updateBadgeCount().catch(() => {});
   if (alarm.name === 'auto-respond-check') await processAutoResponds().catch(e => console.error(`${LOG} AR error:`, e));
   if (alarm.name === 'reminder-check') await processReminders().catch(e => console.error(`${LOG} Reminder error:`, e));
@@ -678,8 +686,7 @@ async function updateBadgeCount(): Promise<void> {
 updateBadgeCount().catch(() => {});
 chrome.alarms.create('badge-refresh', { periodInMinutes: 1 });
 chrome.alarms.create('reminder-check', { periodInMinutes: 0.25 });
-// #7 Keepalive alarm — 25-second periodic alarm to prevent SW from going idle during operations
-chrome.alarms.create('keepalive', { periodInMinutes: 25 / 60 });
+// Removed 25s keepalive alarm — was causing unnecessary CPU usage
 
 // Ensure Global Chat contact always exists (runs on every SW startup)
 upsertContact({
