@@ -239,7 +239,111 @@ function checkUrlChange() {
       chrome.runtime.sendMessage({ type: 'ACTIVE_PROFILE_CHANGED', contactId, platform: 'sniffies' }).catch(() => {});
     } catch {}
   }
+  // When user opens the chat panel (/chat), scrape all visible conversations
+  if (url.match(/sniffies\.com\/chat\/?$/i)) {
+    setTimeout(() => scrapeChatPanel(), 2000);
+  }
 }
+/**
+ * Scrape the Sniffies chat panel (/chat) for conversation list.
+ * Each conversation shows: avatar, username/attributes, last message preview, timestamp.
+ */
+function scrapeChatPanel() {
+  if (!contextValid || !checkContext()) return;
+
+  const messages: any[] = [];
+  const contacts: any[] = [];
+
+  // Sniffies chat list items — try multiple selectors for the conversation rows
+  const rows = document.querySelectorAll(
+    '[class*="conversation"], [class*="chat-item"], [class*="thread-item"], ' +
+    '[class*="inbox-item"], [class*="message-list"] > div, [class*="chat-list"] > div'
+  );
+
+  rows.forEach(row => {
+    try {
+      // Avatar — background-image or img
+      let avatarUrl = '';
+      const img = row.querySelector('img') as HTMLImageElement;
+      if (img?.src?.startsWith('http')) avatarUrl = img.src;
+      if (!avatarUrl) {
+        const bgEl = row.querySelector('[style*="background-image"]') as HTMLElement;
+        const bgMatch = bgEl?.style?.backgroundImage?.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/);
+        if (bgMatch) avatarUrl = bgMatch[1];
+      }
+
+      // Profile ID from avatar URL or link
+      let profileId = '';
+      const idFromAvatar = avatarUrl.match(/\/([0-9a-f]{6,})\//i);
+      if (idFromAvatar) profileId = idFromAvatar[1].toLowerCase();
+      const link = row.querySelector('a[href*="/profile/"]') as HTMLAnchorElement;
+      if (!profileId && link) {
+        const linkMatch = link.href.match(/\/profile\/([0-9a-f]{6,})/i);
+        if (linkMatch) profileId = linkMatch[1].toLowerCase();
+      }
+      if (!profileId) return;
+
+      // Text content — get the last message preview
+      const allText = row.textContent || '';
+      // The row typically has: name/label, last message preview, timestamp
+      // Try to extract the preview (usually the longest text block)
+      const textNodes = row.querySelectorAll('span, p, div');
+      let preview = '';
+      let displayName = '';
+      let timeText = '';
+      textNodes.forEach(node => {
+        const t = (node.textContent || '').trim();
+        if (!t || t.length < 2) return;
+        if (/^\d+[smhd]$|ago|just now/i.test(t)) { timeText = t; return; }
+        if (t.length > preview.length && t.length > 5) preview = t;
+        if (!displayName && t.length >= 3 && t.length <= 30 && !/^\d/.test(t)) displayName = t;
+      });
+
+      if (!preview || preview.length < 3) return;
+
+      // Create message record
+      messages.push({
+        id: `sniffies:chat-panel-${profileId}-${Date.now()}`,
+        platform: 'sniffies',
+        threadId: `sniffies:${profileId}`,
+        contactId: `sniffies:${profileId}`,
+        direction: 'in',
+        body: preview.slice(0, 200),
+        timestamp: new Date().toISOString(),
+        read: true,
+        metadata: { profileId, source: 'chat-panel-scrape', avatarUrl, displayName },
+      });
+
+      // Create/update contact
+      contacts.push({
+        id: `sniffies:${profileId}`,
+        platform: 'sniffies',
+        platformUserId: profileId,
+        displayName: displayName || profileId.slice(0, 10),
+        profileUrl: `https://sniffies.com/profile/${profileId}`,
+        avatarUrl,
+        lastSeen: new Date().toISOString(),
+        metadata: {},
+      });
+    } catch {}
+  });
+
+  if (messages.length || contacts.length) {
+    console.log(`[Aggregaytor:Bridge:Sniffies] Chat panel scraped: ${messages.length} messages, ${contacts.length} contacts`);
+  }
+  if (contacts.length) {
+    chrome.runtime.sendMessage({ type: 'ADAPTER_CONTACTS', platform: 'sniffies', payload: contacts }).catch(() => {});
+  }
+  if (messages.length) {
+    chrome.runtime.sendMessage({ type: 'ADAPTER_MESSAGES', platform: 'sniffies', payload: messages }).catch(() => {});
+  }
+}
+
+// Also scrape on initial load if already on /chat
+if (location.href.match(/sniffies\.com\/chat\/?$/i)) {
+  setTimeout(() => scrapeChatPanel(), 3000);
+}
+
 // Poll for SPA navigation (pushState doesn't fire popstate)
 setInterval(checkUrlChange, 3000);
 // Also listen for popstate
