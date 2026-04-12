@@ -24,6 +24,23 @@ import { handleDebugCommand } from './debug-bridge.js';
 const LOG = '[Aggregaytor:SW]';
 console.log(`${LOG} Service worker starting...`);
 
+// ── Service Worker Performance Counters ─────────────────────────────────────
+// Lightweight in-memory counters tracking call counts and cumulative time
+// for PouchDB operations and message handling in the service worker.
+// Accessible via: chrome.runtime.sendMessage({type:'GET_SW_PERF'})
+const swPerf: Record<string, { calls: number; totalMs: number; maxMs: number }> = {};
+const swPerfStart = Date.now();
+function swPerfTrack(name: string): () => void {
+  const t0 = performance.now();
+  return () => {
+    const ms = performance.now() - t0;
+    if (!swPerf[name]) swPerf[name] = { calls: 0, totalMs: 0, maxMs: 0 };
+    swPerf[name].calls++;
+    swPerf[name].totalMs += ms;
+    if (ms > swPerf[name].maxMs) swPerf[name].maxMs = ms;
+  };
+}
+
 function safeNotify(id: string, opts: chrome.notifications.NotificationOptions): void {
   try {
     chrome.notifications.create(id, opts, () => {
@@ -56,9 +73,38 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
 
 async function handleMessage(msg: any): Promise<any> {
   switch (msg.type) {
-    case 'ADAPTER_MESSAGES': return handleIncomingMessages(msg.payload, msg.platform);
-    case 'ADAPTER_CONTACTS': { await handleIncomingContacts(msg.payload); return { ok: true }; }
-    case 'GET_THREAD_SUMMARIES': return { ok: true, summaries: await getThreadSummaries(msg.opts) };
+    // ── Performance stats ──
+    case 'GET_SW_PERF': {
+      const uptimeMin = Math.max(1, (Date.now() - swPerfStart) / 60_000);
+      const stats: Record<string, any> = {};
+      for (const [k, v] of Object.entries(swPerf)) {
+        stats[k] = { ...v,
+          totalMs: Math.round(v.totalMs * 10) / 10,
+          maxMs: Math.round(v.maxMs * 10) / 10,
+          avgMs: v.calls ? Math.round((v.totalMs / v.calls) * 10) / 10 : 0,
+          callsPerMin: Math.round((v.calls / uptimeMin) * 10) / 10,
+        };
+      }
+      return { ok: true, stats, uptimeMin: Math.round(uptimeMin * 10) / 10 };
+    }
+    case 'ADAPTER_MESSAGES': {
+      const end = swPerfTrack('handleIncomingMessages');
+      const result = await handleIncomingMessages(msg.payload, msg.platform);
+      end();
+      return result;
+    }
+    case 'ADAPTER_CONTACTS': {
+      const end = swPerfTrack('handleIncomingContacts');
+      await handleIncomingContacts(msg.payload);
+      end();
+      return { ok: true };
+    }
+    case 'GET_THREAD_SUMMARIES': {
+      const end = swPerfTrack('getThreadSummaries');
+      const summaries = await getThreadSummaries(msg.opts);
+      end();
+      return { ok: true, summaries };
+    }
     case 'GET_UNREAD_COUNT': return { ok: true, count: await getUnreadCount(msg.platform) };
     case 'GET_MESSAGES_BY_CONTACT': {
       let msgs = await getMessagesByContact(msg.contactId, { limit: msg.limit || 200 });
