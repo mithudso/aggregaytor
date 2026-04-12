@@ -1683,16 +1683,38 @@ document.getElementById('sp-open-full-settings').addEventListener('click', () =>
   chrome.tabs.create({ url: chrome.runtime.getURL('popup/popup.html') });
 });
 
-// Clear all data
+// Clear all data — two-click confirmation (confirm() is blocked in side panels)
+let clearConfirmPending = false;
 document.getElementById('sp-clear-all').addEventListener('click', async () => {
-  if (!confirm('This will delete ALL messages, contacts, metadata, and dossiers. This cannot be undone. Continue?')) return;
+  const btn = document.getElementById('sp-clear-all');
   const status = document.getElementById('sp-clear-status');
-  status.textContent = 'Clearing...';
+
+  if (!clearConfirmPending) {
+    // First click — ask for confirmation
+    clearConfirmPending = true;
+    btn.textContent = 'Click again to confirm DELETE ALL';
+    btn.style.background = 'rgba(239,68,68,0.3)';
+    status.textContent = 'This will delete ALL messages, contacts, and metadata.';
+    status.style.color = '#f87171';
+    // Reset after 5 seconds if not confirmed
+    setTimeout(() => {
+      clearConfirmPending = false;
+      btn.textContent = 'Clear all messages & data';
+      btn.style.background = '';
+      status.textContent = '';
+    }, 5000);
+    return;
+  }
+
+  // Second click — actually clear
+  clearConfirmPending = false;
+  btn.textContent = 'Clearing...';
+  btn.disabled = true;
+  status.textContent = 'Deleting all data...';
   try {
     await chrome.runtime.sendMessage({ type: 'CLEAR_ALL_DATA' });
     status.textContent = 'All data cleared!';
     status.style.color = '#34d399';
-    // Clear local caches and switch to empty inbox
     allThreadMeta.clear();
     hoverPreviewCache.clear();
     currentMessages = [];
