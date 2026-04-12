@@ -631,3 +631,72 @@ body {
   0%, 100% { background-color: #0f1419; }
   50% { background-color: #1a2744; box-shadow: inset 0 0 60px rgba(59,130,246,0.15); }
 }
+
+/* #3 Avatar error fallback */
+.avatar-img[src=""], .avatar-img:not([src]) { display: none; }
+
+/* #4 Message count in thread preview */
+.msg-count { font-size: 10px; color: #6b7280; margin-left: 2px; }
+
+/* #10 Skeleton loading placeholders */
+.skeleton-item {
+  display: flex; gap: 10px; padding: 10px 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.skeleton-avatar {
+  width: 36px; height: 36px; border-radius: 50%;
+  background: rgba(255,255,255,0.06); flex-shrink: 0;
+  animation: skeleton-pulse 1.2s ease-in-out infinite;
+}
+.skeleton-content { flex: 1; display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
+.skeleton-line {
+  height: 10px; border-radius: 4px;
+  background: rgba(255,255,255,0.06);
+  animation: skeleton-pulse 1.2s ease-in-out infinite;
+}
+.skeleton-line.w70 { width: 70%; }
+.skeleton-line.w40 { width: 40%; }
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
+/* #11 Compact mode */
+.compact .thread-item { padding: 6px 10px; gap: 8px; }
+.compact .thread-item .avatar { width: 28px; height: 28px; font-size: 11px; }
+.compact .thread-name { font-size: 12px; }
+.compact .thread-preview { font-size: 11px; }
+.compact .thread-time { font-size: 9px; }
+.compact-toggle { font-size: 14px; cursor: pointer; display: flex; align-items: center; gap: 2px; user-select: none; opacity: 0.4; }
+.compact-toggle:has(input:checked) { opacity: 1; }
+.compact-toggle input { display: none; }
+
+/* #12 Last active indicator */
+.activity-dot {
+  position: absolute; top: -1px; left: -1px; width: 8px; height: 8px;
+  border-radius: 50%; border: 2px solid #0f1419;
+}
+.activity-dot.active { background: #34d399; }
+.activity-dot.inactive { background: #4b5563; }
+
+/* #14 Connection status dot */
+.connection-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+}
+.connection-dot.connected { background: #34d399; }
+.connection-dot.disconnected { background: #ef4444; }
+
+/* #15 Per-platform unread badge on chips */
+.chip-badge {
+  font-size: 9px; background: #3b82f6; color: white; padding: 0 4px;
+  border-radius: 8px; margin-left: 4px; font-weight: 600;
+}
+
+/* #18 Empty state improvements */
+.empty-actions { display: flex; gap: 8px; justify-content: center; margin-top: 12px; }
+.empty-action-btn {
+  padding: 6px 14px; border-radius: 8px; font-size: 12px; cursor: pointer;
+  border: 1px solid rgba(59,130,246,0.3); background: rgba(59,130,246,0.1); color: #93c5fd;
+}
+.empty-action-btn:hover { background: rgba(59,130,246,0.2); }
+.empty-hint { font-size: 11px; color: #4b5563; margin-top: 6px; }

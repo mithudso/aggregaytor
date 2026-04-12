@@ -457,12 +457,39 @@ async function processDossierExtractions(): Promise<void> {
 }
 
 async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void> {
-  for (const c of contacts) await upsertContact(c);
+  for (const c of contacts) {
+    await upsertContact(c);
+    // #17 Contact merge detection — log potential duplicates across platforms
+    if (c.displayName && c.displayName.length > 2) {
+      try {
+        const { getAllContacts } = await import('@aggregaytor/store');
+        const allContacts = await getAllContacts();
+        const dupes = allContacts.filter(existing =>
+          existing.displayName === c.displayName &&
+          existing.platform !== c.platform &&
+          existing._id !== `contact:${c.platform}:${c.platformUserId}`
+        );
+        if (dupes.length > 0) {
+          console.log(`${LOG} [MergeDetect] "${c.displayName}" on ${c.platform} matches: ${dupes.map(d => `${d.platform}:${d.platformUserId}`).join(', ')}`);
+        }
+      } catch {}
+    }
+  }
 }
 
 // ── Auto-respond with tier-based processing ─────────────────────────────────
 
 async function processAutoResponds(): Promise<void> {
+  // #8 Auto-close stale drafts older than 10 minutes
+  const staleDrafts = await getDraftAutoResponds();
+  for (const d of staleDrafts) {
+    const age = Date.now() - new Date(d.updatedAt || d.createdAt).getTime();
+    if (age > 10 * 60_000) {
+      await updateAutoRespondStatus(d._id, 'rejected', { error: 'expired' });
+      console.log(`${LOG} Auto-closed stale draft for ${d.contactId} (age: ${Math.round(age / 60_000)}m)`);
+    }
+  }
+
   // Process pending (newly queued)
   const pending = await getPendingAutoResponds();
   for (const entry of pending) {
@@ -601,6 +628,7 @@ async function sendMessageToTab(platform: string, contactId: string, text: strin
 // ── Alarms + reminders ──────────────────────────────────────────────────────
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'keepalive') return; // #7 No-op keepalive
   if (alarm.name === 'badge-refresh') await updateBadgeCount().catch(() => {});
   if (alarm.name === 'auto-respond-check') await processAutoResponds().catch(e => console.error(`${LOG} AR error:`, e));
   if (alarm.name === 'reminder-check') await processReminders().catch(e => console.error(`${LOG} Reminder error:`, e));
@@ -650,6 +678,8 @@ async function updateBadgeCount(): Promise<void> {
 updateBadgeCount().catch(() => {});
 chrome.alarms.create('badge-refresh', { periodInMinutes: 1 });
 chrome.alarms.create('reminder-check', { periodInMinutes: 0.25 });
+// #7 Keepalive alarm — 25-second periodic alarm to prevent SW from going idle during operations
+chrome.alarms.create('keepalive', { periodInMinutes: 25 / 60 });
 
 // Ensure Global Chat contact always exists (runs on every SW startup)
 upsertContact({

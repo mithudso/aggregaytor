@@ -9,6 +9,7 @@
 <body class="view-inbox">
   <div class="header">
     <button class="header-back" id="back-btn">&larr; Back</button>
+    <span id="connection-dot" class="connection-dot" title="Service worker status"></span>
     <h1 id="header-title" class="header-title-clickable" title="Click to open all sites">Aggregaytor</h1>
     <div id="header-actions" class="header-actions"></div>
     <span id="total-unread" class="unread-badge" style="display:none"></span>
@@ -46,6 +47,9 @@
       </div>
       <label class="fav-filter" title="Show favorites only">
         <input type="checkbox" id="filter-favorites"> ⭐
+      </label>
+      <label class="compact-toggle" title="Compact view">
+        <input type="checkbox" id="compact-mode"> ▤
       </label>
       <div class="global-ar">
         <label class="global-ar-toggle" id="global-ar-toggle" title="Auto-respond all">
@@ -216,6 +220,7 @@
     <div class="thread-toolbar">
       <button class="toolbar-btn" id="btn-resync" title="Re-fetch conversation from platform">↻ Resync</button>
       <button class="toolbar-btn" id="btn-gallery" title="View photos">🖼 Photos</button>
+      <button class="toolbar-btn" id="btn-export" title="Export conversation">📋 Export</button>
       <button class="toolbar-btn" id="btn-thread-search" title="Search this chat">🔍 Search</button>
       <button class="toolbar-btn" id="btn-archive-thread" title="Archive & hide profile">📦 Archive</button>
       <button class="toolbar-btn danger" id="btn-clear-thread" title="Clear local message history">Clear</button>

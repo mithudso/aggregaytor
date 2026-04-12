@@ -18,11 +18,27 @@ let filters = {
   hasResponded: false, engagedRecently: false, bookmarked: false, favoritesOnly: false,
 };
 let currentSort = 'recent';
+let savedScrollTop = 0; // #13 scroll position memory
+
+// #2 debounce helper for NEW_MESSAGES batching
+let _newMsgTimer = null;
+function debouncedLoadThreads() {
+  clearTimeout(_newMsgTimer);
+  _newMsgTimer = setTimeout(() => loadThreads(), 300);
+}
 
 // ── Inbox ───────────────────────────────────────────────────────────────────
 
 async function loadThreads() {
   const opts = currentPlatform === 'all' ? {} : { platform: currentPlatform };
+  // #10 Show skeleton loader if thread list is empty
+  const container = document.getElementById('thread-list');
+  if (!container.querySelector('.thread-item') && !container.querySelector('.skeleton-item')) {
+    container.innerHTML = Array(5).fill(0).map(() => `
+      <div class="skeleton-item"><div class="skeleton-avatar"></div>
+        <div class="skeleton-content"><div class="skeleton-line w70"></div><div class="skeleton-line w40"></div></div>
+      </div>`).join('');
+  }
   try {
     const [threadRes, metaRes] = await Promise.all([
       chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts }),
@@ -32,7 +48,26 @@ async function loadThreads() {
       allThreadMeta.clear();
       for (const m of metaRes.metas || []) allThreadMeta.set(m.contactId, m);
     }
-    if (threadRes?.ok) renderThreads(sortThreads(applyFilters(threadRes.summaries)));
+    if (threadRes?.ok) {
+      const all = threadRes.summaries;
+      renderThreads(sortThreads(applyFilters(all)));
+      // #15 Per-platform unread badges
+      const platformUnread = {};
+      for (const s of all) {
+        if (s.unreadCount) platformUnread[s.platform] = (platformUnread[s.platform] || 0) + s.unreadCount;
+      }
+      document.querySelectorAll('.platform-chip[data-platform]').forEach(chip => {
+        const p = chip.dataset.platform;
+        const existing = chip.querySelector('.chip-badge');
+        if (existing) existing.remove();
+        if (p !== 'all' && p !== 'archived' && platformUnread[p]) {
+          const badge = document.createElement('span');
+          badge.className = 'chip-badge';
+          badge.textContent = platformUnread[p];
+          chip.appendChild(badge);
+        }
+      });
+    }
   } catch (err) { console.error('[Panel] Load error:', err); }
 }
 
@@ -131,10 +166,21 @@ function renderThreads(summaries) {
   const container = document.getElementById('thread-list');
   const showingArchive = currentPlatform === 'archived';
   if (!summaries?.length) {
+    // #18 Better empty states with actionable guidance
     container.innerHTML = showingArchive
-      ? '<div class="empty-state"><h2>Archive empty</h2><p>Archived conversations will appear here.</p></div>'
-      : '<div class="empty-state"><h2>No conversations match</h2><p>Try adjusting your filters.</p></div>';
+      ? '<div class="empty-state"><h2>Archive empty</h2><p>Swipe left or tap 📦 on any conversation to archive it.</p></div>'
+      : `<div class="empty-state"><h2>No conversations yet</h2>
+          <p>Open a connected site to start capturing messages.</p>
+          <div class="empty-actions">
+            <button class="empty-action-btn" id="empty-open-sites">Open all sites</button>
+            <button class="empty-action-btn" id="empty-clear-filters">Clear filters</button>
+          </div></div>`;
     updateTotalUnread(0);
+    // Attach empty state action handlers
+    const openBtn = container.querySelector('#empty-open-sites');
+    if (openBtn) openBtn.addEventListener('click', () => chrome.runtime.sendMessage({ type: 'OPEN_ALL_SITES' }).catch(() => {}));
+    const clearBtn = container.querySelector('#empty-clear-filters');
+    if (clearBtn) clearBtn.addEventListener('click', () => { document.getElementById('filter-clear').click(); });
     return;
   }
 
@@ -161,9 +207,13 @@ function renderThreads(summaries) {
     if (meta.autoRespondEnabled) badges += '<span class="meta-badge autorespond">🤖</span>';
 
     const avatarUrl = t.contact?.avatarUrl;
+    // #12 Last active indicator
+    const lastSeen = t.contact?.lastSeen ? new Date(t.contact.lastSeen) : null;
+    const isRecentlyActive = lastSeen && (Date.now() - lastSeen.getTime()) < 2 * 3600_000;
+    const activityDot = `<span class="activity-dot ${isRecentlyActive ? 'active' : 'inactive'}"></span>`;
     const avatarHtml = avatarUrl
-      ? `<div class="avatar"><img src="${esc(avatarUrl)}" alt="" class="avatar-img"><span class="platform-dot ${esc(t.platform)}"></span></div>`
-      : `<div class="avatar">${esc(initial)}<span class="platform-dot ${esc(t.platform)}"></span></div>`;
+      ? `<div class="avatar"><img src="${esc(avatarUrl)}" alt="" class="avatar-img">${activityDot}<span class="platform-dot ${esc(t.platform)}"></span></div>`
+      : `<div class="avatar">${esc(initial)}${activityDot}<span class="platform-dot ${esc(t.platform)}"></span></div>`;
 
     const isActiveSite = activeOnSiteContactId === t.contactId;
     const isBlocked = meta.blockedByThem || false;
@@ -181,7 +231,7 @@ function renderThreads(summaries) {
             <span class="thread-name${isBlocked ? ' strikethrough' : ''}">${esc(name)}</span>${distance ? `<span class="thread-distance">${esc(distance)}</span>` : ''}
             <span class="thread-time">${time}${badges ? ' <span class="meta-badges">' + badges + '</span>' : ''}${unread ? ` <span class="unread-badge">${unread}</span>` : ''}</span>
           </div>
-          <div class="thread-preview">${dirArrow}${esc(truncate(preview, 65))}</div>
+          <div class="thread-preview">${dirArrow}${esc(truncate(preview, 65))}${t.totalMessages ? ` <span class="msg-count">(${t.totalMessages})</span>` : ''}</div>
         </div>
         <div class="thread-actions">
           ${showingArchive
@@ -423,6 +473,9 @@ async function handleAction(action, contactId, platform) {
 // ── Thread detail ───────────────────────────────────────────────────────────
 
 async function openThread(contactId, platform, displayName) {
+  // #13 Save scroll position before opening thread
+  const threadList = document.getElementById('thread-list');
+  savedScrollTop = threadList.scrollTop;
   currentThread = { contactId, platform, displayName };
   document.getElementById('header-title').textContent = displayName || stripPrefix(contactId);
   document.body.classList.remove('view-inbox');
@@ -454,6 +507,8 @@ async function openThread(contactId, platform, displayName) {
   // Navigate parent tab
   chrome.runtime.sendMessage({ type: 'NAVIGATE_TO_CONVERSATION', platform, contactId }).catch(() => {});
   chrome.runtime.sendMessage({ type: 'MARK_THREAD_READ', threadId: contactId }).catch(() => {});
+  // #19 Badge sync — update badge immediately on read
+  chrome.runtime.sendMessage({ type: 'GET_UNREAD_COUNT' }).catch(() => {});
 
   // Load messages
   try {
@@ -654,7 +709,8 @@ function renderHeaderActions() {
 function renderMessages(messages) {
   const container = document.getElementById('message-list');
   if (!messages?.length) {
-    container.innerHTML = '<div class="empty-state"><p>No messages yet.</p></div>';
+    // #18 Better empty state for messages
+    container.innerHTML = '<div class="empty-state"><p>No messages yet.</p><p class="empty-hint">Open their profile on the platform to sync conversation history.</p></div>';
     return;
   }
   const sorted = [...messages].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
@@ -697,7 +753,12 @@ function renderMessages(messages) {
       </div>`;
     }).join('');
   }
-  container.scrollTop = container.scrollHeight;
+  // #6 Auto-scroll lock — only scroll to bottom if user is already near bottom
+  const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+  if (isNearBottom || !container.dataset.hasRendered) {
+    container.scrollTop = container.scrollHeight;
+    container.dataset.hasRendered = '1';
+  }
 
   // Attach hide toggle handlers
   container.querySelectorAll('.msg-toggle').forEach(btn => {
@@ -864,6 +925,24 @@ document.getElementById('btn-archive-thread').addEventListener('click', async ()
   goBack();
 });
 
+// #9 Export conversation
+document.getElementById('btn-export').addEventListener('click', () => {
+  if (!currentThread || !currentMessages.length) return;
+  const sorted = [...currentMessages].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  const name = currentThread.displayName || stripPrefix(currentThread.contactId);
+  const lines = sorted.map(m => {
+    const who = m.direction === 'out' ? 'You' : name;
+    const time = new Date(m.timestamp).toLocaleString();
+    return `[${time}] ${who}: ${m.body || ''}`;
+  });
+  const text = `Conversation with ${name} (${currentThread.platform})\nExported ${new Date().toLocaleString()}\n${'─'.repeat(40)}\n${lines.join('\n')}`;
+  const blob = new Blob([text], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `${name}-${currentThread.platform}-export.txt`;
+  a.click(); URL.revokeObjectURL(url);
+});
+
 document.getElementById('btn-clear-thread').addEventListener('click', async () => {
   if (!currentThread) return;
   if (!confirm('Clear all stored messages for this conversation? This cannot be undone.')) return;
@@ -884,7 +963,10 @@ function goBack() {
   document.getElementById('suggestions').classList.remove('active');
   document.getElementById('notes-section').style.display = 'none';
   document.getElementById('reminder-section').style.display = 'none';
-  loadThreads();
+  loadThreads().then(() => {
+    // #13 Restore scroll position after thread list re-renders
+    document.getElementById('thread-list').scrollTop = savedScrollTop;
+  });
 }
 
 // ── Notes ───────────────────────────────────────────────────────────────────
@@ -1181,12 +1263,14 @@ textarea.addEventListener('input', () => {
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'NEW_MESSAGES') {
-    if (document.body.classList.contains('view-inbox')) loadThreads();
+    if (document.body.classList.contains('view-inbox')) debouncedLoadThreads(); // #2 debounced
     else if (currentThread && message.platform === currentThread.platform) {
       chrome.runtime.sendMessage({ type: 'GET_MESSAGES_BY_CONTACT', contactId: currentThread.contactId, limit: 500 })
         .then(res => { if (res?.ok) { currentMessages = res.messages || []; renderMessages(currentMessages); } }).catch(() => {});
     }
     loadDrafts();
+    // #19 notification badge sync — update badge immediately on new messages
+    chrome.runtime.sendMessage({ type: 'GET_UNREAD_COUNT' }).catch(() => {});
   }
   if (message.type === 'DRAFTS_UPDATED') loadDrafts();
   if (message.type === 'ACTIVE_PROFILE_CHANGED') {
@@ -1361,7 +1445,17 @@ function formatDate(iso) {
   if (diff < 7) return d.toLocaleDateString([], { weekday: 'long' });
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
-function formatMsgTime(iso) { return !iso ? '' : new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
+function formatMsgTime(iso) {
+  if (!iso) return '';
+  // #16 Relative timestamps for recent messages
+  const d = new Date(iso);
+  const ago = Date.now() - d.getTime();
+  if (ago < 60_000) return 'just now';
+  if (ago < 3600_000) return Math.floor(ago / 60_000) + 'm ago';
+  if (ago < 7200_000) return '1h ago';
+  // Older than 2h — show full time
+  return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
 function updateTotalUnread(count) {
   const b = document.getElementById('total-unread');
   if (count > 0) { b.textContent = count; b.style.display = ''; } else { b.style.display = 'none'; }
@@ -1590,6 +1684,16 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     toggleGlobalSearch();
   }
+  // #5 Escape to go back
+  if (e.key === 'Escape') {
+    if (document.getElementById('gallery-overlay').style.display !== 'none') {
+      document.getElementById('gallery-overlay').style.display = 'none';
+    } else if (settingsOpen) {
+      closeSettings();
+    } else if (document.body.classList.contains('view-thread')) {
+      goBack();
+    }
+  }
 });
 
 function toggleGlobalSearch() {
@@ -1687,6 +1791,38 @@ document.addEventListener('click', (e) => {
     }
   }
 });
+
+// #11 Compact mode toggle
+const compactCheckbox = document.getElementById('compact-mode');
+compactCheckbox.addEventListener('change', () => {
+  document.body.classList.toggle('compact', compactCheckbox.checked);
+  localStorage.setItem('aggregaytor_compact', compactCheckbox.checked ? '1' : '0');
+});
+if (localStorage.getItem('aggregaytor_compact') === '1') {
+  compactCheckbox.checked = true;
+  document.body.classList.add('compact');
+}
+
+// #14 Connection status indicator
+async function checkConnectionStatus() {
+  const dot = document.getElementById('connection-dot');
+  if (!dot) return;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_UNREAD_COUNT' });
+    dot.className = 'connection-dot ' + (res?.ok ? 'connected' : 'disconnected');
+  } catch {
+    dot.className = 'connection-dot disconnected';
+  }
+}
+setInterval(checkConnectionStatus, 30_000);
+checkConnectionStatus();
+
+// #3 Avatar error fallback — delegated event listener
+document.addEventListener('error', (e) => {
+  if (e.target?.tagName === 'IMG' && e.target.classList.contains('avatar-img')) {
+    e.target.style.display = 'none';
+  }
+}, true);
 
 loadThreads();
 loadDrafts();

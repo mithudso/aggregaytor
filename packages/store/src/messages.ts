@@ -7,6 +7,15 @@ import type { UnifiedMessage, Platform } from '@aggregaytor/adapter-core';
 import type { MessageDoc } from './types.js';
 import { getDB } from './db.js';
 
+/** Retry a PouchDB operation once after 1 second on failure. */
+async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try { return await fn(); }
+  catch (err) {
+    await new Promise(r => setTimeout(r, 1000));
+    return fn();
+  }
+}
+
 function messageDocId(msg: UnifiedMessage): string {
   return `msg:${msg.platform}:${msg.id.replace(/^[^:]+:/, '')}`;
 }
@@ -40,11 +49,11 @@ export async function upsertMessage(
     const existing = await store.get(doc._id) as MessageDoc;
     doc._rev = existing._rev;
     doc.createdAt = existing.createdAt;
-    await store.put(doc);
+    await withRetry(() => store.put(doc));
     return { created: false };
   } catch (err: any) {
     if (err.status === 404) {
-      await store.put(doc);
+      await withRetry(() => store.put(doc));
       return { created: true };
     }
     throw err;
@@ -55,13 +64,35 @@ export async function upsertMessages(
   msgs: UnifiedMessage[],
   db?: PouchDB.Database,
 ): Promise<{ created: number; updated: number }> {
+  if (!msgs.length) return { created: 0, updated: 0 };
+  const store = db || await getDB();
+  const docs = msgs.map(m => toMessageDoc(m));
+  const ids = docs.map(d => d._id);
+
+  // Fetch all existing docs in one call
+  const existing = await store.allDocs({ keys: ids, include_docs: true });
+  const existingMap = new Map<string, { _rev: string; createdAt: string }>();
+  for (const row of existing.rows) {
+    if ('error' in row) continue;
+    if (row.doc) {
+      existingMap.set(row.id, { _rev: (row.doc as any)._rev, createdAt: (row.doc as any).createdAt });
+    }
+  }
+
   let created = 0;
   let updated = 0;
-  for (const msg of msgs) {
-    const result = await upsertMessage(msg, db);
-    if (result.created) created++;
-    else updated++;
+  for (const doc of docs) {
+    const prev = existingMap.get(doc._id);
+    if (prev) {
+      (doc as any)._rev = prev._rev;
+      doc.createdAt = prev.createdAt;
+      updated++;
+    } else {
+      created++;
+    }
   }
+
+  await withRetry(() => store.bulkDocs(docs));
   return { created, updated };
 }
 
