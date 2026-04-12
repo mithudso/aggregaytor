@@ -9,12 +9,18 @@ let currentPlatform = 'all';
 let currentThread = null;
 let currentMessages = [];
 
+// ── User Preferences (loaded from chrome.storage.local) ─────────────────────
+let prefTimestampAbsolute = false; // true = "11:42 PM", false = "5m" (relative)
+let prefAutoNavigate = true;       // true = open platform tab on thread click
+let selectedThreadIndex = -1;      // keyboard navigation: currently highlighted thread
+
+// Load preferences from storage at startup
+chrome.storage.local.get(['aggregaytor_timestamp_format', 'aggregaytor_auto_navigate'], (result) => {
+  prefTimestampAbsolute = result.aggregaytor_timestamp_format === 'absolute';
+  prefAutoNavigate = result.aggregaytor_auto_navigate !== false; // default true
+});
+
 // ── Global image error handler ──────────────────────────────────────────────
-// Avatar images from external platforms (DoubleList, Sniffies CDN, etc.) may
-// be blocked by CORP headers (Cross-Origin-Resource-Policy: same-origin) or
-// require auth cookies the extension doesn't have. When an <img> fails to
-// load, hide it so the CSS letter-initial fallback shows instead of a broken
-// image icon. Uses capture phase to catch errors before they propagate.
 document.addEventListener('error', (e) => {
   if (e.target?.tagName === 'IMG') {
     e.target.style.display = 'none';
@@ -22,7 +28,7 @@ document.addEventListener('error', (e) => {
 }, true);
 let currentMeta = null;
 let allThreadMeta = new Map();
-let activeOnSiteContactId = null; // which conversation is open on the actual site
+let activeOnSiteContactId = null;
 
 let filters = {
   searchText: '', bodyType: [], position: [], minDeleteCount: 0,
@@ -541,8 +547,10 @@ async function openThread(contactId, platform, displayName) {
   loadProfileInfo(contactId);
   loadDossier();
 
-  // Navigate parent tab
-  chrome.runtime.sendMessage({ type: 'NAVIGATE_TO_CONVERSATION', platform, contactId }).catch(() => {});
+  // Navigate parent tab (unless auto-navigate is disabled in settings)
+  if (prefAutoNavigate) {
+    chrome.runtime.sendMessage({ type: 'NAVIGATE_TO_CONVERSATION', platform, contactId }).catch(() => {});
+  }
   chrome.runtime.sendMessage({ type: 'MARK_THREAD_READ', threadId: contactId }).catch(() => {});
   // #19 Badge sync — update badge immediately on read
   chrome.runtime.sendMessage({ type: 'GET_UNREAD_COUNT' }).catch(() => {});
@@ -1552,7 +1560,16 @@ function buildStatsLine(metadata) {
 }
 function formatTime(iso) {
   if (!iso) return '';
-  const d = new Date(iso), ms = Date.now() - d.getTime(), m = Math.floor(ms / 60000);
+  const d = new Date(iso);
+  if (prefTimestampAbsolute) {
+    // Absolute: "11:42 PM", "Yesterday 3:15 PM", "Apr 10"
+    const ms = Date.now() - d.getTime();
+    if (ms < 86400_000) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    if (ms < 172800_000) return 'Yesterday';
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  }
+  // Relative: "now", "5m", "2h", "3d", then full date
+  const ms = Date.now() - d.getTime(), m = Math.floor(ms / 60000);
   if (m < 1) return 'now'; if (m < 60) return m + 'm';
   const h = Math.floor(m / 60); if (h < 24) return h + 'h';
   const days = Math.floor(h / 24); if (days < 7) return days + 'd';
@@ -1733,6 +1750,12 @@ async function loadInlineSettings() {
     const data = await chrome.storage.local.get('aggregaytor_log_level');
     if (data.aggregaytor_log_level) document.getElementById('sp-log-level').value = data.aggregaytor_log_level;
   } catch {}
+  // Load display preferences
+  try {
+    const prefs = await chrome.storage.local.get(['aggregaytor_timestamp_format', 'aggregaytor_auto_navigate']);
+    document.getElementById('sp-timestamp-absolute').checked = prefs.aggregaytor_timestamp_format === 'absolute';
+    document.getElementById('sp-auto-navigate').checked = prefs.aggregaytor_auto_navigate !== false;
+  } catch {}
 }
 
 // Settings save handlers
@@ -1781,6 +1804,24 @@ document.getElementById('sp-save-rate').addEventListener('click', async () => {
 
 document.getElementById('sp-log-level').addEventListener('change', (e) => {
   chrome.runtime.sendMessage({ type: 'SET_LOG_LEVEL', level: e.target.value }).catch(() => {});
+});
+
+// Display preferences
+document.getElementById('sp-timestamp-absolute').addEventListener('change', (e) => {
+  prefTimestampAbsolute = e.target.checked;
+  chrome.storage.local.set({ aggregaytor_timestamp_format: e.target.checked ? 'absolute' : 'relative' });
+  // Refresh thread list to show new timestamp format
+  if (document.body.classList.contains('view-inbox')) loadThreads();
+  else if (currentMessages.length) renderMessages(currentMessages);
+});
+document.getElementById('sp-auto-navigate').addEventListener('change', (e) => {
+  prefAutoNavigate = e.target.checked;
+  chrome.storage.local.set({ aggregaytor_auto_navigate: e.target.checked });
+});
+
+// Hotkey help button in settings
+document.getElementById('sp-show-hotkeys')?.addEventListener('click', () => {
+  toggleHotkeyHelp();
 });
 
 // Tab switching
@@ -2051,23 +2092,259 @@ document.getElementById('header-title').addEventListener('click', (e) => {
 // ── Global search ───────────────────────────────────────────────────────────
 
 let searchDebounce = null;
-// Toggle search with Ctrl+F or clicking a search icon
+
+// ── Gmail-Style Keyboard Navigation ─────────────────────────────────────────
+// Mirrors Gmail's keyboard shortcuts for inbox and conversation views.
+// Press ? to see all available shortcuts in a help overlay.
+
+function getThreadItems() {
+  return [...document.querySelectorAll('.thread-item')];
+}
+
+function setSelectedThread(index) {
+  const items = getThreadItems();
+  // Remove previous selection
+  items.forEach(el => el.classList.remove('selected'));
+  selectedThreadIndex = Math.max(-1, Math.min(index, items.length - 1));
+  if (selectedThreadIndex >= 0 && items[selectedThreadIndex]) {
+    items[selectedThreadIndex].classList.add('selected');
+    items[selectedThreadIndex].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+}
+
+function openSelectedThread() {
+  const items = getThreadItems();
+  if (selectedThreadIndex >= 0 && items[selectedThreadIndex]) {
+    items[selectedThreadIndex].click();
+  }
+}
+
+function actionOnSelected(actionType) {
+  const items = getThreadItems();
+  if (selectedThreadIndex < 0 || !items[selectedThreadIndex]) return;
+  const el = items[selectedThreadIndex];
+  const contactId = el.dataset.contactId;
+  const platform = el.dataset.platform;
+  if (contactId) handleAction(actionType, contactId, platform);
+}
+
+let hotkeyHelpVisible = false;
+function toggleHotkeyHelp() {
+  const overlay = document.getElementById('hotkey-help');
+  if (!overlay) return;
+  hotkeyHelpVisible = !hotkeyHelpVisible;
+  overlay.style.display = hotkeyHelpVisible ? 'flex' : 'none';
+}
+
 document.addEventListener('keydown', (e) => {
+  // Always handle Ctrl/Cmd+F for search
   if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
     e.preventDefault();
     toggleGlobalSearch();
+    return;
   }
-  // #5 Escape to go back
+
+  // Escape: close overlays, help, settings, or go back
   if (e.key === 'Escape') {
-    if (document.getElementById('gallery-overlay').style.display !== 'none') {
-      document.getElementById('gallery-overlay').style.display = 'none';
-    } else if (settingsOpen) {
-      closeSettings();
-    } else if (document.body.classList.contains('view-thread')) {
-      goBack();
+    if (hotkeyHelpVisible) { toggleHotkeyHelp(); return; }
+    const gallery = document.getElementById('gallery-overlay');
+    if (gallery && gallery.style.display !== 'none') { gallery.style.display = 'none'; return; }
+    const taskPanel = document.getElementById('task-panel');
+    if (taskPanel && taskPanel.style.display !== 'none') { taskPanel.style.display = 'none'; return; }
+    if (settingsOpen) { closeSettings(); return; }
+    if (document.body.classList.contains('view-thread')) { goBack(); return; }
+    return;
+  }
+
+  // Skip hotkeys when user is typing in an input/textarea/select
+  const tag = e.target?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  // Skip modifier combos (except Shift which we use for some hotkeys)
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+  const inInbox = document.body.classList.contains('view-inbox');
+  const inThread = document.body.classList.contains('view-thread');
+
+  // ── Universal hotkeys ──────────────────────────────────────────────────
+  if (e.key === '?') { toggleHotkeyHelp(); return; }
+  if (e.key === '/') { e.preventDefault(); toggleGlobalSearch(); return; }
+
+  // ── Inbox hotkeys ──────────────────────────────────────────────────────
+  if (inInbox) {
+    if (e.key === 'j' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      setSelectedThread(selectedThreadIndex + 1);
+      return;
     }
+    if (e.key === 'k' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      setSelectedThread(selectedThreadIndex - 1);
+      return;
+    }
+    if (e.key === 'o' || e.key === 'Enter') {
+      if (selectedThreadIndex >= 0) { e.preventDefault(); openSelectedThread(); }
+      return;
+    }
+    if (e.key === 's') { actionOnSelected('favorite'); return; }
+    if (e.key === 'x') { actionOnSelected('bookmark'); return; }
+    if (e.key === 'e') { actionOnSelected('archive'); return; }
+    return;
+  }
+
+  // ── Thread view hotkeys ────────────────────────────────────────────────
+  if (inThread) {
+    if (e.key === 'u') { goBack(); return; }
+    if (e.key === 'r') {
+      e.preventDefault();
+      document.getElementById('response-input')?.focus();
+      return;
+    }
+    if (e.key === 'j' || e.key === 'ArrowDown') {
+      document.getElementById('message-list')?.scrollBy({ top: 100, behavior: 'smooth' });
+      return;
+    }
+    if (e.key === 'k' || e.key === 'ArrowUp') {
+      document.getElementById('message-list')?.scrollBy({ top: -100, behavior: 'smooth' });
+      return;
+    }
+    if (e.key === 's') {
+      if (currentThread) handleAction('favorite', currentThread.contactId, currentThread.platform);
+      return;
+    }
+    if (e.key === 'e') {
+      if (currentThread) handleAction('archive', currentThread.contactId, currentThread.platform);
+      return;
+    }
+    if (e.key === 'N' && e.shiftKey) {
+      document.getElementById('btn-resync')?.click();
+      return;
+    }
+    if (e.key === 'T' && e.shiftKey) {
+      // Add task for current thread
+      if (currentThread) createTaskFromThread();
+      return;
+    }
+    return;
   }
 });
+
+// ── Hotkey help overlay ─────────────────────────────────────────────────────
+document.getElementById('hotkey-close')?.addEventListener('click', () => toggleHotkeyHelp());
+
+// ── Task Panel ──────────────────────────────────────────────────────────────
+let taskPanelOpen = false;
+let editingTaskContactId = null;
+let editingTaskPlatform = null;
+
+document.getElementById('open-tasks')?.addEventListener('click', () => toggleTaskPanel());
+document.getElementById('task-close-btn')?.addEventListener('click', () => toggleTaskPanel());
+document.getElementById('task-add-btn')?.addEventListener('click', () => showTaskForm());
+document.getElementById('task-cancel-btn')?.addEventListener('click', () => hideTaskForm());
+document.getElementById('btn-add-task')?.addEventListener('click', () => createTaskFromThread());
+
+document.getElementById('task-save-btn')?.addEventListener('click', async () => {
+  const title = document.getElementById('task-title').value.trim();
+  if (!title) return;
+  const dueVal = document.getElementById('task-due').value;
+  await chrome.runtime.sendMessage({
+    type: 'CREATE_TASK',
+    title,
+    notes: document.getElementById('task-notes').value.trim(),
+    dueAt: dueVal ? new Date(dueVal).toISOString() : undefined,
+    priority: document.getElementById('task-priority').value,
+    contactId: editingTaskContactId || undefined,
+    platform: editingTaskPlatform || undefined,
+  });
+  hideTaskForm();
+  loadTasks();
+});
+
+function toggleTaskPanel() {
+  const panel = document.getElementById('task-panel');
+  taskPanelOpen = !taskPanelOpen;
+  panel.style.display = taskPanelOpen ? '' : 'none';
+  if (taskPanelOpen) loadTasks();
+}
+
+function showTaskForm(contactId, platform, prefillTitle) {
+  editingTaskContactId = contactId || null;
+  editingTaskPlatform = platform || null;
+  const form = document.getElementById('task-form');
+  form.style.display = '';
+  document.getElementById('task-title').value = prefillTitle || '';
+  document.getElementById('task-notes').value = '';
+  document.getElementById('task-due').value = '';
+  document.getElementById('task-priority').value = 'medium';
+  const link = document.getElementById('task-contact-link');
+  link.textContent = contactId ? `Linked: ${stripPrefix(contactId)}` : '';
+  document.getElementById('task-title').focus();
+}
+
+function hideTaskForm() {
+  document.getElementById('task-form').style.display = 'none';
+  editingTaskContactId = null;
+  editingTaskPlatform = null;
+}
+
+function createTaskFromThread() {
+  if (!currentThread) return;
+  const name = document.getElementById('header-title')?.textContent || stripPrefix(currentThread.contactId);
+  if (!taskPanelOpen) toggleTaskPanel();
+  showTaskForm(currentThread.contactId, currentThread.platform, `Follow up with ${name}`);
+}
+
+async function loadTasks() {
+  const res = await chrome.runtime.sendMessage({ type: 'GET_TASKS', opts: {} });
+  const list = document.getElementById('task-list');
+  if (!res?.ok || !res.tasks?.length) {
+    list.innerHTML = '<div class="task-empty">No tasks yet. Click + New to add one.</div>';
+    return;
+  }
+  list.innerHTML = res.tasks.map(t => {
+    const dueStr = t.dueAt ? formatTime(t.dueAt) : '';
+    const priorityDot = t.priority === 'high' ? '🔴' : t.priority === 'medium' ? '🟡' : '🟢';
+    const contactStr = t.contactId ? `<span class="task-contact" data-contact="${esc(t.contactId)}">${esc(stripPrefix(t.contactId).slice(0, 12))}</span>` : '';
+    return `
+      <div class="task-item ${t.completed ? 'completed' : ''}" data-task-id="${esc(t._id)}">
+        <input type="checkbox" class="task-check" ${t.completed ? 'checked' : ''}>
+        <div class="task-body">
+          <div class="task-title">${priorityDot} ${esc(t.title)}</div>
+          <div class="task-meta">${dueStr ? `Due: ${dueStr}` : ''} ${contactStr}</div>
+          ${t.notes ? `<div class="task-notes-preview">${esc(truncate(t.notes, 60))}</div>` : ''}
+        </div>
+        <button class="task-delete" title="Delete">&times;</button>
+      </div>
+    `;
+  }).join('');
+
+  // Attach handlers
+  list.querySelectorAll('.task-check').forEach(cb => {
+    cb.addEventListener('change', async (e) => {
+      const taskId = e.target.closest('.task-item').dataset.taskId;
+      await chrome.runtime.sendMessage({
+        type: 'UPDATE_TASK', id: taskId,
+        updates: { completed: e.target.checked, completedAt: e.target.checked ? new Date().toISOString() : '' },
+      });
+      loadTasks();
+    });
+  });
+  list.querySelectorAll('.task-delete').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      const taskId = e.target.closest('.task-item').dataset.taskId;
+      await chrome.runtime.sendMessage({ type: 'DELETE_TASK', id: taskId });
+      loadTasks();
+    });
+  });
+  list.querySelectorAll('.task-contact').forEach(link => {
+    link.addEventListener('click', (e) => {
+      const cid = e.target.dataset.contact;
+      if (cid && taskPanelOpen) toggleTaskPanel();
+      // Navigate to the contact's thread
+      const platform = cid.split(':')[0];
+      openThread(cid, platform, '');
+    });
+  });
+}
 
 function toggleGlobalSearch() {
   const bar = document.getElementById('search-bar');

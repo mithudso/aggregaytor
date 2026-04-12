@@ -14,6 +14,7 @@ import {
   getCalendarSettings, saveCalendarSettings, getAvailableSlots, createCalendarEvent, authenticateCalendar,
   recordFeedback, predictPreference, getModelStats, retrainModel,
   analyzeConversationSentiment, formatSentimentSummary,
+  createTask, getAllTasks, updateTask, deleteTask, getTasksByContact,
   getContact, getDB, destroyDB,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
@@ -442,6 +443,49 @@ async function handleMessage(msg: any): Promise<any> {
         await setAutoExtractedField(msg.contactId, msg.platform, field, value, 'llm-extraction');
       }
       return { ok: true, extracted, fieldCount: Object.keys(extracted).length };
+    }
+
+    // Tasks
+    case 'CREATE_TASK': {
+      const task = await createTask(msg);
+      return { ok: true, task };
+    }
+    case 'GET_TASKS': {
+      const tasks = await getAllTasks(msg.opts);
+      return { ok: true, tasks };
+    }
+    case 'UPDATE_TASK': {
+      const task = await updateTask(msg.id, msg.updates);
+      return { ok: true, task };
+    }
+    case 'DELETE_TASK': {
+      await deleteTask(msg.id);
+      return { ok: true };
+    }
+    case 'GET_TASKS_BY_CONTACT': {
+      const tasks = await getTasksByContact(msg.contactId);
+      return { ok: true, tasks };
+    }
+    case 'SYNC_TASK_TO_CALENDAR': {
+      // Create a Google Calendar event from a task
+      try {
+        const event = await createCalendarEvent({
+          contactId: msg.contactId || '',
+          platform: msg.platform || 'sniffies',
+          title: msg.title,
+          startTime: msg.dueAt,
+          endTime: msg.endAt || new Date(new Date(msg.dueAt).getTime() + 3600000).toISOString(),
+          location: msg.location || '',
+          notes: msg.notes || '',
+        });
+        // Update the task with the calendar event ID
+        if (event && msg.taskId) {
+          await updateTask(msg.taskId, { calendarEventId: event.googleEventId || event._id });
+        }
+        return { ok: true, event };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
     }
 
     // Debug commands (from MCP server or dev tools)

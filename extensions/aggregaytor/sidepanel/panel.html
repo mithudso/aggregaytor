@@ -13,6 +13,7 @@
     <h1 id="header-title" class="header-title-clickable" title="Click to open all sites">Aggregaytor</h1>
     <div id="header-actions" class="header-actions"></div>
     <span id="total-unread" class="unread-badge" style="display:none"></span>
+    <button class="header-settings" id="open-tasks" title="Tasks (Shift+T)">☑</button>
     <button class="header-settings" id="sync-pics-header" title="Sync profile pictures">📷</button>
     <button class="header-settings" id="open-settings" title="Settings">⚙</button>
   </div>
@@ -326,6 +327,7 @@
       <button class="toolbar-btn" id="btn-gallery" title="View photos">🖼 Photos</button>
       <button class="toolbar-btn" id="btn-export" title="Export conversation">📋 Export</button>
       <button class="toolbar-btn" id="btn-thread-search" title="Search this chat">🔍 Search</button>
+      <button class="toolbar-btn" id="btn-add-task" title="Create task for this contact (Shift+T)">☑ Task</button>
       <button class="toolbar-btn" id="btn-archive-thread" title="Archive & hide profile">📦 Archive</button>
       <button class="toolbar-btn danger" id="btn-clear-thread" title="Clear local message history">Clear</button>
     </div>
@@ -392,6 +394,73 @@
   <div class="response-bar">
     <textarea id="response-input" rows="1" placeholder="Type a response..."></textarea>
     <button class="suggest-btn" id="suggest-btn">Suggest</button>
+  </div>
+
+  <!-- Keyboard shortcuts help overlay -->
+  <div id="hotkey-help" class="hotkey-overlay" style="display:none">
+    <div class="hotkey-modal">
+      <div class="hotkey-header">
+        <h3>Keyboard Shortcuts</h3>
+        <button class="hotkey-close" id="hotkey-close">&times;</button>
+      </div>
+      <div class="hotkey-columns">
+        <div class="hotkey-col">
+          <h4>Inbox</h4>
+          <div class="hotkey-row"><kbd>j</kbd> / <kbd>&darr;</kbd> <span>Next thread</span></div>
+          <div class="hotkey-row"><kbd>k</kbd> / <kbd>&uarr;</kbd> <span>Previous thread</span></div>
+          <div class="hotkey-row"><kbd>o</kbd> / <kbd>Enter</kbd> <span>Open thread</span></div>
+          <div class="hotkey-row"><kbd>s</kbd> <span>Toggle favorite</span></div>
+          <div class="hotkey-row"><kbd>x</kbd> <span>Toggle bookmark</span></div>
+          <div class="hotkey-row"><kbd>e</kbd> <span>Archive</span></div>
+        </div>
+        <div class="hotkey-col">
+          <h4>Conversation</h4>
+          <div class="hotkey-row"><kbd>u</kbd> <span>Back to inbox</span></div>
+          <div class="hotkey-row"><kbd>r</kbd> <span>Reply (focus input)</span></div>
+          <div class="hotkey-row"><kbd>j</kbd> / <kbd>k</kbd> <span>Scroll messages</span></div>
+          <div class="hotkey-row"><kbd>s</kbd> <span>Toggle favorite</span></div>
+          <div class="hotkey-row"><kbd>e</kbd> <span>Archive thread</span></div>
+          <div class="hotkey-row"><kbd>Shift+N</kbd> <span>Resync messages</span></div>
+          <div class="hotkey-row"><kbd>Shift+T</kbd> <span>Add task</span></div>
+        </div>
+        <div class="hotkey-col">
+          <h4>Global</h4>
+          <div class="hotkey-row"><kbd>/</kbd> <span>Search</span></div>
+          <div class="hotkey-row"><kbd>Ctrl+F</kbd> <span>Search</span></div>
+          <div class="hotkey-row"><kbd>?</kbd> <span>This help</span></div>
+          <div class="hotkey-row"><kbd>Esc</kbd> <span>Close / Back</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Task panel overlay -->
+  <div id="task-panel" class="task-panel" style="display:none">
+    <div class="task-header">
+      <h3>Tasks</h3>
+      <div class="task-header-actions">
+        <button class="task-add-btn" id="task-add-btn">+ New</button>
+        <button class="task-close-btn" id="task-close-btn">&times;</button>
+      </div>
+    </div>
+    <div id="task-form" class="task-form" style="display:none">
+      <input type="text" id="task-title" class="task-input" placeholder="Task title...">
+      <textarea id="task-notes" class="task-input" rows="2" placeholder="Notes (optional)"></textarea>
+      <div class="task-form-row">
+        <input type="datetime-local" id="task-due" class="task-input task-due">
+        <select id="task-priority" class="task-input task-priority">
+          <option value="low">Low</option>
+          <option value="medium" selected>Medium</option>
+          <option value="high">High</option>
+        </select>
+      </div>
+      <div class="task-form-row">
+        <span id="task-contact-link" class="task-contact-link"></span>
+        <button class="task-save-btn" id="task-save-btn">Save</button>
+        <button class="task-cancel-btn" id="task-cancel-btn">Cancel</button>
+      </div>
+    </div>
+    <div id="task-list" class="task-list"></div>
   </div>
 
   <script src="panel.js"></script>

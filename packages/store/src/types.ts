@@ -710,6 +710,38 @@ export interface ContactDossierDoc {
   updatedAt: string;
 }
 
+/** A user-created task, optionally linked to a contact. */
+export interface TaskDoc {
+  /** PouchDB document ID -- `task:{timestamp}-{random}` */
+  _id: string;
+  /** PouchDB revision token */
+  _rev?: string;
+  /** Discriminator -- always 'task' */
+  docType: 'task';
+  /** Task title / summary */
+  title: string;
+  /** Free-text notes or details */
+  notes: string;
+  /** Optional link to a contact/thread */
+  contactId?: string;
+  /** Platform of the linked contact (if any) */
+  platform?: Platform;
+  /** ISO 8601 datetime when the task is due */
+  dueAt?: string;
+  /** Google Calendar event ID if synced */
+  calendarEventId?: string;
+  /** Whether the task has been completed */
+  completed: boolean;
+  /** ISO 8601 -- when the task was marked complete */
+  completedAt?: string;
+  /** Task priority level */
+  priority: 'low' | 'medium' | 'high';
+  /** ISO 8601 -- when this task was created */
+  createdAt: string;
+  /** ISO 8601 -- last update */
+  updatedAt: string;
+}
+
 /** Default empty dossier values for initializing a new ContactDossierDoc. */
 export const DEFAULT_DOSSIER: Omit<ContactDossierDoc, '_id' | '_rev' | 'contactId' | 'platform' | 'createdAt' | 'updatedAt'> = {
   docType: 'dossier',
