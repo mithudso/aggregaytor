@@ -152,17 +152,15 @@ export function findLikelyProfileId(
     }
   }
 
-  // ── Priority 4: conversation/thread IDs ───────────────────────────────
-  // Not a real profile ID, but a hex conversation ID still groups messages
-  // together correctly. No self-skip needed (conversation IDs are shared).
-  for (const key of CONVERSATION_KEYS) {
-    for (const [k, v] of Object.entries(obj)) {
-      if (normalizeKey(k) === key && v && typeof v === 'string') {
-        const id = normalizeProfileId(v);
-        if (id) return id;
-      }
-    }
-  }
+  // ── Priority 4: conversation/thread IDs — SKIPPED ─────────────────────
+  // Previously this returned conversation-level hex IDs (conversationId,
+  // chatId, etc.) as profile IDs. This caused split conversations: the
+  // same person would appear under both their real profileId (from one
+  // API response) AND a conversationId (from another), creating two
+  // separate threads in the inbox for the same person.
+  // Conversation IDs are NOT profile IDs — they should never be used as
+  // contactId. If we can't find a real profile ID, fall through to
+  // Priority 5/6 instead.
 
   // ── Priority 5: generic ID keys ──────────────────────────────────────
   // Ambiguous keys like `profileId` or `userId` -- could be anyone.
@@ -181,8 +179,16 @@ export function findLikelyProfileId(
   // MongoDB ObjectId (>= 10 hex chars). Short hex strings are skipped to
   // avoid false positives (e.g. color codes, small numbers).
   // Self-skip: yes.
+  // SKIP conversation/thread-level keys to avoid the split-thread bug.
+  const SKIP_KEYS_P6 = new Set([
+    'conversationid', 'conversation_id', 'threadid', 'thread_id',
+    'chatid', 'chat_id', 'channelid', 'channel_id',
+    'roomid', 'room_id', 'groupid', 'group_id',
+  ]);
   for (const [k, v] of Object.entries(obj)) {
     if (typeof v === 'string') {
+      const nk = normalizeKey(k);
+      if (SKIP_KEYS_P6.has(nk)) continue; // skip conversation IDs
       const id = normalizeProfileId(v);
       if (id && id.length >= 10 && (!selfIds || !selfIds.has(id))) {
         return id;

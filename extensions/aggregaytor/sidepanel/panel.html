@@ -270,6 +270,17 @@
     <!-- Data tab -->
     <div class="settings-tab-content" id="tab-data">
       <div class="settings-section">
+        <h3 class="settings-heading">Display</h3>
+        <label class="settings-checkbox-label">
+          <input type="checkbox" id="sp-timestamp-absolute">
+          Show absolute timestamps (e.g. "11:42 PM" instead of "5m")
+        </label>
+        <label class="settings-checkbox-label">
+          <input type="checkbox" id="sp-auto-navigate" checked>
+          Open conversation on platform when clicking a thread
+        </label>
+      </div>
+      <div class="settings-section">
         <h3 class="settings-heading">Log Level</h3>
         <select id="sp-log-level" class="settings-select">
           <option value="debug">Debug</option><option value="info" selected>Info</option>
@@ -280,6 +291,10 @@
         <h3 class="settings-heading">Data</h3>
         <button class="settings-btn" id="sp-clear-all" style="border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.1);color:#f87171">Clear all messages &amp; data</button>
         <div id="sp-clear-status" class="settings-status"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Keyboard Shortcuts</h3>
+        <button class="settings-btn" id="sp-show-hotkeys">Show keyboard shortcuts (?)</button>
       </div>
       <div class="settings-section">
         <h3 class="settings-heading">Developer</h3>
