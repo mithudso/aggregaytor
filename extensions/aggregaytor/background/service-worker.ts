@@ -108,7 +108,9 @@ async function handleMessage(msg: any): Promise<any> {
       return result;
     }
     case 'ADAPTER_CONTACTS': {
-      invalidateThreadCache();
+      // Do NOT invalidate thread cache — contact updates (avatar, metadata)
+      // don't change the thread list (which is based on messages/unread counts).
+      // This lets the 3s cache actually work instead of being invalidated 37x/min.
       const end = swPerfTrack('handleIncomingContacts');
       await handleIncomingContacts(msg.payload);
       end();
@@ -556,25 +558,50 @@ async function processDossierExtractions(): Promise<void> {
   }
 }
 
-// Throttle CONTACTS_UPDATED notifications to at most once per 5 seconds
-// to avoid triggering expensive thread-list refreshes on every userJoined event.
+// ── Contact Upsert Deduplication ────────────────────────────────────────────
+// Track recently-upserted contacts to skip redundant PouchDB writes.
+// Key: contactId, Value: hash of relevant fields + timestamp
+// A contact is only written to PouchDB if its data has changed since the
+// last write, OR if 60+ seconds have passed (to catch metadata drift).
+const recentContactUpserts = new Map<string, { hash: string; time: number }>();
+
+function contactHash(c: UnifiedContact): string {
+  // Quick hash of the fields that matter — if these haven't changed,
+  // the PouchDB write would be a no-op anyway
+  return `${c.displayName}|${c.avatarUrl}|${JSON.stringify(c.metadata || {}).slice(0, 200)}`;
+}
+
+// Throttle CONTACTS_UPDATED notifications to at most once per 10 seconds
 let lastContactsNotify = 0;
 let contactsNotifyTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void> {
+  let written = 0;
   for (const c of contacts) {
-    // Skip contacts with no useful data — most userJoined events have
-    // empty displayName and empty avatarUrl. Upserting them is pure
-    // PouchDB overhead (get + put = ~18ms each) with zero benefit.
+    // Skip contacts with no useful data
     if (!c.displayName && !c.avatarUrl && (!c.metadata || Object.keys(c.metadata).length === 0)) {
       continue;
     }
+    // Skip if we wrote this exact same data recently (< 60s ago)
+    const id = `${c.platform}:${c.platformUserId}`;
+    const hash = contactHash(c);
+    const recent = recentContactUpserts.get(id);
+    if (recent && recent.hash === hash && (Date.now() - recent.time) < 60_000) {
+      continue; // same data, skip the PouchDB round-trip
+    }
     await upsertContact(c);
+    written++;
+    recentContactUpserts.set(id, { hash, time: Date.now() });
+  }
+  // Cap the dedup cache
+  if (recentContactUpserts.size > 500) {
+    const oldest = [...recentContactUpserts.entries()].sort((a, b) => a[1].time - b[1].time).slice(0, 200);
+    for (const [k] of oldest) recentContactUpserts.delete(k);
   }
   // Debounced notification to avoid flooding the panel with refreshes.
   // On a busy map, hundreds of contacts per minute flow through here.
   const now = Date.now();
-  if (now - lastContactsNotify > 5000) {
+  if (now - lastContactsNotify > 10000) {
     lastContactsNotify = now;
     chrome.runtime.sendMessage({ type: 'CONTACTS_UPDATED', count: contacts.length }).catch(() => {});
   } else if (!contactsNotifyTimer) {
@@ -582,7 +609,7 @@ async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void>
       contactsNotifyTimer = null;
       lastContactsNotify = Date.now();
       chrome.runtime.sendMessage({ type: 'CONTACTS_UPDATED', count: 1 }).catch(() => {});
-    }, 5000);
+    }, 10000);
   }
 }
 

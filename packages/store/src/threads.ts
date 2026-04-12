@@ -42,8 +42,12 @@ export async function getThreadSummaries(
   const selector: Record<string, unknown> = { docType: 'message' };
   if (opts?.platform) selector.platform = opts.platform;
 
-  // Step 1: Fetch a large batch of messages to group into threads
-  const result = await store.find({ selector, limit: 5000 });
+  // Step 1: Fetch messages to group into threads.
+  // Capped at 1000 (reduced from 5000) for performance — each call to
+  // getThreadSummaries was taking 145ms avg with 5000. Since we only
+  // need the latest message per contact, 1000 is enough for most users
+  // (covers ~100 active conversations × ~10 messages each).
+  const result = await store.find({ selector, limit: 1000 });
   const messages = result.docs as MessageDoc[];
 
   // Step 2: Group by contactId, counting unreads along the way
