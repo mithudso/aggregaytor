@@ -781,8 +781,19 @@ export class SniffiesAdapter extends BaseAdapter {
    * ```
    * So we search up to 4 levels deep via {@link deepFindAvatarUrl}.
    */
-  private resolveAvatarUrl(obj: Record<string, unknown>, _profileId: string): string {
-    return this.deepFindAvatarUrl(obj, 0);
+  private resolveAvatarUrl(obj: Record<string, unknown>, profileId: string): string {
+    const found = this.deepFindAvatarUrl(obj, 0);
+    if (found) return found;
+    // Fallback: construct Sniffies CDN URL from the profile ID.
+    // Pattern: https://profile.sniffiesassets.com/{profileId}/0
+    // These are publicly accessible (no auth required — the Sniffies SPA
+    // loads them cross-origin). If the profile has no photo, the CDN returns
+    // a default avatar or 404, and the panel's image error handler hides it
+    // gracefully (falls back to the letter initial).
+    if (profileId && /^[0-9a-f]{10,}$/i.test(profileId)) {
+      return `https://profile.sniffiesassets.com/${profileId}/0`;
+    }
+    return '';
   }
 
   /**
@@ -803,11 +814,28 @@ export class SniffiesAdapter extends BaseAdapter {
       const val = obj[key];
       if (typeof val === 'string' && (val.startsWith('http') || val.startsWith('data:'))) return val;
     }
-    // Level 2: check nested photo arrays (string URL or {url: "..."} objects)
-    if (obj.photos && Array.isArray(obj.photos)) {
-      const first = obj.photos[0];
-      if (typeof first === 'string' && first.startsWith('http')) return first;
-      if (first && typeof first === 'object' && typeof (first as any).url === 'string') return (first as any).url;
+    // Level 2: check photo arrays — handle multiple nesting patterns:
+    //   photos: ["url", ...], photos: [{url: "..."}, ...], photos: [{thumbnail: {url: "..."}}]
+    for (const arrKey of ['photos', 'images', 'pictures', 'avatars', 'media']) {
+      const arr = obj[arrKey];
+      if (Array.isArray(arr) && arr.length > 0) {
+        for (const item of arr.slice(0, 3)) { // check first 3 items
+          if (typeof item === 'string' && item.startsWith('http')) return item;
+          if (item && typeof item === 'object') {
+            // Check common nested URL fields
+            for (const urlKey of ['url', 'src', 'href', 'thumbnail', 'thumb', 'full', 'original', 'small']) {
+              const u = (item as any)[urlKey];
+              if (typeof u === 'string' && u.startsWith('http')) return u;
+              // One more level: {thumbnail: {url: "..."}}
+              if (u && typeof u === 'object' && typeof u.url === 'string') return u.url;
+            }
+            // Any sniffiesassets URL in the object
+            for (const v of Object.values(item as Record<string, unknown>)) {
+              if (typeof v === 'string' && v.includes('sniffiesassets.com')) return v;
+            }
+          }
+        }
+      }
     }
     // Level 3: look for Sniffies CDN URL pattern in any string value
     for (const val of Object.values(obj)) {
@@ -819,11 +847,21 @@ export class SniffiesAdapter extends BaseAdapter {
       const k = normalizeKey(key);
       if (/photo|image|pic|thumb|avatar|media/.test(k) && typeof val === 'string' && val.startsWith('http')) return val;
     }
-    // Level 5: recurse into nested plain objects (skip arrays to avoid noise)
+    // Level 5: recurse into nested objects AND arrays (first 5 elements)
     for (const val of Object.values(obj)) {
-      if (val && typeof val === 'object' && !Array.isArray(val)) {
-        const found = this.deepFindAvatarUrl(val as Record<string, unknown>, depth + 1);
-        if (found) return found;
+      if (val && typeof val === 'object') {
+        if (Array.isArray(val)) {
+          // Recurse into array elements (capped at first 5 to avoid huge payloads)
+          for (const item of val.slice(0, 5)) {
+            if (item && typeof item === 'object' && !Array.isArray(item)) {
+              const found = this.deepFindAvatarUrl(item as Record<string, unknown>, depth + 1);
+              if (found) return found;
+            }
+          }
+        } else {
+          const found = this.deepFindAvatarUrl(val as Record<string, unknown>, depth + 1);
+          if (found) return found;
+        }
       }
     }
     return '';
