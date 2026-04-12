@@ -8,6 +8,18 @@
 let currentPlatform = 'all';
 let currentThread = null;
 let currentMessages = [];
+
+// ── Global image error handler ──────────────────────────────────────────────
+// Avatar images from external platforms (DoubleList, Sniffies CDN, etc.) may
+// be blocked by CORP headers (Cross-Origin-Resource-Policy: same-origin) or
+// require auth cookies the extension doesn't have. When an <img> fails to
+// load, hide it so the CSS letter-initial fallback shows instead of a broken
+// image icon. Uses capture phase to catch errors before they propagate.
+document.addEventListener('error', (e) => {
+  if (e.target?.tagName === 'IMG') {
+    e.target.style.display = 'none';
+  }
+}, true);
 let currentMeta = null;
 let allThreadMeta = new Map();
 let activeOnSiteContactId = null; // which conversation is open on the actual site
