@@ -24,7 +24,7 @@ let savedScrollTop = 0; // #13 scroll position memory
 let _newMsgTimer = null;
 function debouncedLoadThreads() {
   clearTimeout(_newMsgTimer);
-  _newMsgTimer = setTimeout(() => loadThreads(), 500);
+  _newMsgTimer = setTimeout(() => loadThreads(), 2000); // 2s debounce (was 500ms)
 }
 let _threadReloadTimer = null;
 function debouncedReloadThread() {
@@ -1346,9 +1346,10 @@ chrome.runtime.onMessage.addListener((message) => {
     }, 100);
   }
   if (message.type === 'CONTACTS_UPDATED') {
-    // Refresh thread list to show new avatars after sync
-    if (document.body.classList.contains('view-inbox')) debouncedLoadThreads();
-    else if (currentThread) loadProfileInfo(currentThread.contactId);
+    // Don't auto-refresh on every contact update — these fire constantly
+    // from userJoined events. The thread list will refresh on next
+    // NEW_MESSAGES event or manual navigation. Avatar updates from
+    // explicit photo sync are handled by the sync button's own reload.
   }
   if (message.type === 'COMMITMENT_ALERT') {
     // Flash the screen and play alert sound

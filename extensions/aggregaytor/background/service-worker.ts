@@ -41,6 +41,19 @@ function swPerfTrack(name: string): () => void {
   };
 }
 
+// ── Thread Summary Cache ──────────────────────────────────────────────────
+// getThreadSummaries is the most expensive operation (81ms avg, 14x/min).
+// It queries 5000 messages from PouchDB + N contact lookups on every call.
+// Cache the result for 3 seconds to avoid redundant PouchDB round-trips
+// when multiple triggers fire in rapid succession (CONTACTS_UPDATED,
+// NEW_MESSAGES, panel opening, etc.)
+let threadSummaryCache: { data: any; time: number; key: string } | null = null;
+const THREAD_CACHE_TTL = 3000; // 3 seconds
+
+function invalidateThreadCache(): void {
+  threadSummaryCache = null;
+}
+
 function safeNotify(id: string, opts: chrome.notifications.NotificationOptions): void {
   try {
     chrome.notifications.create(id, opts, () => {
@@ -88,20 +101,30 @@ async function handleMessage(msg: any): Promise<any> {
       return { ok: true, stats, uptimeMin: Math.round(uptimeMin * 10) / 10 };
     }
     case 'ADAPTER_MESSAGES': {
+      invalidateThreadCache();
       const end = swPerfTrack('handleIncomingMessages');
       const result = await handleIncomingMessages(msg.payload, msg.platform);
       end();
       return result;
     }
     case 'ADAPTER_CONTACTS': {
+      invalidateThreadCache();
       const end = swPerfTrack('handleIncomingContacts');
       await handleIncomingContacts(msg.payload);
       end();
       return { ok: true };
     }
     case 'GET_THREAD_SUMMARIES': {
+      const cacheKey = JSON.stringify(msg.opts || {});
+      const now = Date.now();
+      if (threadSummaryCache && threadSummaryCache.key === cacheKey &&
+          (now - threadSummaryCache.time) < THREAD_CACHE_TTL) {
+        swPerfTrack('getThreadSummaries:cached')();
+        return { ok: true, summaries: threadSummaryCache.data };
+      }
       const end = swPerfTrack('getThreadSummaries');
       const summaries = await getThreadSummaries(msg.opts);
+      threadSummaryCache = { data: summaries, time: now, key: cacheKey };
       end();
       return { ok: true, summaries };
     }
@@ -540,6 +563,12 @@ let contactsNotifyTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void> {
   for (const c of contacts) {
+    // Skip contacts with no useful data — most userJoined events have
+    // empty displayName and empty avatarUrl. Upserting them is pure
+    // PouchDB overhead (get + put = ~18ms each) with zero benefit.
+    if (!c.displayName && !c.avatarUrl && (!c.metadata || Object.keys(c.metadata).length === 0)) {
+      continue;
+    }
     await upsertContact(c);
   }
   // Debounced notification to avoid flooding the panel with refreshes.
