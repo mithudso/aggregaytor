@@ -14,7 +14,7 @@ import {
   createLogger,
 } from '@aggregaytor/adapter-core';
 import type { Platform, UnifiedMessage, UnifiedContact } from '@aggregaytor/adapter-core';
-import { parseSocketIOFrame } from './ws-parser.js';
+import { parseSocketIOFrame, isGlobalChatEvent } from './ws-parser.js';
 import { findLikelyProfileId, normalizeProfileId, extractProfileIdFromUrl } from './profile-resolver.js';
 
 const log = createLogger('[Aggregaytor:Sniffies]');
@@ -366,26 +366,21 @@ export class SniffiesAdapter extends BaseAdapter {
   protected parseWebSocketFrame(data: string | ArrayBuffer): UnifiedMessage[] {
     const text = typeof data === 'string' ? data : '';
     if (!text) return [];
-    const parsed = parseSocketIOFrame(text);
-    if (!parsed) return [];
+    const frame = parseSocketIOFrame(text);
+    if (!frame || !frame.data) return [];
 
-    // Check if user is currently viewing the global chat page
-    // If so, WebSocket messages are cruising updates, not DMs
-    const isOnGlobalChat = this.isGlobalChatPage();
-    const url = isOnGlobalChat ? '[ws-global]' : '[ws-dm]';
-    return this.parseApiResponse(url, parsed);
-  }
-
-  private isGlobalChatPage(): boolean {
-    try {
-      const path = window.location.pathname.toLowerCase();
-      // The global chat is NOT at /chat (that's the DM inbox)
-      // It's the main map view where cruising updates appear in the feed
-      // When the chat panel is open at /chat, WS messages are DMs
-      return !path.includes('/chat') && !path.includes('/profile/');
-    } catch {
-      return false;
+    // Use the Socket.IO event name to determine if this is global chat
+    // Event names like "cruisingUpdate", "post", "feedUpdate" = global
+    // Event names like "chatMessage", "message", "" = DM
+    if (isGlobalChatEvent(frame.eventName)) {
+      log.debug(`WS global event: "${frame.eventName}"`);
+      return this.parseApiResponse('[ws-global]', frame.data);
     }
+
+    if (frame.eventName) {
+      log.debug(`WS DM event: "${frame.eventName}"`);
+    }
+    return this.parseApiResponse('[ws-dm]', frame.data);
   }
 
   private getContextProfileId(): string | null {

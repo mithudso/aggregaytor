@@ -1,5 +1,6 @@
 export { SniffiesAdapter } from './sniffies-adapter.js';
-export { parseSocketIOFrame } from './ws-parser.js';
+export { parseSocketIOFrame, isGlobalChatEvent } from './ws-parser.js';
+export type { ParsedSocketFrame } from './ws-parser.js';
 export {
   normalizeProfileId,
   extractProfileIdFromUrl,
