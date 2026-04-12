@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Aggregaytor",
-  "version": "0.42.2",
+  "version": "0.43.0",
   "description": "Unified message inbox across platforms",
   "permissions": [
     "storage",
@@ -55,6 +55,11 @@
       "matches": ["https://mail.google.com/*"],
       "js": ["content/gmail-bridge.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://mail.yahoo.com/*"],
+      "js": ["content/yahoo-bridge.js"],
+      "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
@@ -77,6 +82,10 @@
     {
       "resources": ["content/gmail.js"],
       "matches": ["https://mail.google.com/*"]
+    },
+    {
+      "resources": ["content/yahoo.js"],
+      "matches": ["https://mail.yahoo.com/*"]
     }
   ],
   "action": {

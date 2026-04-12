@@ -25,6 +25,36 @@
 
 const LOG = '[Aggregaytor:Bridge:Sniffies]';
 
+/**
+ * Parse a relative time string ("2 hours ago", "3 months ago", "an hour ago")
+ * into an approximate ISO 8601 timestamp. Returns current time if unparseable.
+ * This is used by DOM scrapers that can only read relative time text from the UI.
+ */
+function parseRelativeTime(text: string): string {
+  if (!text) return new Date().toISOString();
+  const t = text.trim().toLowerCase();
+  const now = Date.now();
+  // Match patterns like "5m ago", "2 hours ago", "3 months ago", "a minute ago"
+  const match = t.match(/(\d+)\s*(s|sec|second|m|min|minute|h|hr|hour|d|day|w|week|mo|month|y|year)s?\s*(?:ago)?/i)
+    || t.match(/(a|an)\s+(minute|hour|day|week|month|year)s?\s*(?:ago)?/i);
+  if (!match) {
+    if (t.includes('just now') || t.includes('now')) return new Date(now).toISOString();
+    if (t.includes('yesterday')) return new Date(now - 86400000).toISOString();
+    return new Date().toISOString();
+  }
+  const num = match[1] === 'a' || match[1] === 'an' ? 1 : parseInt(match[1], 10);
+  const unit = (match[2] || '').toLowerCase();
+  let ms = 0;
+  if (unit.startsWith('s')) ms = num * 1000;
+  else if (unit.startsWith('mi') || unit === 'm') ms = num * 60_000;
+  else if (unit.startsWith('h')) ms = num * 3600_000;
+  else if (unit.startsWith('d')) ms = num * 86400_000;
+  else if (unit.startsWith('w')) ms = num * 604800_000;
+  else if (unit.startsWith('mo')) ms = num * 2592000_000; // ~30 days
+  else if (unit.startsWith('y')) ms = num * 31536000_000; // ~365 days
+  return new Date(now - ms).toISOString();
+}
+
 // Tracks whether the extension context is still valid. Once invalidated
 // (e.g., extension reload/update), all chrome.runtime calls throw, so we
 // flip this flag and stop trying until the user reloads the page.
@@ -191,7 +221,7 @@ try {
             contactId,
             direction,
             body: text.slice(0, 2000), // cap body length
-            timestamp: new Date().toISOString(),
+            timestamp: parseRelativeTime(timeText), // use actual send time, not download time
             read: true, // scraped messages are already visible, so mark read
             metadata: {
               source: 'conversation-scrape',
@@ -342,7 +372,7 @@ try {
             contactId: 'sniffies:global-chat',
             direction: 'in', // global chat is always inbound (read-only feed)
             body,
-            timestamp: new Date().toISOString(),
+            timestamp: parseRelativeTime(timeText), // use post time, not download time
             read: true,
             metadata: {
               senderId: profileId,
@@ -548,7 +578,7 @@ function scrapeChatPanel() {
           contactId: `sniffies:${profileId}`,
           direction,
           body: preview.slice(0, 200),
-          timestamp: new Date().toISOString(),
+          timestamp: parseRelativeTime(timeText), // use message time, not download time
           read: unreadCount === 0, // mark as read only if unread badge is absent
           metadata: {
             profileId, source: 'chat-panel', avatarUrl,

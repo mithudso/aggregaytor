@@ -186,6 +186,127 @@ export async function pullGoogleTasks(): Promise<any[]> {
 }
 
 /**
+ * Bidirectional sync between local PouchDB tasks and Google Tasks.
+ *
+ * Pull (Google → Local):
+ *   - New remote tasks → create locally with googleTaskId linked
+ *   - Changed remote tasks → update local if remote is newer
+ *   - Deleted remote tasks → delete local copy
+ *
+ * Push (Local → Google):
+ *   - New local tasks (no googleTaskId) → create on Google, store ID
+ *   - Changed local tasks (updatedAt > lastSyncedAt) → push updates
+ *
+ * @returns Summary of sync operations performed.
+ */
+export async function syncGoogleTasks(): Promise<{
+  pulled: number; pushed: number; deleted: number;
+}> {
+  const { getAllTasks, updateTask, createTask, deleteTask } = await import('./tasks.js');
+
+  // Fetch both sides
+  const remoteTasks = await pullGoogleTasks();
+  const localTasks = await getAllTasks();
+
+  // Build lookup maps
+  const localByGoogleId = new Map<string, any>();
+  const localWithoutGoogle: any[] = [];
+  for (const t of localTasks) {
+    if (t.googleTaskId) localByGoogleId.set(t.googleTaskId, t);
+    else localWithoutGoogle.push(t);
+  }
+
+  const remoteIds = new Set<string>();
+  let pulled = 0;
+  let pushed = 0;
+  let deleted = 0;
+  const now = new Date().toISOString();
+
+  // ── Pull: Google → Local ──────────────────────────────────────────────
+  for (const remote of remoteTasks) {
+    if (!remote.id) continue;
+    remoteIds.add(remote.id);
+    const local = localByGoogleId.get(remote.id);
+
+    const remoteUpdated = remote.updated || remote.completed || '';
+    const isCompleted = remote.status === 'completed';
+
+    if (!local) {
+      // New remote task → create locally
+      await createTask({
+        title: remote.title || '(untitled)',
+        notes: remote.notes || '',
+        dueAt: remote.due || undefined,
+        priority: 'medium',
+        completed: isCompleted,
+        completedAt: isCompleted ? (remote.completed || now) : undefined,
+        googleTaskId: remote.id,
+        lastSyncedAt: now,
+      } as any);
+      pulled++;
+    } else {
+      // Existing — update local if remote is newer
+      const localUpdated = local.updatedAt || '';
+      if (remoteUpdated > localUpdated) {
+        await updateTask(local._id, {
+          title: remote.title || local.title,
+          notes: remote.notes ?? local.notes,
+          dueAt: remote.due || local.dueAt,
+          completed: isCompleted,
+          completedAt: isCompleted ? (remote.completed || now) : '',
+          lastSyncedAt: now,
+        });
+        pulled++;
+      }
+    }
+  }
+
+  // ── Delete local tasks whose Google counterpart was removed ──────────
+  for (const [googleId, local] of localByGoogleId) {
+    if (!remoteIds.has(googleId)) {
+      await deleteTask(local._id);
+      deleted++;
+    }
+  }
+
+  // ── Push: Local → Google ──────────────────────────────────────────────
+  // New local tasks (no googleTaskId) → create on Google
+  for (const local of localWithoutGoogle) {
+    try {
+      const gTask = await createGoogleTask({
+        title: local.title,
+        notes: local.notes,
+        dueAt: local.dueAt,
+      });
+      if (gTask?.id) {
+        await updateTask(local._id, { googleTaskId: gTask.id, lastSyncedAt: now });
+      }
+      pushed++;
+    } catch { /* Google API failure — skip, retry next sync */ }
+  }
+
+  // Dirty local tasks (updated since last sync) → push updates
+  for (const [googleId, local] of localByGoogleId) {
+    if (!remoteIds.has(googleId)) continue; // already handled (deleted)
+    const lastSync = local.lastSyncedAt || '';
+    if (local.updatedAt > lastSync) {
+      try {
+        await updateGoogleTask(googleId, {
+          title: local.title,
+          notes: local.notes,
+          dueAt: local.dueAt,
+          completed: local.completed,
+        });
+        await updateTask(local._id, { lastSyncedAt: now });
+        pushed++;
+      } catch { /* skip, retry next sync */ }
+    }
+  }
+
+  return { pulled, pushed, deleted };
+}
+
+/**
  * Authenticate interactively — shows the Google OAuth consent popup.
  * Call this when the user clicks "Connect Google" in settings.
  * @returns The access token, or null if denied.

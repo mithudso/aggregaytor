@@ -728,8 +728,12 @@ export interface TaskDoc {
   platform?: Platform;
   /** ISO 8601 datetime when the task is due */
   dueAt?: string;
-  /** Google Calendar event ID if synced */
+  /** Google Calendar event ID if synced to Calendar */
   calendarEventId?: string;
+  /** Google Tasks API task ID for bidirectional sync */
+  googleTaskId?: string;
+  /** ISO 8601 — last time this task was synced with Google Tasks */
+  lastSyncedAt?: string;
   /** Whether the task has been completed */
   completed: boolean;
   /** ISO 8601 -- when the task was marked complete */

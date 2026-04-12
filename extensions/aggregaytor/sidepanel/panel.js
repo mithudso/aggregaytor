@@ -2286,6 +2286,22 @@ let editingTaskPlatform = null;
 document.getElementById('open-tasks')?.addEventListener('click', () => toggleTaskPanel());
 document.getElementById('task-close-btn')?.addEventListener('click', () => toggleTaskPanel());
 document.getElementById('task-add-btn')?.addEventListener('click', () => showTaskForm());
+document.getElementById('task-sync-btn')?.addEventListener('click', async () => {
+  const btn = document.getElementById('task-sync-btn');
+  btn.textContent = '...'; btn.disabled = true;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'SYNC_TASKS' });
+    if (res?.ok) {
+      const total = (res.pulled || 0) + (res.pushed || 0) + (res.deleted || 0);
+      btn.textContent = total > 0 ? `↻ ${total}` : '↻';
+      loadTasks();
+    } else {
+      btn.textContent = '!';
+    }
+  } catch { btn.textContent = '!'; }
+  btn.disabled = false;
+  setTimeout(() => { btn.textContent = '↻'; }, 3000);
+});
 document.getElementById('task-cancel-btn')?.addEventListener('click', () => hideTaskForm());
 document.getElementById('btn-add-task')?.addEventListener('click', () => createTaskFromThread());
 

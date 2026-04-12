@@ -43,6 +43,7 @@ function buildContentScriptsIIFE(): Plugin {
         { name: 'doublelist', entry: resolve(__dirname, 'content/doublelist.ts') },
         { name: 'adam4adam', entry: resolve(__dirname, 'content/adam4adam.ts') },
         { name: 'gmail', entry: resolve(__dirname, 'content/gmail.ts') },
+        { name: 'yahoo', entry: resolve(__dirname, 'content/yahoo.ts') },
       ];
 
       for (const { name, entry } of contentScripts) {
@@ -75,6 +76,7 @@ function buildContentScriptsIIFE(): Plugin {
               '@aggregaytor/adapter-doublelist': resolve(__dirname, '../../adapters/doublelist/src/index.ts'),
               '@aggregaytor/adapter-adam4adam': resolve(__dirname, '../../adapters/adam4adam/src/index.ts'),
               '@aggregaytor/adapter-gmail': resolve(__dirname, '../../adapters/gmail/src/index.ts'),
+              '@aggregaytor/adapter-yahoo': resolve(__dirname, '../../adapters/yahoo/src/index.ts'),
             },
           },
           logLevel: 'warn',
@@ -103,6 +105,7 @@ export default defineConfig({
         'content/doublelist-bridge': resolve(__dirname, 'content/doublelist-bridge.ts'),
         'content/adam4adam-bridge': resolve(__dirname, 'content/adam4adam-bridge.ts'),
         'content/gmail-bridge': resolve(__dirname, 'content/gmail-bridge.ts'),
+        'content/yahoo-bridge': resolve(__dirname, 'content/yahoo-bridge.ts'),
       },
       output: {
         entryFileNames: '[name].js',
@@ -122,6 +125,7 @@ export default defineConfig({
       '@aggregaytor/adapter-doublelist': resolve(__dirname, '../../adapters/doublelist/src/index.ts'),
       '@aggregaytor/adapter-adam4adam': resolve(__dirname, '../../adapters/adam4adam/src/index.ts'),
       '@aggregaytor/adapter-gmail': resolve(__dirname, '../../adapters/gmail/src/index.ts'),
+      '@aggregaytor/adapter-yahoo': resolve(__dirname, '../../adapters/yahoo/src/index.ts'),
     },
   },
   ssr: {

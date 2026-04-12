@@ -15,7 +15,7 @@ import {
   recordFeedback, predictPreference, getModelStats, retrainModel,
   analyzeConversationSentiment, formatSentimentSummary,
   createTask, getAllTasks, updateTask, deleteTask, getTasksByContact,
-  createGoogleTask, updateGoogleTask, deleteGoogleTask, pullGoogleTasks, authenticateGoogle, isGoogleAuthenticated,
+  createGoogleTask, updateGoogleTask, deleteGoogleTask, pullGoogleTasks, syncGoogleTasks, authenticateGoogle, isGoogleAuthenticated,
   getContact, getDB, destroyDB,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
@@ -511,7 +511,7 @@ async function handleMessage(msg: any): Promise<any> {
           priority: msg.priority || 'medium',
           contactId: msg.contactId, platform: msg.platform,
         });
-        if (gTask?.id) await updateTask(localTask._id, { calendarEventId: gTask.id });
+        if (gTask?.id) await updateTask(localTask._id, { googleTaskId: gTask.id, lastSyncedAt: new Date().toISOString() });
         return { ok: true, task: localTask, googleTask: gTask };
       } catch (err) {
         // Fall back to local-only if Google API fails
@@ -549,6 +549,14 @@ async function handleMessage(msg: any): Promise<any> {
       try {
         const remoteTasks = await pullGoogleTasks();
         return { ok: true, tasks: remoteTasks };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+    case 'SYNC_TASKS': {
+      try {
+        const result = await syncGoogleTasks();
+        return { ok: true, ...result };
       } catch (err) {
         return { ok: false, error: (err as Error).message };
       }
@@ -894,6 +902,18 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'badge-refresh') await updateBadgeCount().catch(() => {});
   if (alarm.name === 'auto-respond-check') await processAutoResponds().catch(e => console.error(`${LOG} AR error:`, e));
   if (alarm.name === 'reminder-check') await processReminders().catch(e => console.error(`${LOG} Reminder error:`, e));
+  if (alarm.name === 'task-sync') {
+    // Auto-sync tasks with Google Tasks every 5 minutes (only if authenticated)
+    try {
+      const authed = await isGoogleAuthenticated();
+      if (authed) {
+        const result = await syncGoogleTasks();
+        if (result.pulled + result.pushed + result.deleted > 0) {
+          console.log(`${LOG} Task sync: pulled=${result.pulled} pushed=${result.pushed} deleted=${result.deleted}`);
+        }
+      }
+    } catch (e) { console.warn(`${LOG} Task sync error:`, e); }
+  }
   if (alarm.name === 'block-rule-check') {
     // Periodic block rule evaluation across all active threads
     try {
@@ -1106,4 +1126,5 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 chrome.alarms.create('block-rule-check', { periodInMinutes: 5 });
+chrome.alarms.create('task-sync', { periodInMinutes: 5 });
 console.log(`${LOG} Service worker ready`);
