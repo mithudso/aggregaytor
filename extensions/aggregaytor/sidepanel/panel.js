@@ -2284,7 +2284,7 @@ let editingTaskContactId = null;
 let editingTaskPlatform = null;
 
 document.getElementById('open-tasks')?.addEventListener('click', () => toggleTaskPanel());
-document.getElementById('task-close-btn')?.addEventListener('click', () => toggleTaskPanel());
+document.getElementById('task-back-btn')?.addEventListener('click', () => toggleTaskPanel());
 document.getElementById('task-add-btn')?.addEventListener('click', () => showTaskForm());
 document.getElementById('task-sync-btn')?.addEventListener('click', async () => {
   const btn = document.getElementById('task-sync-btn');

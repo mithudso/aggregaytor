@@ -782,7 +782,12 @@ body {
   display: flex; justify-content: space-between; align-items: center;
   padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.08);
 }
-.task-header h3 { font-size: 15px; color: #e7e9ea; }
+.task-back-btn {
+  background: none; border: none; color: #93c5fd; font-size: 14px;
+  cursor: pointer; padding: 4px 8px 4px 0; font-family: inherit;
+}
+.task-back-btn:hover { color: #bfdbfe; }
+.task-header h3 { font-size: 15px; color: #e7e9ea; flex: 1; }
 .task-header-actions { display: flex; gap: 8px; }
 .task-add-btn {
   background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.3);
