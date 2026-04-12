@@ -6,7 +6,10 @@
  * be overwritten by a fresh adapter scrape (e.g. lastMessageAt, unreadCount,
  * and existing avatar URLs).
  *
- * All functions accept an optional `db` parameter for test injection.
+ * ## Performance (v0.40.0)
+ * - upsertContacts() uses allDocs + bulkDocs for O(1) batch operations
+ * - getAllContacts / getContactsByPlatform use allDocs key-range queries
+ *   instead of Mango find(), bypassing the PouchDB query planner
  */
 
 import type { UnifiedContact, Platform } from '@aggregaytor/adapter-core';
@@ -23,9 +26,6 @@ function contactDocId(contact: UnifiedContact): string {
 
 /**
  * Convert a platform-agnostic UnifiedContact into a PouchDB ContactDoc.
- *
- * New contacts start with lastMessageAt = '' and unreadCount = 0; these
- * fields are populated later by the message upsert pipeline.
  */
 function toContactDoc(contact: UnifiedContact): ContactDoc {
   const now = new Date().toISOString();
@@ -47,23 +47,7 @@ function toContactDoc(contact: UnifiedContact): ContactDoc {
 }
 
 /**
- * Insert or update a contact from adapter data.
- *
- * Merge behavior on update (when the contact already exists):
- *   - _rev:           attached from existing doc for conflict-free PouchDB update
- *   - createdAt:      preserved from the original insert (never overwritten)
- *   - lastMessageAt:  preserved from existing doc (set by message pipeline, not adapters)
- *   - unreadCount:    preserved from existing doc (managed by message pipeline)
- *   - displayName, profileUrl, avatarUrl, lastSeen, metadata:
- *                     overwritten with the latest adapter data
- *
- * This means adapter syncs refresh profile info without clobbering message
- * state that is managed separately. The avatarUrl is always updated from the
- * adapter; if the adapter sends an empty string the existing URL remains
- * because toContactDoc uses the incoming value as-is and the adapter is
- * expected to send what it has.
- *
- * On first insert (404), the doc is written with default values.
+ * Insert or update a single contact. Use upsertContacts() for batches.
  */
 export async function upsertContact(
   contact: UnifiedContact,
@@ -73,7 +57,6 @@ export async function upsertContact(
   const doc = toContactDoc(contact);
   try {
     const existing = await store.get(doc._id) as ContactDoc;
-    // Merge: keep revision, original timestamps, and message-managed fields
     doc._rev = existing._rev;
     doc.createdAt = existing.createdAt;
     doc.lastMessageAt = existing.lastMessageAt || doc.lastMessageAt;
@@ -81,7 +64,6 @@ export async function upsertContact(
     await store.put(doc);
   } catch (err: any) {
     if (err.status === 404) {
-      // First time seeing this contact -- insert as new
       await store.put(doc);
       return;
     }
@@ -90,10 +72,59 @@ export async function upsertContact(
 }
 
 /**
- * Fetch a single contact by its full PouchDB _id.
- * Returns null (not an error) if the contact does not exist.
+ * Batch insert/update contacts using allDocs + bulkDocs.
  *
- * @param id  Full document ID, e.g. `contact:grindr:12345`.
+ * Same pattern as upsertMessages in messages.ts:
+ *   1. Build deterministic _ids for all contacts
+ *   2. Batch-fetch existing docs with allDocs({keys}) to get _rev tokens
+ *   3. Merge preserved fields (createdAt, lastMessageAt, unreadCount)
+ *   4. Write all in a single bulkDocs call
+ *
+ * This reduces N sequential get+put round-trips to 2 PouchDB calls
+ * regardless of batch size.
+ */
+export async function upsertContacts(
+  contacts: UnifiedContact[],
+  db?: PouchDB.Database,
+): Promise<{ created: number; updated: number }> {
+  if (!contacts.length) return { created: 0, updated: 0 };
+  const store = db || await getDB();
+  const docs = contacts.map(c => toContactDoc(c));
+  const ids = docs.map(d => d._id);
+
+  // Batch-fetch existing docs to get _rev and preserved fields
+  const existing = await store.allDocs({ keys: ids, include_docs: true });
+  const existingMap = new Map<string, ContactDoc>();
+  for (const row of existing.rows) {
+    if ('error' in row) continue; // 404 — new contact
+    if (row.doc) existingMap.set(row.id, row.doc as ContactDoc);
+  }
+
+  let created = 0;
+  let updated = 0;
+  for (const doc of docs) {
+    const prev = existingMap.get(doc._id);
+    if (prev) {
+      // Merge: preserve _rev, original timestamps, and message-managed fields
+      (doc as any)._rev = prev._rev;
+      doc.createdAt = prev.createdAt;
+      doc.lastMessageAt = prev.lastMessageAt || doc.lastMessageAt;
+      doc.unreadCount = prev.unreadCount;
+      // Preserve existing avatar if new one is empty
+      if (!doc.avatarUrl && prev.avatarUrl) doc.avatarUrl = prev.avatarUrl;
+      updated++;
+    } else {
+      created++;
+    }
+  }
+
+  await store.bulkDocs(docs);
+  return { created, updated };
+}
+
+/**
+ * Fetch a single contact by its full PouchDB _id.
+ * Returns null if the contact does not exist.
  */
 export async function getContact(
   id: string,
@@ -109,43 +140,45 @@ export async function getContact(
 }
 
 /**
- * Get all contacts on a given platform. Uses the (docType, platform) index.
- *
- * @param platform  Platform to filter by (e.g. 'grindr', 'scruff').
+ * Get all contacts on a given platform using allDocs key-range.
+ * Contact IDs are `contact:{platform}:{userId}`, so we scan
+ * `contact:{platform}:` to `contact:{platform}:\uffff`.
  */
 export async function getContactsByPlatform(
   platform: Platform,
   db?: PouchDB.Database,
 ): Promise<ContactDoc[]> {
   const store = db || await getDB();
-  const result = await store.find({
-    selector: { docType: 'contact', platform },
+  const result = await store.allDocs({
+    startkey: `contact:${platform}:`,
+    endkey: `contact:${platform}:\uffff`,
+    include_docs: true,
   });
-  return result.docs as ContactDoc[];
+  return result.rows
+    .filter(r => r.doc)
+    .map(r => r.doc as ContactDoc);
 }
 
 /**
- * Get all contacts across all platforms, with client-side sorting.
- *
- * Sorting options:
- *   - 'lastMessageAt' (default) -- most recently active contacts first
- *   - 'displayName'             -- alphabetical by display name
- *
- * @param opts.sortBy  Sort field (default: 'lastMessageAt').
+ * Get all contacts across all platforms using allDocs key-range.
+ * Scans `contact:` to `contact:\uffff` (native IndexedDB B-tree scan).
  */
 export async function getAllContacts(
   opts?: { sortBy?: 'lastMessageAt' | 'displayName' },
   db?: PouchDB.Database,
 ): Promise<ContactDoc[]> {
   const store = db || await getDB();
-  const result = await store.find({
-    selector: { docType: 'contact' },
+  const result = await store.allDocs({
+    startkey: 'contact:',
+    endkey: 'contact:\uffff',
+    include_docs: true,
   });
-  const docs = result.docs as ContactDoc[];
+  const docs = result.rows
+    .filter(r => r.doc)
+    .map(r => r.doc as ContactDoc);
   const sortBy = opts?.sortBy || 'lastMessageAt';
   return docs.sort((a, b) => {
     if (sortBy === 'displayName') return a.displayName.localeCompare(b.displayName);
-    // Default: newest activity first (descending by lastMessageAt)
     return new Date(b.lastMessageAt || 0).getTime() - new Date(a.lastMessageAt || 0).getTime();
   });
 }

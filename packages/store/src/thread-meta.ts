@@ -78,32 +78,33 @@ export async function upsertThreadMeta(
   return doc;
 }
 
+/** Fetch all thread metadata using allDocs key-range (meta: prefix). */
 export async function getAllThreadMeta(
   db?: PouchDB.Database,
 ): Promise<ThreadMetaDoc[]> {
   const store = db || await getDB();
-  const result = await store.find({
-    selector: { docType: 'thread_meta' },
+  const result = await store.allDocs({
+    startkey: 'meta:',
+    endkey: 'meta:\uffff',
+    include_docs: true,
   });
-  return result.docs as ThreadMetaDoc[];
+  return result.rows
+    .filter(r => r.doc)
+    .map(r => r.doc as ThreadMetaDoc);
 }
 
+/** Fetch bookmarked threads. Uses allDocs range + client-side filter. */
 export async function getBookmarkedThreads(
   db?: PouchDB.Database,
 ): Promise<ThreadMetaDoc[]> {
-  const store = db || await getDB();
-  const result = await store.find({
-    selector: { docType: 'thread_meta', bookmarked: true },
-  });
-  return result.docs as ThreadMetaDoc[];
+  const all = await getAllThreadMeta(db);
+  return all.filter(m => m.bookmarked);
 }
 
+/** Fetch archived threads. Uses allDocs range + client-side filter. */
 export async function getArchivedThreads(
   db?: PouchDB.Database,
 ): Promise<ThreadMetaDoc[]> {
-  const store = db || await getDB();
-  const result = await store.find({
-    selector: { docType: 'thread_meta', archived: true },
-  });
-  return result.docs as ThreadMetaDoc[];
+  const all = await getAllThreadMeta(db);
+  return all.filter(m => m.archived);
 }

@@ -4,7 +4,7 @@
 
 import type { UnifiedMessage, UnifiedContact, Platform } from '@aggregaytor/adapter-core';
 import {
-  upsertMessages, upsertContact, getUnreadCount, getThreadSummaries,
+  upsertMessages, upsertContact, upsertContacts, getUnreadCount, getThreadSummaries,
   getMessagesByContact, markThreadRead,
   getThreadMeta, upsertThreadMeta, getAllThreadMeta,
   createReminder, getReminders, markReminderNotified, deleteReminder,
@@ -582,34 +582,42 @@ let lastContactsNotify = 0;
 let contactsNotifyTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void> {
-  let written = 0;
+  // Filter: skip empty contacts and recently-written identical data
+  const toWrite: UnifiedContact[] = [];
   for (const c of contacts) {
-    // Skip contacts with no useful data
     if (!c.displayName && !c.avatarUrl && (!c.metadata || Object.keys(c.metadata).length === 0)) {
       continue;
     }
-    // Skip if we wrote this exact same data recently (< 60s ago)
     const id = `${c.platform}:${c.platformUserId}`;
     const hash = contactHash(c);
     const recent = recentContactUpserts.get(id);
     if (recent && recent.hash === hash && (Date.now() - recent.time) < 60_000) {
-      continue; // same data, skip the PouchDB round-trip
+      continue;
     }
-    await upsertContact(c);
-    written++;
-    recentContactUpserts.set(id, { hash, time: Date.now() });
+    toWrite.push(c);
   }
+
+  // Batch write: 1 allDocs + 1 bulkDocs instead of N sequential get+put
+  if (toWrite.length) {
+    await upsertContacts(toWrite);
+    const now = Date.now();
+    for (const c of toWrite) {
+      const id = `${c.platform}:${c.platformUserId}`;
+      recentContactUpserts.set(id, { hash: contactHash(c), time: now });
+    }
+  }
+
   // Cap the dedup cache
   if (recentContactUpserts.size > 500) {
     const oldest = [...recentContactUpserts.entries()].sort((a, b) => a[1].time - b[1].time).slice(0, 200);
     for (const [k] of oldest) recentContactUpserts.delete(k);
   }
-  // Debounced notification to avoid flooding the panel with refreshes.
-  // On a busy map, hundreds of contacts per minute flow through here.
+
+  // Debounced notification
   const now = Date.now();
   if (now - lastContactsNotify > 10000) {
     lastContactsNotify = now;
-    chrome.runtime.sendMessage({ type: 'CONTACTS_UPDATED', count: contacts.length }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'CONTACTS_UPDATED', count: toWrite.length }).catch(() => {});
   } else if (!contactsNotifyTimer) {
     contactsNotifyTimer = setTimeout(() => {
       contactsNotifyTimer = null;
