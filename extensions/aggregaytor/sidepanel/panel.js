@@ -1432,6 +1432,8 @@ async function toggleAllAutoRespond(enabled) {
   for (const m of metaRes?.metas || []) allContacts.add(m.contactId + ':' + m.platform);
   for (const key of allContacts) {
     const [contactId, platform] = [key.substring(0, key.lastIndexOf(':')), key.substring(key.lastIndexOf(':') + 1)];
+    // Never enable auto-respond on global chat — it's a broadcast feed
+    if (contactId.endsWith(':global-chat')) continue;
     await chrome.runtime.sendMessage({ type: 'TOGGLE_AUTO_RESPOND', contactId, platform, enabled });
   }
   await chrome.storage.local.set({ aggregaytor_global_autorespond: enabled });

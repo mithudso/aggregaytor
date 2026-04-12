@@ -571,6 +571,8 @@ async function handleIncomingMessages(messages: UnifiedMessage[], platform: Plat
   if (result.created > 0) {
     for (const msg of messages) {
       if (msg.direction !== 'in') continue;
+      // Never auto-respond to global chat — it's a broadcast feed, not a conversation
+      if (msg.contactId.endsWith(':global-chat')) continue;
       try {
         const meta = await getThreadMeta(msg.contactId);
         if (meta?.autoRespondEnabled) {
@@ -1002,9 +1004,10 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
       const data = await chrome.storage.local.get('aggregaytor_global_autorespond');
       const newState = !data.aggregaytor_global_autorespond;
       await chrome.storage.local.set({ aggregaytor_global_autorespond: newState });
-      // Toggle on all threads
+      // Toggle on all threads (except global chat — it's a broadcast feed)
       const summRes = await getThreadSummaries({});
       for (const s of summRes) {
+        if (s.contactId.endsWith(':global-chat')) continue;
         await upsertThreadMeta(s.contactId, s.platform, { autoRespondEnabled: newState });
       }
       safeNotify('ar-toggle', {
