@@ -213,10 +213,18 @@ function extractBody(obj: Record<string, unknown>): string {
     if (typeof value === 'string' && value.trim().length >= 2) return value.trim();
   }
   // Phase 2: ambiguous keys ('body', 'content') -- only if object is message-like
+  // SKIP 'snippet', 'preview', 'lastMessage' — these are conversation-level summary
+  // fields that contain concatenated text from the entire conversation, not a single
+  // message. Including them produces a giant "rollup" message in the UI.
   if (isLikelyMessage(obj)) {
-    for (const key of ['body', 'content', 'snippet', 'preview', 'lastMessage']) {
+    for (const key of ['body', 'content']) {
       const value = obj[key];
-      if (typeof value === 'string' && value.trim().length >= 2) return value.trim();
+      if (typeof value === 'string' && value.trim().length >= 2) {
+        // Cap at 500 chars — real messages are short, but concatenated
+        // previews/summaries can be thousands of characters
+        const trimmed = value.trim();
+        return trimmed.length > 500 ? trimmed.slice(0, 500) : trimmed;
+      }
     }
   }
   return '';
@@ -562,12 +570,20 @@ export class SniffiesAdapter extends BaseAdapter {
     });
 
     // ── Deduplication ────────────────────────────────────────────────────
-    // The same message can appear in multiple API responses (e.g. a
-    // conversation list fetch followed by a WS push). Filter out any
-    // message IDs we have already emitted this session.
+    // Two levels of dedup:
+    // 1. By message ID — catches exact same message from multiple API calls
+    // 2. By content hash — catches same message with different IDs (e.g.,
+    //    chat-data returns msg with id "abc", WS push returns same text
+    //    with id "xyz"). Hash = contactId + body (first 100 chars) +
+    //    timestamp rounded to 1-minute buckets (to handle slight time diffs).
     const newMessages = messages.filter(m => {
       if (this.seenMessageIds.has(m.id)) return false;
+      // Content-based dedup: same person + same body text + same minute
+      const tsMinute = m.timestamp.slice(0, 16); // "2025-04-12T23:14"
+      const contentKey = `${m.contactId}|${m.body.slice(0, 100)}|${tsMinute}`;
+      if (this.seenMessageIds.has(contentKey)) return false;
       this.seenMessageIds.add(m.id);
+      this.seenMessageIds.add(contentKey);
       return true;
     });
 
