@@ -14,7 +14,7 @@ import {
   createLogger,
 } from '@aggregaytor/adapter-core';
 import type { Platform, UnifiedMessage, UnifiedContact } from '@aggregaytor/adapter-core';
-import { parseSocketIOFrame, isGlobalChatEvent } from './ws-parser.js';
+import { parseSocketIOFrame, isGlobalChatEvent, isPresenceEvent } from './ws-parser.js';
 import { findLikelyProfileId, normalizeProfileId, extractProfileIdFromUrl } from './profile-resolver.js';
 
 const log = createLogger('[Aggregaytor:Sniffies]');
@@ -367,19 +367,54 @@ export class SniffiesAdapter extends BaseAdapter {
     const text = typeof data === 'string' ? data : '';
     if (!text) return [];
     const frame = parseSocketIOFrame(text);
-    if (!frame || !frame.data) return [];
+    if (!frame) return [];
 
-    // Use the Socket.IO event name to determine if this is global chat
-    // Event names like "cruisingUpdate", "post", "feedUpdate" = global
-    // Event names like "chatMessage", "message", "" = DM
+    // Skip presence/map events — they're not chat messages
+    // (userJoined, userAwake, userDisconnected, etc.)
+    if (isPresenceEvent(frame.eventName)) {
+      // But extract contact info from userJoined events (they have profile data)
+      if (frame.eventName === 'userJoined' && frame.data && typeof frame.data === 'object') {
+        const obj = frame.data as Record<string, unknown>;
+        const profileData = obj.data as Record<string, unknown> | undefined;
+        if (profileData && typeof profileData === 'object') {
+          this.selfIds.detectFromPayload(profileData);
+          // Extract profile as contact (avatar, attributes, etc.)
+          const profileId = normalizeProfileId(String(obj._id || profileData._id || ''));
+          if (profileId && !this.selfIds.ids.has(profileId)) {
+            const avatarUrl = this.resolveAvatarUrl(profileData, profileId);
+            this.emit({
+              type: 'contacts',
+              payload: [{
+                id: `sniffies:${profileId}`,
+                platform: 'sniffies' as const,
+                platformUserId: profileId,
+                displayName: '',
+                profileUrl: `https://sniffies.com/profile/${profileId}`,
+                avatarUrl,
+                lastSeen: new Date().toISOString(),
+                metadata: {},
+              }],
+            });
+          }
+        }
+      }
+      return [];
+    }
+
+    // Skip frames with no data payload
+    if (!frame.data) return [];
+
+    // Route based on event name
     if (isGlobalChatEvent(frame.eventName)) {
-      log.debug(`WS global event: "${frame.eventName}"`);
+      log.info(`WS global event: "${frame.eventName}"`);
       return this.parseApiResponse('[ws-global]', frame.data);
     }
 
+    // Log all non-presence event names so we can discover new ones
     if (frame.eventName) {
-      log.debug(`WS DM event: "${frame.eventName}"`);
+      log.info(`WS event: "${frame.eventName}" keys=${frame.data && typeof frame.data === 'object' ? Object.keys(frame.data as object).slice(0, 10).join(',') : '?'}`);
     }
+
     return this.parseApiResponse('[ws-dm]', frame.data);
   }
 

@@ -6,7 +6,7 @@
  */
 
 import { SniffiesAdapter } from '@aggregaytor/adapter-sniffies';
-import { isGlobalChatEvent } from '@aggregaytor/adapter-sniffies';
+import { isGlobalChatEvent, isPresenceEvent } from '@aggregaytor/adapter-sniffies';
 import { setLogLevel } from '@aggregaytor/adapter-core';
 
 // ── WS Debug Logger ──────────────────────────────────────────────────────────
@@ -41,10 +41,26 @@ function parseFrameForDebug(text: string): { event: string; keys: string[]; hasB
         return { event, keys, hasBody, snippet: t.slice(0, 300) };
       }
     }
-    if (t.startsWith('{') || t.startsWith('[')) {
+    if (t.startsWith('{')) {
       const data = JSON.parse(t);
-      const keys = data && typeof data === 'object' && !Array.isArray(data) ? Object.keys(data).slice(0, 20) : [];
-      return { event: '(raw-json)', keys, hasBody: false, snippet: t.slice(0, 300) };
+      if (data && typeof data === 'object') {
+        // Sniffies format: {"eventName":"...", "data":{...}}
+        const event = typeof data.eventName === 'string' ? data.eventName : '(json-obj)';
+        const innerData = data.data;
+        const innerKeys = innerData && typeof innerData === 'object' && !Array.isArray(innerData)
+          ? Object.keys(innerData).slice(0, 20) : [];
+        const outerKeys = Object.keys(data).slice(0, 20);
+        const hasBody = (innerData && typeof innerData === 'object' &&
+          ('body' in innerData || 'text' in innerData || 'message' in innerData || 'content' in innerData));
+        return { event, keys: innerKeys.length ? innerKeys : outerKeys, hasBody, snippet: t.slice(0, 400) };
+      }
+    }
+    if (t.startsWith('[')) {
+      const data = JSON.parse(t);
+      if (Array.isArray(data) && data.length >= 2 && typeof data[0] === 'string') {
+        return { event: data[0], keys: [], hasBody: false, snippet: t.slice(0, 400) };
+      }
+      return { event: '(array)', keys: [], hasBody: false, snippet: t.slice(0, 300) };
     }
   } catch { /* not parseable */ }
   return null;
@@ -60,15 +76,20 @@ const hookedSockets = new WeakSet<WebSocket>();
 WebSocket.prototype.addEventListener = function(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) {
   if (type === 'message' && !hookedSockets.has(this)) {
     hookedSockets.add(this);
-    // Piggyback a debug logger
+    // Piggyback a debug logger — skip presence spam, log everything else
     _OrigProtoAddListener.call(this, 'message', function(ev: MessageEvent) {
       const frame = parseFrameForDebug(ev.data);
-      if (frame) {
+      if (!frame) return;
+      const presence = isPresenceEvent(frame.event);
+      // Only log non-presence events (chat, DM, global, unknown) to avoid spam
+      // Also log presence events with hasBody (unusual — might be a mis-classification)
+      if (!presence || frame.hasBody) {
         const isGlobal = isGlobalChatEvent(frame.event);
         wsDebugLog({
           src: 'proto-hook',
           event: frame.event,
           isGlobal,
+          isPresence: presence,
           keys: frame.keys,
           hasBody: frame.hasBody,
           snippet: frame.snippet,
@@ -88,12 +109,15 @@ if (origOnMsgDesc) {
         hookedSockets.add(this);
         _OrigProtoAddListener.call(this, 'message', function(ev: MessageEvent) {
           const frame = parseFrameForDebug(ev.data);
-          if (frame) {
+          if (!frame) return;
+          const presence = isPresenceEvent(frame.event);
+          if (!presence || frame.hasBody) {
             const isGlobal = isGlobalChatEvent(frame.event);
             wsDebugLog({
               src: 'onmsg-hook',
               event: frame.event,
               isGlobal,
+              isPresence: presence,
               keys: frame.keys,
               hasBody: frame.hasBody,
               snippet: frame.snippet,
