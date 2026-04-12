@@ -6,7 +6,109 @@
  */
 
 import { SniffiesAdapter } from '@aggregaytor/adapter-sniffies';
+import { isGlobalChatEvent } from '@aggregaytor/adapter-sniffies';
 import { setLogLevel } from '@aggregaytor/adapter-core';
+
+// ── WS Debug Logger ──────────────────────────────────────────────────────────
+// Writes WebSocket frames to localStorage so we can inspect them later
+// (DevTools can't be open during page load on Sniffies without blocking it)
+const WS_DEBUG_KEY = '__aggregaytor_ws_debug';
+const WS_DEBUG_MAX = 150; // keep last 150 frames
+
+function wsDebugLog(entry: Record<string, unknown>): void {
+  try {
+    const raw = localStorage.getItem(WS_DEBUG_KEY);
+    const log: unknown[] = raw ? JSON.parse(raw) : [];
+    log.push({ ...entry, t: new Date().toISOString() });
+    // Keep only the last N entries
+    while (log.length > WS_DEBUG_MAX) log.shift();
+    localStorage.setItem(WS_DEBUG_KEY, JSON.stringify(log));
+  } catch { /* localStorage full or unavailable */ }
+}
+
+function parseFrameForDebug(text: string): { event: string; keys: string[]; hasBody: boolean; snippet: string } | null {
+  if (!text || typeof text !== 'string') return null;
+  const t = text.trim();
+  if (!t || /^\d{1,2}$/.test(t)) return null; // heartbeat
+  try {
+    if (t.startsWith('42')) {
+      const arr = JSON.parse(t.slice(2));
+      if (Array.isArray(arr)) {
+        const event = typeof arr[0] === 'string' ? arr[0] : '';
+        const data = arr[1];
+        const keys = data && typeof data === 'object' ? Object.keys(data).slice(0, 20) : [];
+        const hasBody = data && typeof data === 'object' && ('body' in data || 'text' in data || 'message' in data || 'content' in data);
+        return { event, keys, hasBody, snippet: t.slice(0, 300) };
+      }
+    }
+    if (t.startsWith('{') || t.startsWith('[')) {
+      const data = JSON.parse(t);
+      const keys = data && typeof data === 'object' && !Array.isArray(data) ? Object.keys(data).slice(0, 20) : [];
+      return { event: '(raw-json)', keys, hasBody: false, snippet: t.slice(0, 300) };
+    }
+  } catch { /* not parseable */ }
+  return null;
+}
+
+// Install a STANDALONE WebSocket interceptor for debug logging
+// This must run BEFORE the adapter patches WebSocket so we get the native constructor
+const _NativeWS = window.WebSocket;
+const _OrigProtoAddListener = WebSocket.prototype.addEventListener;
+
+// Prototype-level hook: catches ALL sockets (even created before our constructor wrapper)
+const hookedSockets = new WeakSet<WebSocket>();
+WebSocket.prototype.addEventListener = function(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) {
+  if (type === 'message' && !hookedSockets.has(this)) {
+    hookedSockets.add(this);
+    // Piggyback a debug logger
+    _OrigProtoAddListener.call(this, 'message', function(ev: MessageEvent) {
+      const frame = parseFrameForDebug(ev.data);
+      if (frame) {
+        const isGlobal = isGlobalChatEvent(frame.event);
+        wsDebugLog({
+          src: 'proto-hook',
+          event: frame.event,
+          isGlobal,
+          keys: frame.keys,
+          hasBody: frame.hasBody,
+          snippet: frame.snippet,
+        });
+      }
+    });
+  }
+  return _OrigProtoAddListener.call(this, type, listener, options);
+};
+
+// Also hook onmessage setter for sockets that use ws.onmessage = fn
+const origOnMsgDesc = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'onmessage');
+if (origOnMsgDesc) {
+  Object.defineProperty(WebSocket.prototype, 'onmessage', {
+    set(fn) {
+      if (!hookedSockets.has(this) && fn) {
+        hookedSockets.add(this);
+        _OrigProtoAddListener.call(this, 'message', function(ev: MessageEvent) {
+          const frame = parseFrameForDebug(ev.data);
+          if (frame) {
+            const isGlobal = isGlobalChatEvent(frame.event);
+            wsDebugLog({
+              src: 'onmsg-hook',
+              event: frame.event,
+              isGlobal,
+              keys: frame.keys,
+              hasBody: frame.hasBody,
+              snippet: frame.snippet,
+            });
+          }
+        });
+      }
+      origOnMsgDesc!.set!.call(this, fn);
+    },
+    get() { return origOnMsgDesc!.get!.call(this); },
+    configurable: true,
+  });
+}
+
+wsDebugLog({ src: 'init', msg: 'WS debug logger installed', hookType: 'proto+onmsg' });
 
 // Listen for log level changes from bridge
 window.addEventListener('__aggregaytor_set_log_level', ((event: CustomEvent) => {

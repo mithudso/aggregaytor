@@ -120,15 +120,28 @@ export function installWebSocketInterceptor(
     return () => {};
   }
 
-  const WrappedWebSocket = function (this: any, ...args: ConstructorParameters<typeof WebSocket>) {
-    const ws = new NativeWebSocket(...args);
-    ws.addEventListener('message', (event) => {
+  // Shared tracker: ensures each socket gets exactly ONE adapter-pipeline listener
+  const hookedSockets = new WeakSet<WebSocket>();
+
+  function hookSocket(ws: WebSocket, _source: string): void {
+    if (hookedSockets.has(ws)) return;
+    hookedSockets.add(ws);
+    // Use the native addEventListener to avoid re-triggering our prototype wrapper
+    const nativeAddListener = Object.getPrototypeOf(Object.getPrototypeOf(ws))?.addEventListener
+      || EventTarget.prototype.addEventListener;
+    nativeAddListener.call(ws, 'message', (event: MessageEvent) => {
       try {
-        opts.onWebSocketMessage(event?.data, 'ws-constructor');
+        opts.onWebSocketMessage(event?.data, _source);
       } catch {
         // silently ignore
       }
     });
+  }
+
+  // 1. Constructor wrapper — catches sockets created AFTER patching
+  const WrappedWebSocket = function (this: any, ...args: ConstructorParameters<typeof WebSocket>) {
+    const ws = new NativeWebSocket(...args);
+    hookSocket(ws, 'ws-constructor');
     return ws;
   } as unknown as typeof WebSocket;
 
@@ -142,9 +155,38 @@ export function installWebSocketInterceptor(
   (WrappedWebSocket as any)[PATCH_FLAG] = true;
   target.WebSocket = WrappedWebSocket;
 
+  // 2. Prototype-level hooks — catch sockets created BEFORE our constructor wrapper
+  //    (e.g., if the page already created a WebSocket before our script ran)
+  const origAddListener = NativeWebSocket.prototype.addEventListener;
+  NativeWebSocket.prototype.addEventListener = function(
+    this: WebSocket, type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions,
+  ) {
+    if (type === 'message') hookSocket(this, 'ws-proto-addEventListener');
+    return origAddListener.call(this, type, listener, options);
+  };
+
+  // 3. onmessage setter hook — catches ws.onmessage = fn pattern
+  const origOnMsgDesc = Object.getOwnPropertyDescriptor(NativeWebSocket.prototype, 'onmessage');
+  if (origOnMsgDesc?.set) {
+    Object.defineProperty(NativeWebSocket.prototype, 'onmessage', {
+      set(fn) {
+        if (fn) hookSocket(this, 'ws-proto-onmessage');
+        origOnMsgDesc!.set!.call(this, fn);
+      },
+      get() { return origOnMsgDesc!.get!.call(this); },
+      configurable: true,
+    });
+  }
+
   return () => {
     if (target.WebSocket === WrappedWebSocket) {
       target.WebSocket = NativeWebSocket;
+    }
+    NativeWebSocket.prototype.addEventListener = origAddListener;
+    if (origOnMsgDesc) {
+      Object.defineProperty(NativeWebSocket.prototype, 'onmessage', origOnMsgDesc);
     }
   };
 }
