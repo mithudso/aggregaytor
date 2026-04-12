@@ -95,9 +95,20 @@ export function extractProfileIdFromUrl(url: string): string {
   return match ? normalizeProfileId(match[1]) : '';
 }
 
+// ── Profile ID Extraction ───────────────────────────────────────────────────
+
 /**
- * Find the most likely OTHER person's profile ID in an API object.
- * Skips self IDs when possible.
+ * Find the most likely OTHER person's profile ID from an API response object.
+ *
+ * Uses a 6-priority cascade, returning the first valid non-self hex ID
+ * found. Self-ID skipping (`selfIds` check) is applied at every level
+ * except Priority 4 (conversation IDs are not profile IDs, so self-check
+ * is irrelevant there).
+ *
+ * @param obj      The API response object to inspect.
+ * @param fallback Value to return if no ID is found (default "").
+ * @param selfIds  Set of the logged-in user's known profile IDs.
+ * @returns        The normalized hex profile ID of the other person, or fallback.
  */
 export function findLikelyProfileId(
   obj: Record<string, unknown>,
@@ -106,7 +117,9 @@ export function findLikelyProfileId(
 ): string {
   const normalizeKey = (key: string) => key.replace(/[-_ ]/g, '').toLowerCase();
 
-  // Priority 1: explicit "other person" keys
+  // ── Priority 1: explicit "other person" keys ──────────────────────────
+  // These keys unambiguously refer to the conversation partner.
+  // Self-skip: yes (defensive -- API might put our ID here in edge cases).
   for (const key of OTHER_PERSON_KEYS) {
     for (const [k, v] of Object.entries(obj)) {
       if (normalizeKey(k) === key && v && typeof v === 'string') {
@@ -116,7 +129,8 @@ export function findLikelyProfileId(
     }
   }
 
-  // Priority 2: sender keys (skip if it's self)
+  // ── Priority 2: sender keys ───────────────────────────────────────────
+  // Could be us or them. If it is us, skip and keep looking.
   for (const key of SENDER_KEYS) {
     for (const [k, v] of Object.entries(obj)) {
       if (normalizeKey(k) === key && v && typeof v === 'string') {
@@ -126,7 +140,9 @@ export function findLikelyProfileId(
     }
   }
 
-  // Priority 3: nested objects that look like user profiles
+  // ── Priority 3: nested sub-objects that look like user profiles ───────
+  // E.g. obj.sender = { _id: "abc123" }, obj.user = { profileId: "..." }
+  // Self-skip: yes.
   for (const [k, v] of Object.entries(obj)) {
     const nk = normalizeKey(k);
     if ((nk === 'otheruser' || nk === 'otherprofile' || nk === 'peer' || nk === 'recipient' || nk === 'sender' || nk === 'user' || nk === 'profile') && v && typeof v === 'object') {
@@ -136,7 +152,9 @@ export function findLikelyProfileId(
     }
   }
 
-  // Priority 4: conversation/thread ID (at least groups messages together)
+  // ── Priority 4: conversation/thread IDs ───────────────────────────────
+  // Not a real profile ID, but a hex conversation ID still groups messages
+  // together correctly. No self-skip needed (conversation IDs are shared).
   for (const key of CONVERSATION_KEYS) {
     for (const [k, v] of Object.entries(obj)) {
       if (normalizeKey(k) === key && v && typeof v === 'string') {
@@ -146,7 +164,9 @@ export function findLikelyProfileId(
     }
   }
 
-  // Priority 5: generic ID keys (skip self)
+  // ── Priority 5: generic ID keys ──────────────────────────────────────
+  // Ambiguous keys like `profileId` or `userId` -- could be anyone.
+  // Self-skip: yes.
   for (const key of GENERIC_ID_KEYS) {
     for (const [k, v] of Object.entries(obj)) {
       if (normalizeKey(k) === key && v && typeof v === 'string') {
@@ -156,12 +176,15 @@ export function findLikelyProfileId(
     }
   }
 
-  // Priority 6: any hex ID value in the object that isn't self
+  // ── Priority 6: any long hex string value in the object ──────────────
+  // Last resort: scan all string values for something that looks like a
+  // MongoDB ObjectId (>= 10 hex chars). Short hex strings are skipped to
+  // avoid false positives (e.g. color codes, small numbers).
+  // Self-skip: yes.
   for (const [k, v] of Object.entries(obj)) {
     if (typeof v === 'string') {
       const id = normalizeProfileId(v);
       if (id && id.length >= 10 && (!selfIds || !selfIds.has(id))) {
-        // Only use long hex IDs to avoid false matches
         return id;
       }
     }
@@ -170,6 +193,17 @@ export function findLikelyProfileId(
   return fallback;
 }
 
+/**
+ * Extract a profile ID from a CSS `background-image` URL string.
+ *
+ * Sniffies map-marker avatars use the CDN pattern:
+ *   `profile.sniffiesassets.com/{profileId}/{photoNumber}`
+ *
+ * This helper pulls the hex profile ID out of that path.
+ *
+ * @param bg A CSS background-image value (e.g. `url("https://profile.sniffiesassets.com/abc123/0")`)
+ * @returns  The normalized profile ID, or "" if the pattern does not match.
+ */
 export function extractProfileIdFromBackground(bg: string): string {
   if (!bg) return '';
   const match = bg.match(/profile\.sniffiesassets\.com\/([0-9a-f]{6,})\//i);
