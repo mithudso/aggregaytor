@@ -583,10 +583,11 @@ async function loadProfileInfo(contactId) {
   const el = document.getElementById('profile-info');
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId });
-    // Also get contact doc for profile data
-    const summaries = await chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} });
-    const thread = summaries?.summaries?.find(s => s.contactId === contactId);
-    const contact = thread?.contact;
+    // Direct single-contact lookup — avoids the expensive GET_THREAD_SUMMARIES
+    // query (177ms avg, queries 1000 messages) just to find one contact.
+    // GET_CONTACT is a single PouchDB.get() — essentially instant.
+    const contactRes = await chrome.runtime.sendMessage({ type: 'GET_CONTACT', contactId: `contact:${contactId.replace('contact:', '')}` });
+    const contact = contactRes?.contact;
     const meta = res?.meta || {};
 
     if (!contact && !meta.alias) { el.classList.remove('active'); return; }

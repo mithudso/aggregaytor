@@ -48,7 +48,7 @@ function swPerfTrack(name: string): () => void {
 // when multiple triggers fire in rapid succession (CONTACTS_UPDATED,
 // NEW_MESSAGES, panel opening, etc.)
 let threadSummaryCache: { data: any; time: number; key: string } | null = null;
-const THREAD_CACHE_TTL = 3000; // 3 seconds
+const THREAD_CACHE_TTL = 5000; // 5 seconds
 
 function invalidateThreadCache(): void {
   threadSummaryCache = null;
@@ -115,6 +115,12 @@ async function handleMessage(msg: any): Promise<any> {
       await handleIncomingContacts(msg.payload);
       end();
       return { ok: true };
+    }
+    case 'GET_CONTACT': {
+      // Direct single-contact lookup — O(1) PouchDB get instead of the
+      // full thread summaries query. Use this when you only need one contact.
+      const contact = await getContact(msg.contactId);
+      return { ok: true, contact };
     }
     case 'GET_THREAD_SUMMARIES': {
       const cacheKey = JSON.stringify(msg.opts || {});
