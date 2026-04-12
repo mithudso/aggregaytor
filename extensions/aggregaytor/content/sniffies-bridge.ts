@@ -246,91 +246,90 @@ function checkUrlChange() {
 }
 /**
  * Scrape the Sniffies chat panel (/chat) for conversation list.
- * Each conversation shows: avatar, username/attributes, last message preview, timestamp.
+ * DOM-agnostic approach: scan the entire page for profile hex IDs
+ * in links, background images, and nearby text.
  */
 function scrapeChatPanel() {
   if (!contextValid || !checkContext()) return;
 
-  const messages: any[] = [];
   const contacts: any[] = [];
+  const messages: any[] = [];
+  const seenIds = new Set<string>();
 
-  // Sniffies chat list items — try multiple selectors for the conversation rows
-  const rows = document.querySelectorAll(
-    '[class*="conversation"], [class*="chat-item"], [class*="thread-item"], ' +
-    '[class*="inbox-item"], [class*="message-list"] > div, [class*="chat-list"] > div'
-  );
+  // Strategy 1: Find all links containing profile hex IDs
+  document.querySelectorAll('a[href*="/profile/"]').forEach(link => {
+    const match = (link as HTMLAnchorElement).href.match(/\/profile\/([0-9a-f]{6,})/i);
+    if (!match) return;
+    const profileId = match[1].toLowerCase();
+    if (seenIds.has(profileId)) return;
+    seenIds.add(profileId);
 
-  rows.forEach(row => {
-    try {
-      // Avatar — background-image or img
-      let avatarUrl = '';
-      const img = row.querySelector('img') as HTMLImageElement;
+    // Look for avatar near this link
+    const container = link.closest('div') || link.parentElement;
+    let avatarUrl = '';
+    if (container) {
+      const img = container.querySelector('img') as HTMLImageElement;
       if (img?.src?.startsWith('http')) avatarUrl = img.src;
-      if (!avatarUrl) {
-        const bgEl = row.querySelector('[style*="background-image"]') as HTMLElement;
-        const bgMatch = bgEl?.style?.backgroundImage?.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/);
-        if (bgMatch) avatarUrl = bgMatch[1];
-      }
-
-      // Profile ID from avatar URL or link
-      let profileId = '';
-      const idFromAvatar = avatarUrl.match(/\/([0-9a-f]{6,})\//i);
-      if (idFromAvatar) profileId = idFromAvatar[1].toLowerCase();
-      const link = row.querySelector('a[href*="/profile/"]') as HTMLAnchorElement;
-      if (!profileId && link) {
-        const linkMatch = link.href.match(/\/profile\/([0-9a-f]{6,})/i);
-        if (linkMatch) profileId = linkMatch[1].toLowerCase();
-      }
-      if (!profileId) return;
-
-      // Text content — get the last message preview
-      const allText = row.textContent || '';
-      // The row typically has: name/label, last message preview, timestamp
-      // Try to extract the preview (usually the longest text block)
-      const textNodes = row.querySelectorAll('span, p, div');
-      let preview = '';
-      let displayName = '';
-      let timeText = '';
-      textNodes.forEach(node => {
-        const t = (node.textContent || '').trim();
-        if (!t || t.length < 2) return;
-        if (/^\d+[smhd]$|ago|just now/i.test(t)) { timeText = t; return; }
-        if (t.length > preview.length && t.length > 5) preview = t;
-        if (!displayName && t.length >= 3 && t.length <= 30 && !/^\d/.test(t)) displayName = t;
+      // Check background images
+      container.querySelectorAll('*').forEach(el => {
+        const bg = (el as HTMLElement).style?.backgroundImage || '';
+        const bgMatch = bg.match(/url\(["']?(https?:\/\/[^"')]+sniffiesassets[^"')]+)["']?\)/);
+        if (bgMatch) avatarUrl = avatarUrl || bgMatch[1];
       });
+    }
 
-      if (!preview || preview.length < 3) return;
+    // Get nearby text for preview
+    const parent = link.closest('[class]')?.parentElement || link.parentElement?.parentElement;
+    const text = parent?.textContent?.trim() || link.textContent?.trim() || '';
 
-      // Create message record
+    contacts.push({
+      id: `sniffies:${profileId}`, platform: 'sniffies', platformUserId: profileId,
+      displayName: '', profileUrl: `https://sniffies.com/profile/${profileId}`,
+      avatarUrl, lastSeen: new Date().toISOString(), metadata: {},
+    });
+    if (text.length > 3) {
       messages.push({
-        id: `sniffies:chat-panel-${profileId}-${Date.now()}`,
-        platform: 'sniffies',
-        threadId: `sniffies:${profileId}`,
-        contactId: `sniffies:${profileId}`,
-        direction: 'in',
-        body: preview.slice(0, 200),
-        timestamp: new Date().toISOString(),
-        read: true,
-        metadata: { profileId, source: 'chat-panel-scrape', avatarUrl, displayName },
+        id: `sniffies:chatpanel-${profileId}-${Date.now()}`, platform: 'sniffies',
+        threadId: `sniffies:${profileId}`, contactId: `sniffies:${profileId}`,
+        direction: 'in', body: text.slice(0, 150), timestamp: new Date().toISOString(),
+        read: true, metadata: { profileId, source: 'chat-panel', avatarUrl },
       });
-
-      // Create/update contact
-      contacts.push({
-        id: `sniffies:${profileId}`,
-        platform: 'sniffies',
-        platformUserId: profileId,
-        displayName: displayName || profileId.slice(0, 10),
-        profileUrl: `https://sniffies.com/profile/${profileId}`,
-        avatarUrl,
-        lastSeen: new Date().toISOString(),
-        metadata: {},
-      });
-    } catch {}
+    }
   });
 
-  if (messages.length || contacts.length) {
-    console.log(`[Aggregaytor:Bridge:Sniffies] Chat panel scraped: ${messages.length} messages, ${contacts.length} contacts`);
-  }
+  // Strategy 2: Find all background images with sniffiesassets CDN URLs
+  document.querySelectorAll('*').forEach(el => {
+    const bg = (el as HTMLElement).style?.backgroundImage || '';
+    const match = bg.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+    if (!match) return;
+    const profileId = match[1].toLowerCase();
+    if (seenIds.has(profileId)) return;
+    seenIds.add(profileId);
+    const avatarUrl = bg.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/)?.[1] || '';
+    contacts.push({
+      id: `sniffies:${profileId}`, platform: 'sniffies', platformUserId: profileId,
+      displayName: '', profileUrl: `https://sniffies.com/profile/${profileId}`,
+      avatarUrl, lastSeen: new Date().toISOString(), metadata: {},
+    });
+  });
+
+  // Strategy 3: Find all img elements with sniffiesassets URLs
+  document.querySelectorAll('img[src*="sniffiesassets"]').forEach(img => {
+    const src = (img as HTMLImageElement).src;
+    const match = src.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+    if (!match) return;
+    const profileId = match[1].toLowerCase();
+    if (seenIds.has(profileId)) return;
+    seenIds.add(profileId);
+    contacts.push({
+      id: `sniffies:${profileId}`, platform: 'sniffies', platformUserId: profileId,
+      displayName: '', profileUrl: `https://sniffies.com/profile/${profileId}`,
+      avatarUrl: src, lastSeen: new Date().toISOString(), metadata: {},
+    });
+  });
+
+  console.log(`[Aggregaytor:Bridge:Sniffies] Chat panel scraped: ${contacts.length} contacts, ${messages.length} messages (${seenIds.size} unique profiles)`);
+
   if (contacts.length) {
     chrome.runtime.sendMessage({ type: 'ADAPTER_CONTACTS', platform: 'sniffies', payload: contacts }).catch(() => {});
   }
