@@ -547,8 +547,9 @@ async function openThread(contactId, platform, displayName) {
   loadProfileInfo(contactId);
   loadDossier();
 
-  // Navigate parent tab (unless auto-navigate is disabled in settings)
-  if (prefAutoNavigate) {
+  // Navigate parent tab (unless auto-navigate is disabled or contact is deleted/blocked)
+  const threadMeta = allThreadMeta.get(contactId) || {};
+  if (prefAutoNavigate && !threadMeta.blockedByThem && contactId !== 'sniffies:global-chat') {
     chrome.runtime.sendMessage({ type: 'NAVIGATE_TO_CONVERSATION', platform, contactId }).catch(() => {});
   }
   chrome.runtime.sendMessage({ type: 'MARK_THREAD_READ', threadId: contactId }).catch(() => {});
@@ -1835,7 +1836,7 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     // Load tab-specific data
     if (tab.dataset.tab === 'tab-rules') loadBlockRules();
     if (tab.dataset.tab === 'tab-pictures') loadPictures();
-    if (tab.dataset.tab === 'tab-sync') loadCalendarStatus();
+    if (tab.dataset.tab === 'tab-sync') { loadCalendarStatus(); checkGoogleAuth(); }
     if (tab.dataset.tab === 'tab-personality') loadStyleGuide();
   });
 });
@@ -1954,6 +1955,50 @@ document.getElementById('sp-pic-upload')?.addEventListener('change', async (e) =
   };
   reader.readAsDataURL(file);
 });
+
+// Google Account connection
+let googleAuthenticated = false;
+
+document.getElementById('sp-google-connect')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-google-connect');
+  const status = document.getElementById('sp-google-status');
+  btn.textContent = 'Connecting...'; btn.disabled = true;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GOOGLE_AUTH' });
+    if (res?.ok) {
+      googleAuthenticated = true;
+      btn.textContent = 'Connected';
+      status.textContent = 'Google account connected. Calendar, Tasks, and Gmail are active.';
+      status.style.color = '#22c55e';
+    } else {
+      btn.textContent = 'Connect Google Account';
+      btn.disabled = false;
+      status.textContent = res?.error || 'Connection failed. Try again.';
+      status.style.color = '#ef4444';
+    }
+  } catch (err) {
+    btn.textContent = 'Connect Google Account';
+    btn.disabled = false;
+    status.textContent = 'Error: ' + (err.message || err);
+    status.style.color = '#ef4444';
+  }
+});
+
+// Check Google auth status on settings open
+async function checkGoogleAuth() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GOOGLE_AUTH_STATUS' });
+    googleAuthenticated = res?.authenticated || false;
+    const btn = document.getElementById('sp-google-connect');
+    const status = document.getElementById('sp-google-status');
+    if (googleAuthenticated) {
+      btn.textContent = 'Connected';
+      btn.disabled = true;
+      status.textContent = 'Google account connected.';
+      status.style.color = '#22c55e';
+    }
+  } catch {}
+}
 
 // Sync
 document.getElementById('sp-sync-pics')?.addEventListener('click', async () => {
@@ -2246,15 +2291,20 @@ document.getElementById('task-save-btn')?.addEventListener('click', async () => 
   const title = document.getElementById('task-title').value.trim();
   if (!title) return;
   const dueVal = document.getElementById('task-due').value;
-  await chrome.runtime.sendMessage({
-    type: 'CREATE_TASK',
+  const taskData = {
     title,
     notes: document.getElementById('task-notes').value.trim(),
     dueAt: dueVal ? new Date(dueVal).toISOString() : undefined,
     priority: document.getElementById('task-priority').value,
     contactId: editingTaskContactId || undefined,
     platform: editingTaskPlatform || undefined,
-  });
+  };
+  // Use Google Tasks API if authenticated, with local fallback
+  if (googleAuthenticated) {
+    await chrome.runtime.sendMessage({ type: 'GOOGLE_TASKS_CREATE', ...taskData });
+  } else {
+    await chrome.runtime.sendMessage({ type: 'CREATE_TASK', ...taskData });
+  }
   hideTaskForm();
   loadTasks();
 });

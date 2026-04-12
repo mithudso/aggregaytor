@@ -27,5 +27,6 @@ export { getDossier, upsertDossier, setAutoExtractedField } from './dossier.js';
 export type { ContactDossierDoc, TaskDoc } from './types.js';
 export { DEFAULT_DOSSIER } from './types.js';
 export { createTask, getAllTasks, updateTask, deleteTask, getTasksByContact } from './tasks.js';
+export { createGoogleTask, updateGoogleTask, deleteGoogleTask, pullGoogleTasks, authenticateGoogle, isGoogleAuthenticated } from './google-tasks.js';
 export { startSync, stopSync } from './sync.js';
 export type { SyncConfig } from './sync.js';

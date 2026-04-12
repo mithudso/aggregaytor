@@ -252,19 +252,23 @@
     <!-- Sync tab -->
     <div class="settings-tab-content" id="tab-sync">
       <div class="settings-section">
+        <h3 class="settings-heading">Google Account</h3>
+        <div class="settings-info">Connect your Google account to enable Calendar, Tasks, and Gmail integration.</div>
+        <button class="settings-btn" id="sp-google-connect">Connect Google Account</button>
+        <div id="sp-google-status" class="settings-info" style="margin-top:4px"></div>
+      </div>
+      <div class="settings-section">
         <h3 class="settings-heading">Sync</h3>
         <button class="settings-btn" id="sp-sync-pics">Sync Profile Pictures</button>
         <div id="sp-sync-status" class="settings-info" style="margin-top:4px"></div>
       </div>
       <div class="settings-section">
         <h3 class="settings-heading">Google Calendar</h3>
-        <div class="settings-info">Paste your Google Calendar booking page URL to show availability to the auto-responder.</div>
-        <input type="text" id="sp-cal-booking-url" class="settings-input" placeholder="https://calendar.app.google/... or scheduling iframe URL">
+        <div class="settings-info">Set availability preferences for the auto-responder.</div>
         <label class="settings-label">Prep time (min): <input type="number" id="sp-cal-prep" value="30" class="settings-num"></label>
         <label class="settings-label">Travel time (min): <input type="number" id="sp-cal-travel" value="15" class="settings-num"></label>
         <button class="settings-btn" id="sp-cal-save">Save Calendar Settings</button>
         <div id="sp-cal-status" class="settings-info" style="margin-top:4px"></div>
-        <div id="sp-cal-preview" style="margin-top:8px"></div>
       </div>
     </div>
 

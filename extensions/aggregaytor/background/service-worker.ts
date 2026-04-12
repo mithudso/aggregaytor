@@ -15,6 +15,7 @@ import {
   recordFeedback, predictPreference, getModelStats, retrainModel,
   analyzeConversationSentiment, formatSentimentSummary,
   createTask, getAllTasks, updateTask, deleteTask, getTasksByContact,
+  createGoogleTask, updateGoogleTask, deleteGoogleTask, pullGoogleTasks, authenticateGoogle, isGoogleAuthenticated,
   getContact, getDB, destroyDB,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
@@ -483,6 +484,71 @@ async function handleMessage(msg: any): Promise<any> {
           await updateTask(msg.taskId, { calendarEventId: event.googleEventId || event._id });
         }
         return { ok: true, event };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+
+    // ── Google OAuth + Tasks API ──────────────────────────────────────────
+    case 'GOOGLE_AUTH': {
+      try {
+        const token = await authenticateGoogle();
+        return { ok: !!token, token };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+    case 'GOOGLE_AUTH_STATUS': {
+      const authed = await isGoogleAuthenticated();
+      return { ok: true, authenticated: authed };
+    }
+    case 'GOOGLE_TASKS_CREATE': {
+      try {
+        const gTask = await createGoogleTask({ title: msg.title, notes: msg.notes, dueAt: msg.dueAt });
+        // Also create local task with Google Task ID linked
+        const localTask = await createTask({
+          title: msg.title, notes: msg.notes, dueAt: msg.dueAt,
+          priority: msg.priority || 'medium',
+          contactId: msg.contactId, platform: msg.platform,
+        });
+        if (gTask?.id) await updateTask(localTask._id, { calendarEventId: gTask.id });
+        return { ok: true, task: localTask, googleTask: gTask };
+      } catch (err) {
+        // Fall back to local-only if Google API fails
+        const localTask = await createTask({
+          title: msg.title, notes: msg.notes, dueAt: msg.dueAt,
+          priority: msg.priority || 'medium',
+          contactId: msg.contactId, platform: msg.platform,
+        });
+        return { ok: true, task: localTask, googleError: (err as Error).message };
+      }
+    }
+    case 'GOOGLE_TASKS_UPDATE': {
+      try {
+        if (msg.googleTaskId) {
+          await updateGoogleTask(msg.googleTaskId, msg.updates);
+        }
+        if (msg.localTaskId) {
+          await updateTask(msg.localTaskId, msg.updates);
+        }
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+    case 'GOOGLE_TASKS_DELETE': {
+      try {
+        if (msg.googleTaskId) await deleteGoogleTask(msg.googleTaskId);
+        if (msg.localTaskId) await deleteTask(msg.localTaskId);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+    case 'GOOGLE_TASKS_PULL': {
+      try {
+        const remoteTasks = await pullGoogleTasks();
+        return { ok: true, tasks: remoteTasks };
       } catch (err) {
         return { ok: false, error: (err as Error).message };
       }

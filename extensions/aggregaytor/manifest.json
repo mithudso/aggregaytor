@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Aggregaytor",
-  "version": "0.41.0",
+  "version": "0.42.0",
   "description": "Unified message inbox across platforms",
   "permissions": [
     "storage",
@@ -90,5 +90,13 @@
     "16": "icons/icon-16.png",
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
+  },
+  "oauth2": {
+    "client_id": "948699843382-5tesf3h24gn87f8o4juh7j4mlvngtu80.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/calendar",
+      "https://www.googleapis.com/auth/tasks",
+      "https://www.googleapis.com/auth/gmail.readonly"
+    ]
   }
 }
