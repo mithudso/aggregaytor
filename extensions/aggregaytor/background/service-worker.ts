@@ -14,7 +14,7 @@ import {
   getCalendarSettings, saveCalendarSettings, getAvailableSlots, createCalendarEvent, authenticateCalendar,
   recordFeedback, predictPreference, getModelStats, retrainModel,
   analyzeConversationSentiment, formatSentimentSummary,
-  getContact,
+  getContact, getDB, destroyDB,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
 import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS } from './llm.js';
@@ -94,11 +94,9 @@ async function handleMessage(msg: any): Promise<any> {
       return { ok: true, messages: matches };
     }
     case 'CLEAR_ALL_DATA': {
-      // Destroy and recreate the entire database — cleanest way to clear everything
-      const { destroyDB, getDB: regetDB } = await import('@aggregaytor/store');
+      // Destroy and recreate the entire database
       await destroyDB();
-      // Force recreation on next access
-      await regetDB();
+      await getDB(); // force recreation
       console.log(`${LOG} Cleared all data — database destroyed and recreated`);
       await updateBadgeCount();
       // Re-seed global chat contact

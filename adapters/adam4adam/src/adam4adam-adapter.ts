@@ -119,6 +119,7 @@ export class Adam4AdamAdapter extends BaseAdapter {
 
   private parseMessageElement(el: Element): { message?: UnifiedMessage; contact?: UnifiedContact } | null {
     const author = el.getAttribute('data-author')?.replace(/:$/, '').trim();
+    if (!author) return null; // skip elements without author — can't attribute them
     const body = el.textContent?.trim();
     if (!body || body.length < 2) return null;
 
