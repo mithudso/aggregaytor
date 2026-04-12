@@ -142,6 +142,25 @@ async function handleMessage(msg: any): Promise<any> {
       }
       return { ok: true, count: totalScraped, tabs: tabCount };
     }
+    case 'SCRAPE_CONVERSATION': {
+      // Ask the Sniffies tab to scrape all visible messages in the current conversation
+      const platformHosts = ['sniffies.com', 'web.grindr.com', 'doublelist.com', 'adam4adam.com'];
+      const tabs = await chrome.tabs.query({});
+      let scraped = 0;
+      for (const tab of tabs) {
+        if (!tab.id || !tab.url) continue;
+        if (!platformHosts.some(h => tab.url!.includes(h))) continue;
+        try {
+          const res = await chrome.tabs.sendMessage(tab.id, {
+            type: 'SCRAPE_CONVERSATION',
+            contactId: msg.contactId,
+            profileId: msg.profileId,
+          });
+          scraped += res?.count || 0;
+        } catch {}
+      }
+      return { ok: true, count: scraped };
+    }
     case 'CLEAR_THREAD_MESSAGES': {
       const db = await getDB();
       const result = await db.find({ selector: { docType: 'message', contactId: msg.contactId } });
@@ -469,8 +488,10 @@ async function processDossierExtractions(): Promise<void> {
 }
 
 async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void> {
+  let updated = 0;
   for (const c of contacts) {
     await upsertContact(c);
+    updated++;
     // #17 Contact merge detection — log potential duplicates across platforms
     if (c.displayName && c.displayName.length > 2) {
       try {
@@ -486,6 +507,10 @@ async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void>
         }
       } catch {}
     }
+  }
+  // Notify side panel that contacts were updated (for avatar refresh)
+  if (updated > 0) {
+    chrome.runtime.sendMessage({ type: 'CONTACTS_UPDATED', count: updated }).catch(() => {});
   }
 }
 

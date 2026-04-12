@@ -534,6 +534,30 @@ async function openThread(contactId, platform, displayName) {
     const res = await chrome.runtime.sendMessage({ type: 'GET_MESSAGES_BY_CONTACT', contactId, limit: 500 });
     if (res?.ok) { currentMessages = res.messages || []; renderMessages(currentMessages); loadThreadAnalysis(); }
   } catch (err) { console.error('[Panel] Message load error:', err); }
+
+  // After the platform tab navigates to this conversation, scrape all visible messages
+  // This fills in messages that were missed by the API interceptor
+  if (contactId !== 'sniffies:global-chat') {
+    const profileId = stripPrefix(contactId);
+    setTimeout(async () => {
+      try {
+        const scrapeRes = await chrome.runtime.sendMessage({
+          type: 'SCRAPE_CONVERSATION',
+          contactId,
+          profileId,
+        });
+        if (scrapeRes?.count > 0) {
+          console.log(`[Panel] Scraped ${scrapeRes.count} messages from conversation`);
+          // Reload messages to include newly scraped ones
+          const refreshRes = await chrome.runtime.sendMessage({ type: 'GET_MESSAGES_BY_CONTACT', contactId, limit: 500 });
+          if (refreshRes?.ok && currentThread?.contactId === contactId) {
+            currentMessages = refreshRes.messages || [];
+            renderMessages(currentMessages);
+          }
+        }
+      } catch {}
+    }, 3000); // Wait for SPA navigation to load the conversation
+  }
 }
 
 async function loadProfileInfo(contactId) {
@@ -600,8 +624,9 @@ async function loadProfileInfo(contactId) {
           try {
             await chrome.runtime.sendMessage({ type: 'SYNC_PROFILE_PICS' });
             syncBtn.textContent = '📷 Done!';
-            // Reload profile info to show the new avatar
-            loadProfileInfo(contactId);
+            // Wait a bit for async ADAPTER_CONTACTS → upsertContact to complete
+            // The CONTACTS_UPDATED listener will also trigger a refresh
+            setTimeout(() => loadProfileInfo(contactId), 2000);
           } catch {
             syncBtn.textContent = '📷 Failed — try opening their profile manually';
           }
@@ -1300,6 +1325,11 @@ chrome.runtime.onMessage.addListener((message) => {
       const active = document.querySelector('.thread-item.active-on-site');
       if (active) active.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }, 100);
+  }
+  if (message.type === 'CONTACTS_UPDATED') {
+    // Refresh thread list to show new avatars after sync
+    if (document.body.classList.contains('view-inbox')) debouncedLoadThreads();
+    else if (currentThread) loadProfileInfo(currentThread.contactId);
   }
   if (message.type === 'COMMITMENT_ALERT') {
     // Flash the screen and play alert sound

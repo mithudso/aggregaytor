@@ -72,6 +72,72 @@ try {
       sendResponse({ ok: true });
       return true;
     }
+    if (message.type === 'SCRAPE_CONVERSATION') {
+      // Scrape all visible messages in the currently open conversation
+      const messages: any[] = [];
+      const profileId = message.profileId || '';
+
+      // Sniffies chat messages are in a scrollable container
+      // Each message bubble has text content, direction (sent/received), and timestamp
+      const bubbles = document.querySelectorAll(
+        '[class*="chat-bubble"], [class*="message-bubble"], [class*="chat-message"], ' +
+        '[class*="msg-bubble"], [data-testid*="message"], [class*="message-row"], ' +
+        '.message, .chat-msg, [class*="MessageBubble"], [class*="chatMessage"]'
+      );
+
+      bubbles.forEach((bubble, i) => {
+        try {
+          const text = bubble.textContent?.trim() || '';
+          if (!text || text.length < 2) return;
+
+          // Detect direction: sent messages usually have a different class or alignment
+          const bubbleClasses = bubble.className || '';
+          const parentClasses = bubble.parentElement?.className || '';
+          const allClasses = (bubbleClasses + ' ' + parentClasses).toLowerCase();
+          const isSent = allClasses.includes('sent') || allClasses.includes('mine') ||
+            allClasses.includes('outgoing') || allClasses.includes('self') ||
+            allClasses.includes('right') || allClasses.includes('from-me');
+          const direction = isSent ? 'out' : 'in';
+
+          // Try to get timestamp from nearby elements
+          const timeEl = bubble.querySelector('[class*="time"], [class*="date"], [class*="stamp"], time') ||
+            bubble.parentElement?.querySelector('[class*="time"], [class*="date"]');
+          const timeText = timeEl?.textContent?.trim() || '';
+
+          const contactId = profileId ? `sniffies:${profileId}` : (message.contactId || '');
+          if (!contactId) return;
+
+          messages.push({
+            id: `sniffies:conv-${profileId || 'unknown'}-${Date.now()}-${i}`,
+            platform: 'sniffies',
+            threadId: contactId,
+            contactId,
+            direction,
+            body: text.slice(0, 2000),
+            timestamp: new Date().toISOString(),
+            read: true,
+            metadata: {
+              source: 'conversation-scrape',
+              profileId,
+              timeText,
+              index: i,
+            },
+          });
+        } catch {}
+      });
+
+      if (messages.length) {
+        chrome.runtime.sendMessage({
+          type: 'ADAPTER_MESSAGES',
+          platform: 'sniffies',
+          payload: messages,
+        }).catch(() => {});
+      }
+
+      console.log(`[Aggregaytor:Bridge:Sniffies] Conversation scraped: ${messages.length} messages from ${bubbles.length} bubbles`);
+      sendResponse({ ok: true, count: messages.length });
+      return true;
+    }
     if (message.type === 'SCRAPE_AVATARS') {
       // Tell MAIN world to scrape and report back via events
       window.dispatchEvent(new CustomEvent('__aggregaytor_scrape_avatars'));

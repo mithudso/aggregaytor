@@ -479,21 +479,28 @@ export class SniffiesAdapter extends BaseAdapter {
   /**
    * Resolve avatar URL from an API object.
    * Sniffies stores photos at profile.sniffiesassets.com/{id}/
-   * and may also include direct URLs in various fields.
+   * Searches up to 4 levels deep to find URLs in nested structures like:
+   *   { data: { profile: { extended: { photo: "https://..." } } } }
    */
-  private resolveAvatarUrl(obj: Record<string, unknown>, profileId: string): string {
-    // Check explicit avatar/photo fields
+  private resolveAvatarUrl(obj: Record<string, unknown>, _profileId: string): string {
+    return this.deepFindAvatarUrl(obj, 0);
+  }
+
+  private deepFindAvatarUrl(obj: Record<string, unknown>, depth: number): string {
+    if (depth > 4) return '';
+
+    // Check explicit avatar/photo fields at this level
     for (const key of ['avatar', 'avatarUrl', 'photo', 'image', 'profilePhoto', 'profileImage', 'thumbnail', 'thumbUrl', 'photoUrl', 'imageUrl', 'pictureUrl']) {
       const val = obj[key];
       if (typeof val === 'string' && (val.startsWith('http') || val.startsWith('data:'))) return val;
     }
-    // Check nested photo objects
+    // Check nested photo arrays at this level
     if (obj.photos && Array.isArray(obj.photos)) {
       const first = obj.photos[0];
       if (typeof first === 'string' && first.startsWith('http')) return first;
       if (first && typeof first === 'object' && typeof (first as any).url === 'string') return (first as any).url;
     }
-    // Check for Sniffies CDN pattern in any string value
+    // Check for Sniffies CDN pattern in string values at this level
     for (const val of Object.values(obj)) {
       if (typeof val === 'string' && val.includes('sniffiesassets.com')) return val;
       if (typeof val === 'string' && val.includes('sniffies') && (val.includes('.jpg') || val.includes('.png') || val.includes('.webp'))) return val;
@@ -503,7 +510,13 @@ export class SniffiesAdapter extends BaseAdapter {
       const k = normalizeKey(key);
       if (/photo|image|pic|thumb|avatar|media/.test(k) && typeof val === 'string' && val.startsWith('http')) return val;
     }
-    // Don't construct CDN URL — it likely requires auth. Return empty.
+    // Recurse into nested objects (profile, data, extended, etc.)
+    for (const val of Object.values(obj)) {
+      if (val && typeof val === 'object' && !Array.isArray(val)) {
+        const found = this.deepFindAvatarUrl(val as Record<string, unknown>, depth + 1);
+        if (found) return found;
+      }
+    }
     return '';
   }
 
