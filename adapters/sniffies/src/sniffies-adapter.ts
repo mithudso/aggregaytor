@@ -294,9 +294,8 @@ export class SniffiesAdapter extends BaseAdapter {
         log.debug(`Message: contactId=sniffies:${profileId} dir=${direction} body="${body.slice(0, 30)}..." keys=${Object.keys(obj).slice(0, 8).join(',')}`);
 
         // Detect global/group chat context — only based on explicit signals
-        // Do NOT infer from missing fields — DMs from chat-data API also lack conversationId
         const isGlobal = url.includes('global') || url.includes('group') ||
-          url.includes('cruising') ||
+          url.includes('cruising') || url === '[ws-global]' ||
           (typeof obj.channel === 'string' && (obj.channel.includes('global') || obj.channel.includes('group'))) ||
           (typeof obj.type === 'string' && (obj.type.includes('cruising') || obj.type.includes('global') || obj.type.includes('broadcast'))) ||
           (typeof obj.feedType === 'string') ||
@@ -369,7 +368,24 @@ export class SniffiesAdapter extends BaseAdapter {
     if (!text) return [];
     const parsed = parseSocketIOFrame(text);
     if (!parsed) return [];
-    return this.parseApiResponse('[ws]', parsed);
+
+    // Check if user is currently viewing the global chat page
+    // If so, WebSocket messages are cruising updates, not DMs
+    const isOnGlobalChat = this.isGlobalChatPage();
+    const url = isOnGlobalChat ? '[ws-global]' : '[ws-dm]';
+    return this.parseApiResponse(url, parsed);
+  }
+
+  private isGlobalChatPage(): boolean {
+    try {
+      const path = window.location.pathname.toLowerCase();
+      // The global chat is NOT at /chat (that's the DM inbox)
+      // It's the main map view where cruising updates appear in the feed
+      // When the chat panel is open at /chat, WS messages are DMs
+      return !path.includes('/chat') && !path.includes('/profile/');
+    } catch {
+      return false;
+    }
   }
 
   private getContextProfileId(): string | null {
