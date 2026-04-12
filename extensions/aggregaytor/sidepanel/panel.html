@@ -145,70 +145,147 @@
   </div>
   <div id="draft-panel" class="draft-panel" style="display:none"></div>
 
-  <!-- Settings panel (inline, replaces inbox when visible) -->
+  <!-- Settings panel with tabs -->
   <div id="settings-panel" class="settings-panel" style="display:none">
-    <div class="settings-section">
-      <h3 class="settings-heading">AI Provider</h3>
-      <select id="sp-provider" class="settings-select">
-        <option value="local">Local (no API key)</option>
-        <option value="anthropic">Claude (Anthropic) — 50 RPM</option>
-        <option value="gemini">Gemini (Google) — 15 RPM free</option>
-        <option value="openai">OpenAI — 500 RPM</option>
-        <option value="groq">Groq — 30 RPM free</option>
-        <option value="perplexity">Perplexity — 50 RPM</option>
-        <option value="mistral">Mistral — 2 RPM free</option>
-        <option value="copilot">GitHub Copilot</option>
-      </select>
-      <input type="password" id="sp-apikey" class="settings-input" placeholder="API key">
-      <input type="text" id="sp-model" class="settings-input" placeholder="Model (leave blank for auto)">
-      <button class="settings-btn" id="sp-save-provider">Save Provider</button>
-      <div id="sp-provider-status" class="settings-status"></div>
+    <div class="settings-tabs">
+      <span class="settings-tab active" data-tab="tab-ai">AI</span>
+      <span class="settings-tab" data-tab="tab-personality">Style</span>
+      <span class="settings-tab" data-tab="tab-rules">Rules</span>
+      <span class="settings-tab" data-tab="tab-pictures">Pics</span>
+      <span class="settings-tab" data-tab="tab-sync">Sync</span>
+      <span class="settings-tab" data-tab="tab-data">Data</span>
     </div>
 
-    <div class="settings-section">
-      <h3 class="settings-heading">Personality</h3>
-      <select id="sp-personality" class="settings-select"></select>
-      <div id="sp-preset-desc" class="settings-info"></div>
-      <textarea id="sp-custom-instructions" class="settings-textarea" rows="3" placeholder="Custom instructions (e.g., Always be closing. Never use emojis.)"></textarea>
-      <button class="settings-btn" id="sp-save-personality">Save Personality</button>
+    <!-- AI tab -->
+    <div class="settings-tab-content active" id="tab-ai">
+      <div class="settings-section">
+        <h3 class="settings-heading">Provider</h3>
+        <select id="sp-provider" class="settings-select">
+          <option value="local">Local (no API key)</option>
+          <option value="anthropic">Claude (Anthropic) — 50 RPM</option>
+          <option value="gemini">Gemini (Google) — 15 RPM free</option>
+          <option value="openai">OpenAI — 500 RPM</option>
+          <option value="groq">Groq — 30 RPM free</option>
+          <option value="perplexity">Perplexity — 50 RPM</option>
+          <option value="mistral">Mistral — 2 RPM free</option>
+          <option value="copilot">GitHub Copilot</option>
+        </select>
+        <input type="password" id="sp-apikey" class="settings-input" placeholder="API key">
+        <input type="text" id="sp-model" class="settings-input" placeholder="Model (leave blank for auto)">
+        <button class="settings-btn" id="sp-save-provider">Save Provider</button>
+        <div id="sp-provider-status" class="settings-status"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Rate Limiting</h3>
+        <label class="settings-label"><input type="checkbox" id="sp-llm-enabled" checked> Enable LLM calls</label>
+        <label class="settings-label">Max requests/min: <input type="number" id="sp-rpm" value="10" min="1" max="60" class="settings-num"></label>
+        <label class="settings-label"><input type="checkbox" id="sp-feat-ar" checked> Auto-respond</label>
+        <label class="settings-label"><input type="checkbox" id="sp-feat-suggest" checked> Suggestions</label>
+        <label class="settings-label"><input type="checkbox" id="sp-feat-dossier" checked> Dossier</label>
+        <button class="settings-btn" id="sp-save-rate">Save Rate Settings</button>
+        <div id="sp-queue-status" class="settings-info"></div>
+      </div>
     </div>
 
-    <div class="settings-section">
-      <h3 class="settings-heading">Rate Limiting</h3>
-      <label class="settings-label"><input type="checkbox" id="sp-llm-enabled" checked> Enable LLM calls</label>
-      <label class="settings-label">Max requests/min: <input type="number" id="sp-rpm" value="10" min="1" max="60" class="settings-num"></label>
-      <label class="settings-label"><input type="checkbox" id="sp-feat-ar" checked> Auto-respond</label>
-      <label class="settings-label"><input type="checkbox" id="sp-feat-suggest" checked> Suggestions</label>
-      <label class="settings-label"><input type="checkbox" id="sp-feat-dossier" checked> Dossier</label>
-      <button class="settings-btn" id="sp-save-rate">Save Rate Settings</button>
-      <div id="sp-queue-status" class="settings-info"></div>
+    <!-- Personality tab -->
+    <div class="settings-tab-content" id="tab-personality">
+      <div class="settings-section">
+        <h3 class="settings-heading">Personality</h3>
+        <select id="sp-personality" class="settings-select"></select>
+        <div id="sp-preset-desc" class="settings-info"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Custom Instructions</h3>
+        <textarea id="sp-custom-instructions" class="settings-textarea" rows="4" placeholder="e.g., Always be closing. Never use emojis. Be direct and clear."></textarea>
+        <button class="settings-btn" id="sp-save-personality">Save Personality</button>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Writing Style</h3>
+        <div id="sp-style-guide" class="settings-info" style="max-height:60px;overflow-y:auto">Not yet derived.</div>
+        <button class="settings-btn" id="sp-derive-style">Analyze my writing style</button>
+      </div>
     </div>
 
-    <div class="settings-section">
-      <h3 class="settings-heading">Log Level</h3>
-      <select id="sp-log-level" class="settings-select">
-        <option value="debug">Debug</option>
-        <option value="info" selected>Info</option>
-        <option value="warn">Warn</option>
-        <option value="error">Error only</option>
-        <option value="off">Off</option>
-      </select>
+    <!-- Block Rules tab -->
+    <div class="settings-tab-content" id="tab-rules">
+      <div class="settings-section">
+        <h3 class="settings-heading">Block Rules</h3>
+        <div class="settings-info">Auto-archive or hide profiles based on patterns.</div>
+        <div id="sp-rule-list"></div>
+        <div style="margin-top:6px">
+          <select id="sp-rule-type" class="settings-select" style="width:auto;display:inline-block">
+            <option value="ignored_count">Ignored count</option>
+            <option value="no_response_days">No response (days)</option>
+            <option value="deleted_chat">Deleted chat count</option>
+            <option value="keyword">Keyword match</option>
+          </select>
+          <input type="number" id="sp-rule-threshold" value="3" class="settings-num">
+          <input type="text" id="sp-rule-keywords" class="settings-input" placeholder="Keywords (comma-sep)" style="display:none">
+          <select id="sp-rule-action" class="settings-select" style="width:auto;display:inline-block">
+            <option value="archive">Archive</option>
+            <option value="hide">Hide</option>
+            <option value="block">Block</option>
+          </select>
+          <button class="settings-btn" id="sp-add-rule">Add Rule</button>
+        </div>
+      </div>
     </div>
 
-    <div class="settings-section">
-      <h3 class="settings-heading">Data</h3>
-      <button class="settings-btn" id="sp-clear-all" style="border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.1);color:#f87171">Clear all messages &amp; data</button>
-      <div id="sp-clear-status" class="settings-status"></div>
+    <!-- Pictures tab -->
+    <div class="settings-tab-content" id="tab-pictures">
+      <div class="settings-section">
+        <h3 class="settings-heading">Picture Library</h3>
+        <div class="settings-info">Upload pictures to send in conversations.</div>
+        <div style="display:flex;gap:6px;margin:6px 0">
+          <select id="sp-pic-tag" class="settings-select" style="width:auto;flex:0 0 70px">
+            <option value="face">Face</option><option value="body">Body</option>
+            <option value="explicit">Explicit</option><option value="other">Other</option>
+          </select>
+          <input type="text" id="sp-pic-label" class="settings-input" placeholder="Label..." style="flex:1;margin:0">
+          <label class="settings-btn" style="cursor:pointer;margin:0">Upload<input type="file" id="sp-pic-upload" accept="image/*" style="display:none"></label>
+        </div>
+        <div id="sp-pic-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px"></div>
+      </div>
     </div>
 
-    <div class="settings-section">
-      <h3 class="settings-heading">Developer</h3>
-      <button class="settings-btn" id="sp-toggle-devlog">Show activity log</button>
-      <div id="sp-devlog" style="display:none;max-height:200px;overflow-y:auto;font-family:monospace;font-size:9px;color:#6b7280;margin-top:6px;background:rgba(0,0,0,0.3);border-radius:6px;padding:6px"></div>
+    <!-- Sync tab -->
+    <div class="settings-tab-content" id="tab-sync">
+      <div class="settings-section">
+        <h3 class="settings-heading">Sync</h3>
+        <button class="settings-btn" id="sp-sync-pics">Sync Profile Pictures</button>
+        <div id="sp-sync-status" class="settings-info" style="margin-top:4px"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Google Calendar</h3>
+        <button class="settings-btn" id="sp-cal-connect">Connect Google Calendar</button>
+        <div id="sp-cal-status" class="settings-info" style="margin-top:4px"></div>
+        <div id="sp-cal-fields" style="display:none;margin-top:6px">
+          <label class="settings-label">Prep time (min): <input type="number" id="sp-cal-prep" value="30" class="settings-num"></label>
+          <label class="settings-label">Travel time (min): <input type="number" id="sp-cal-travel" value="15" class="settings-num"></label>
+          <button class="settings-btn" id="sp-cal-save">Save Calendar Settings</button>
+        </div>
+      </div>
     </div>
 
-    <div class="settings-section">
-      <button class="settings-btn" id="sp-open-full-settings">Open full settings page</button>
+    <!-- Data tab -->
+    <div class="settings-tab-content" id="tab-data">
+      <div class="settings-section">
+        <h3 class="settings-heading">Log Level</h3>
+        <select id="sp-log-level" class="settings-select">
+          <option value="debug">Debug</option><option value="info" selected>Info</option>
+          <option value="warn">Warn</option><option value="error">Error only</option><option value="off">Off</option>
+        </select>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Data</h3>
+        <button class="settings-btn" id="sp-clear-all" style="border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.1);color:#f87171">Clear all messages &amp; data</button>
+        <div id="sp-clear-status" class="settings-status"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Developer</h3>
+        <button class="settings-btn" id="sp-toggle-devlog">Show activity log</button>
+        <div id="sp-devlog" style="display:none;max-height:200px;overflow-y:auto;font-family:monospace;font-size:9px;color:#6b7280;margin-top:6px;background:rgba(0,0,0,0.3);border-radius:6px;padding:6px"></div>
+      </div>
     </div>
   </div>
 

@@ -6,7 +6,19 @@ body {
 }
 
 /* ── Settings panel (inline) ── */
-.settings-panel { flex: 1; overflow-y: auto; padding: 12px; }
+.settings-panel { flex: 1; overflow-y: auto; padding: 0; display: flex; flex-direction: column; }
+.settings-tabs {
+  display: flex; gap: 0; border-bottom: 1px solid rgba(255,255,255,0.1);
+  flex-shrink: 0; overflow-x: auto; padding: 0 8px;
+}
+.settings-tab {
+  padding: 8px 10px; font-size: 11px; font-weight: 500; color: #6b7280;
+  cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap;
+}
+.settings-tab:hover { color: #d1d5db; }
+.settings-tab.active { color: #93c5fd; border-bottom-color: #3b82f6; }
+.settings-tab-content { display: none; flex: 1; overflow-y: auto; padding: 10px 12px; }
+.settings-tab-content.active { display: block; }
 .settings-section { margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.06); }
 .settings-heading { font-size: 12px; font-weight: 600; color: #93c5fd; margin-bottom: 6px; }
 .settings-select, .settings-input {

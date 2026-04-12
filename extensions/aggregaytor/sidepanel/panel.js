@@ -1679,8 +1679,174 @@ document.getElementById('sp-log-level').addEventListener('change', (e) => {
   chrome.runtime.sendMessage({ type: 'SET_LOG_LEVEL', level: e.target.value }).catch(() => {});
 });
 
-document.getElementById('sp-open-full-settings').addEventListener('click', () => {
-  chrome.tabs.create({ url: chrome.runtime.getURL('popup/popup.html') });
+// Tab switching
+document.querySelectorAll('.settings-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.settings-tab-content').forEach(c => c.classList.remove('active'));
+    tab.classList.add('active');
+    const target = document.getElementById(tab.dataset.tab);
+    if (target) target.classList.add('active');
+    // Load tab-specific data
+    if (tab.dataset.tab === 'tab-rules') loadBlockRules();
+    if (tab.dataset.tab === 'tab-pictures') loadPictures();
+    if (tab.dataset.tab === 'tab-sync') loadCalendarStatus();
+    if (tab.dataset.tab === 'tab-personality') loadStyleGuide();
+  });
+});
+
+// Style guide
+async function loadStyleGuide() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_PERSONALITY' });
+    if (res?.ok) document.getElementById('sp-style-guide').textContent = res.personality.styleGuide || 'Not yet derived.';
+  } catch {}
+}
+document.getElementById('sp-derive-style')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-derive-style');
+  btn.textContent = 'Analyzing...'; btn.disabled = true;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'DERIVE_STYLE_GUIDE' });
+    if (res?.ok) document.getElementById('sp-style-guide').textContent = res.styleGuide;
+  } catch {}
+  btn.textContent = 'Analyze my writing style'; btn.disabled = false;
+});
+
+// Block rules
+async function loadBlockRules() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_ALL_BLOCK_RULES' });
+    const list = document.getElementById('sp-rule-list');
+    if (!res?.ok || !res.rules?.length) { list.innerHTML = '<div class="settings-info">No rules yet.</div>'; return; }
+    list.innerHTML = res.rules.map(r => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:11px">
+        <span>${esc(r.name)} ${r.enabled ? '' : '(off)'}</span>
+        <span style="color:#6b7280;font-size:10px">${r.executedCount}x</span>
+        <div style="display:flex;gap:4px">
+          <button class="settings-btn" data-toggle-rule="${r._id}" data-enabled="${!r.enabled}">${r.enabled ? 'Off' : 'On'}</button>
+          <button class="settings-btn" style="border-color:rgba(239,68,68,0.3);color:#f87171" data-delete-rule="${r._id}">✕</button>
+        </div>
+      </div>
+    `).join('');
+    list.querySelectorAll('[data-toggle-rule]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        await chrome.runtime.sendMessage({ type: 'UPDATE_BLOCK_RULE', id: btn.dataset.toggleRule, updates: { enabled: btn.dataset.enabled === 'true' } });
+        loadBlockRules();
+      });
+    });
+    list.querySelectorAll('[data-delete-rule]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        await chrome.runtime.sendMessage({ type: 'DELETE_BLOCK_RULE', id: btn.dataset.deleteRule });
+        loadBlockRules();
+      });
+    });
+  } catch {}
+}
+document.getElementById('sp-rule-type')?.addEventListener('change', (e) => {
+  document.getElementById('sp-rule-keywords').style.display = e.target.value === 'keyword' ? '' : 'none';
+});
+document.getElementById('sp-add-rule')?.addEventListener('click', async () => {
+  const type = document.getElementById('sp-rule-type').value;
+  const threshold = parseInt(document.getElementById('sp-rule-threshold').value) || 3;
+  const keywords = (document.getElementById('sp-rule-keywords').value || '').split(',').map(k => k.trim()).filter(Boolean);
+  const action = document.getElementById('sp-rule-action').value;
+  const condition = { type };
+  if (type === 'keyword') condition.keywords = keywords;
+  else if (type === 'no_response_days') condition.days = threshold;
+  else condition.threshold = threshold;
+  const names = { ignored_count: `Ignored ${threshold}x`, no_response_days: `No reply ${threshold}d`, deleted_chat: `Deleted ${threshold}x`, keyword: `Keyword: ${keywords.slice(0,2).join(', ')}` };
+  await chrome.runtime.sendMessage({ type: 'CREATE_BLOCK_RULE', input: { name: names[type] || type, condition, action } });
+  loadBlockRules();
+});
+
+// Pictures
+async function loadPictures() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_ALL_PICTURES' });
+    const grid = document.getElementById('sp-pic-grid');
+    if (!res?.ok || !res.pictures?.length) { grid.innerHTML = '<div class="settings-info">No pictures yet.</div>'; return; }
+    grid.innerHTML = res.pictures.map(p => `
+      <div style="position:relative;aspect-ratio:1;border-radius:6px;overflow:hidden;background:rgba(255,255,255,0.05)">
+        ${p.thumbnail ? `<img src="${p.thumbnail}" style="width:100%;height:100%;object-fit:cover" alt="">` : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#6b7280">${p.tag}</div>`}
+        <span style="position:absolute;top:2px;left:2px;font-size:8px;padding:1px 4px;border-radius:3px;background:rgba(59,130,246,0.5);color:white">${p.tag}</span>
+        <span style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.7);font-size:8px;padding:1px 3px;color:#9ca3af">${p.sentCount}s ${p.responseCount}r ${p.likeCount}l</span>
+        <button style="position:absolute;top:2px;right:2px;background:rgba(239,68,68,0.7);border:none;color:white;width:14px;height:14px;border-radius:50%;font-size:9px;cursor:pointer;display:none" data-del-pic="${p._id}">&times;</button>
+      </div>
+    `).join('');
+    grid.querySelectorAll('[data-del-pic]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        await chrome.runtime.sendMessage({ type: 'DELETE_PICTURE', id: btn.dataset.delPic });
+        loadPictures();
+      });
+    });
+  } catch {}
+}
+document.getElementById('sp-pic-upload')?.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const tag = document.getElementById('sp-pic-tag').value;
+  const label = document.getElementById('sp-pic-label').value.trim() || file.name;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const dataUrl = reader.result;
+    const img = new Image();
+    img.onload = async () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 200;
+      const ctx = canvas.getContext('2d');
+      const scale = Math.max(200 / img.width, 200 / img.height);
+      ctx.drawImage(img, (200 - img.width * scale) / 2, (200 - img.height * scale) / 2, img.width * scale, img.height * scale);
+      await chrome.runtime.sendMessage({ type: 'ADD_PICTURE', input: { tag, label, dataUrl, thumbnail: canvas.toDataURL('image/jpeg', 0.7) } });
+      document.getElementById('sp-pic-label').value = '';
+      e.target.value = '';
+      loadPictures();
+    };
+    img.src = dataUrl;
+  };
+  reader.readAsDataURL(file);
+});
+
+// Sync
+document.getElementById('sp-sync-pics')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-sync-pics');
+  const status = document.getElementById('sp-sync-status');
+  btn.textContent = 'Syncing...'; btn.disabled = true;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'SYNC_PROFILE_PICS' });
+    status.textContent = res?.count ? `Scraped ${res.count} from ${res.tabs} tab(s)` : 'No avatars found';
+  } catch { status.textContent = 'Failed'; }
+  btn.textContent = 'Sync Profile Pictures'; btn.disabled = false;
+});
+
+// Calendar
+async function loadCalendarStatus() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_CALENDAR_SETTINGS' });
+    if (res?.ok && res.settings?.enabled) {
+      document.getElementById('sp-cal-fields').style.display = '';
+      document.getElementById('sp-cal-prep').value = res.settings.prepTimeMinutes || 30;
+      document.getElementById('sp-cal-travel').value = res.settings.travelTimeMinutes || 15;
+      document.getElementById('sp-cal-status').textContent = 'Connected';
+      document.getElementById('sp-cal-status').style.color = '#34d399';
+    }
+  } catch {}
+}
+document.getElementById('sp-cal-connect')?.addEventListener('click', async () => {
+  const status = document.getElementById('sp-cal-status');
+  status.textContent = 'Connecting...';
+  const res = await chrome.runtime.sendMessage({ type: 'AUTHENTICATE_CALENDAR' });
+  if (res?.ok && res.success) {
+    status.textContent = 'Connected!'; status.style.color = '#34d399';
+    document.getElementById('sp-cal-fields').style.display = '';
+  } else {
+    status.textContent = 'Failed'; status.style.color = '#f87171';
+  }
+});
+document.getElementById('sp-cal-save')?.addEventListener('click', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_CALENDAR_SETTINGS',
+    settings: { enabled: true, prepTimeMinutes: parseInt(document.getElementById('sp-cal-prep').value) || 30, travelTimeMinutes: parseInt(document.getElementById('sp-cal-travel').value) || 15 },
+  });
 });
 
 // Clear all data — two-click confirmation (confirm() is blocked in side panels)
