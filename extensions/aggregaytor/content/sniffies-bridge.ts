@@ -191,7 +191,18 @@ try {
       bubbles.forEach((bubble, i) => {
         try {
           const text = bubble.textContent?.trim() || '';
-          if (!text || text.length < 2) return; // skip empty/whitespace-only bubbles
+          if (!text || text.length < 2) return;
+          // Reject UI metadata that Sniffies renders inline in chat view:
+          // relative timestamps ("19 days ago"), status labels ("Seen"),
+          // chat history headers, date separators
+          const lower = text.toLowerCase();
+          if (/^\d+\s+(second|minute|hour|day|week|month|year)s?\s*ago$/i.test(lower)) return;
+          if (/^(just now|seen|delivered|sent|read|today|yesterday)$/i.test(lower)) return;
+          if (/^(mon|tue|wed|thu|fri|sat|sun)/i.test(lower) && lower.length < 12) return;
+          if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2}$/i.test(lower)) return;
+          if (lower.includes('beginning of your chat history')) return;
+          // Rollup: timestamp + message text concatenated (starts with "N days ago" + has "Seen")
+          if (/^\d+\s+(day|hour|minute)s?\s+ago\s+/i.test(text) && text.length > 30) return;
 
           // Determine message direction by checking CSS classes for common
           // "sent" indicators. Sniffies typically styles outgoing messages with
