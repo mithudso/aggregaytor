@@ -253,6 +253,19 @@ async function handleMessage(msg: any): Promise<any> {
       console.log(`${LOG} Block detected: ${msg.contactId}`);
       await upsertThreadMeta(msg.contactId, msg.platform, { blockedByThem: true, archived: true });
       chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform: msg.platform, count: 0 }).catch(() => {})
+      // Immediate preference training — blocking is a strong negative signal
+      try {
+        const contact = await getContact(`contact:${msg.contactId}`);
+        const md = contact?.metadata || {};
+        await recordFeedback(msg.contactId, msg.platform as Platform, false, {
+          bodyType: String(md.bodyType || ''), position: String(md.position || ''),
+          age: String(md.age || ''), ethnicity: String(md.ethnicity || ''),
+          height: String(md.height || ''), profileTextLength: 0, profileTextKeywords: [],
+          hasPhoto: contact?.avatarUrl ? 1 : 0, photoCount: 0,
+          distance: String(md.distance || ''), conversationLength: 0, responseRate: 0,
+        });
+        autoTrainedSet.add(msg.contactId);
+      } catch {}
       return { ok: true };
     }
     case 'ACTIVE_PROFILE_CHANGED': {
@@ -661,7 +674,28 @@ async function handleMessage(msg: any): Promise<any> {
     // ── Profile Rating ─────────────────────────────────────────────────────
     case 'SET_RATING': {
       const meta = await upsertThreadMeta(msg.contactId, msg.platform, { rating: msg.rating });
+      // Immediate preference training — high/low ratings are strong signals
+      if (msg.rating >= 4 || msg.rating <= 2) {
+        try {
+          const contact = await getContact(`contact:${msg.contactId}`);
+          const md = contact?.metadata || {};
+          await recordFeedback(msg.contactId, msg.platform as Platform, msg.rating >= 4, {
+            bodyType: String(md.bodyType || ''), position: String(md.position || ''),
+            age: String(md.age || ''), ethnicity: String(md.ethnicity || ''),
+            height: String(md.height || ''), profileTextLength: 0, profileTextKeywords: [],
+            hasPhoto: contact?.avatarUrl ? 1 : 0, photoCount: 0,
+            distance: String(md.distance || ''), conversationLength: 0, responseRate: 0,
+          });
+          autoTrainedSet.add(msg.contactId);
+        } catch {}
+      }
       return { ok: true, meta };
+    }
+    case 'AUTO_TRAIN_NOW': {
+      try {
+        const result = await autoTrainFromSignals();
+        return { ok: true, ...result };
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
     }
     case 'CAPTURE_QUICK_PHRASE': {
       // Save captured text as a quick phrase in chrome.storage
@@ -1032,6 +1066,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'badge-refresh') await updateBadgeCount().catch(() => {});
   if (alarm.name === 'auto-respond-check') await processAutoResponds().catch(e => console.error(`${LOG} AR error:`, e));
   if (alarm.name === 'reminder-check') await processReminders().catch(e => console.error(`${LOG} Reminder error:`, e));
+  if (alarm.name === 'preference-auto-train') await autoTrainFromSignals().catch(e => console.warn(`${LOG} Auto-train error:`, e));
   if (alarm.name === 'task-sync') {
     // Auto-sync tasks with Google Tasks every 5 minutes (only if authenticated)
     try {
@@ -1173,6 +1208,80 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
       break;
   }
 });
+
+// ── Auto-Train Preference Model from Platform Signals ──────────────────────
+// Scans thread metadata for signals (pins, favorites, blocks, ratings) and
+// feeds them to the ML preference model as training data.
+
+const autoTrainedSet = new Set<string>(); // contacts already auto-trained this session
+
+async function autoTrainFromSignals(): Promise<{ trained: number }> {
+  const enabledData = await chrome.storage.local.get('aggregaytor_auto_train_preferences');
+  if (enabledData.aggregaytor_auto_train_preferences === false) return { trained: 0 };
+
+  let trained = 0;
+  try {
+    const allMeta = await getAllThreadMeta();
+    const { getAllContacts } = await import('@aggregaytor/store');
+    const allContacts = await getAllContacts();
+    const contactMap = new Map(allContacts.map((c: any) => [c._id?.replace('contact:', '') || '', c]));
+
+    for (const meta of allMeta) {
+      const contactId = meta._id?.replace('meta:', '') || meta.contactId || '';
+      if (!contactId || autoTrainedSet.has(contactId)) continue;
+      if (contactId.endsWith(':global-chat')) continue;
+
+      // Determine signal
+      let liked: boolean | null = null;
+      if (meta.bookmarked || meta.favorited) liked = true;
+      if (meta.rating && meta.rating >= 4) liked = true;
+      if (meta.rating && meta.rating <= 2) liked = false;
+      if (meta.blockedByThem || meta.archived) liked = false; // they blocked us or we archived
+
+      if (liked === null) continue; // no signal for this contact
+
+      // Get contact data for features
+      const contact = contactMap.get(contactId);
+      const md = contact?.metadata || {};
+      const platform = (meta.platform || contactId.split(':')[0] || 'sniffies') as Platform;
+
+      const features: ProfileFeatures = {
+        bodyType: String(md.bodyType || md.body || ''),
+        position: String(md.position || md.attitude || ''),
+        age: String(md.age || ''),
+        ethnicity: String(md.ethnicity || ''),
+        height: String(md.height || ''),
+        profileTextLength: String(md.profileText || '').length,
+        profileTextKeywords: [],
+        hasPhoto: contact?.avatarUrl ? 1 : 0,
+        photoCount: 0,
+        distance: String(md.distance || ''),
+        conversationLength: 0,
+        responseRate: 0,
+      };
+
+      // Check for Sniffies-specific signals
+      if (md.isPinned) liked = true;
+      // Check for Grindr-specific signals
+      if (md.isFavorite) liked = true;
+      if (md.isBlocked) liked = false;
+
+      await recordFeedback(contactId, platform, liked!, features);
+      autoTrainedSet.add(contactId);
+      trained++;
+    }
+
+    if (trained > 0) {
+      console.log(`${LOG} Auto-trained preference model with ${trained} new signals`);
+    }
+  } catch (err) {
+    console.warn(`${LOG} Auto-train error:`, err);
+  }
+  return { trained };
+}
+
+// Run auto-training every 30 minutes
+chrome.alarms.create('preference-auto-train', { periodInMinutes: 30 });
 
 // ── Open all sites ──────────────────────────────────────────────────────────
 

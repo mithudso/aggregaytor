@@ -145,13 +145,20 @@ export class GrindrAdapter extends BaseAdapter {
             const k = key.toLowerCase();
             if (typeof value === 'string' && value.length < 100) {
               if (/bodytype|build/.test(k)) md.bodyType = value;
-              if (/position|tribe/.test(k)) md.position = value;
+              if (/position|tribe|sexualposition/.test(k)) md.position = value;
               if (k === 'age' || k === 'showage') md.age = value;
               if (/ethnicity/.test(k)) md.ethnicity = value;
               if (/height/.test(k)) md.height = value;
-              if (/distance/.test(k)) md.distance = value;
+              if (/weight/.test(k)) md.weight = value;
+              if (/distance|approximatedistance/.test(k)) md.distance = value;
+              if (/aboutme|bio/.test(k)) md.profileText = value;
+              if (/lookingfor/.test(k)) md.lookingFor = value;
             }
           }
+          // Capture preference signals for auto-training
+          if (obj.isFavorite === true) md.isFavorite = true;
+          if (obj.isBlocked === true || obj.isHidden === true) md.isBlocked = true;
+          if (obj.isBoosting === true) md.isBoosting = true;
           contacts.push({
             id: `grindr:${profileId}`,
             platform: 'grindr',

@@ -1941,6 +1941,7 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     if (tab.dataset.tab === 'tab-rules') loadBlockRules();
     if (tab.dataset.tab === 'tab-pictures') loadPictures();
     if (tab.dataset.tab === 'tab-map') { loadMapFilterSettings(); loadGrindrFilterSettings(); }
+    if (tab.dataset.tab === 'tab-ai') loadModelStats();
     if (tab.dataset.tab === 'tab-data') loadTextExpansions();
     if (tab.dataset.tab === 'tab-sync') { loadCalendarStatus(); checkGoogleAuth(); }
     if (tab.dataset.tab === 'tab-personality') loadStyleGuide();
@@ -2391,6 +2392,56 @@ document.getElementById('sp-broadcast-send')?.addEventListener('click', async ()
     } else { status.textContent = res?.error || 'Failed'; status.style.color = '#ef4444'; }
   } catch (err) { status.textContent = 'Error: ' + err.message; status.style.color = '#ef4444'; }
   btn.disabled = false; btn.textContent = 'Send Broadcast';
+});
+
+// ── Preference Auto-Training ─────────────────────────────────────────────────
+
+document.getElementById('sp-auto-train')?.addEventListener('change', (e) => {
+  chrome.storage.local.set({ aggregaytor_auto_train_preferences: e.target.checked });
+});
+
+document.getElementById('sp-train-now')?.addEventListener('click', async () => {
+  const status = document.getElementById('sp-train-status');
+  status.textContent = 'Training...';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'AUTO_TRAIN_NOW' });
+    if (res?.ok) {
+      status.textContent = `Trained on ${res.trained} new signals!`;
+      status.style.color = '#22c55e';
+      loadModelStats();
+    } else {
+      status.textContent = res?.error || 'Failed'; status.style.color = '#ef4444';
+    }
+  } catch (err) { status.textContent = 'Error: ' + err.message; status.style.color = '#ef4444'; }
+});
+
+document.getElementById('sp-retrain-model')?.addEventListener('click', async () => {
+  const status = document.getElementById('sp-train-status');
+  status.textContent = 'Retraining from scratch...';
+  try {
+    await chrome.runtime.sendMessage({ type: 'RETRAIN_MODEL' });
+    status.textContent = 'Model retrained!'; status.style.color = '#22c55e';
+    loadModelStats();
+  } catch (err) { status.textContent = 'Error: ' + err.message; }
+});
+
+async function loadModelStats() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_MODEL_STATS' });
+    const el = document.getElementById('sp-model-stats');
+    if (res?.ok && el) {
+      const s = res.stats;
+      const topFeatures = (s.topFeatures || []).slice(0, 5)
+        .map(f => `${f.feature}: ${f.weight > 0 ? '+' : ''}${f.weight.toFixed(2)}`).join(', ');
+      el.textContent = `${s.trainingCount} samples | ${Math.round(s.accuracy * 100)}% accuracy | Top: ${topFeatures || 'none yet'}`;
+    }
+  } catch {}
+}
+
+// Load auto-train preference and model stats
+chrome.storage.local.get('aggregaytor_auto_train_preferences', (data) => {
+  const el = document.getElementById('sp-auto-train');
+  if (el) el.checked = data.aggregaytor_auto_train_preferences !== false;
 });
 
 // ── Text Expansions ──────────────────────────────────────────────────────────

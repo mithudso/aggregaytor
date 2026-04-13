@@ -192,6 +192,19 @@
         <button class="settings-btn" id="sp-save-rate">Save Rate Settings</button>
         <div id="sp-queue-status" class="settings-info"></div>
       </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Preference Learning</h3>
+        <div class="settings-info">Auto-train from pins, favorites, blocks, and ratings. The model learns your type over time.</div>
+        <label class="settings-checkbox-label">
+          <input type="checkbox" id="sp-auto-train" checked> Auto-train from platform signals
+        </label>
+        <div class="settings-row" style="margin-top:4px">
+          <button class="settings-btn" id="sp-train-now" title="Scan all contacts and train the preference model from current signals">Train Now</button>
+          <button class="settings-btn" id="sp-retrain-model" title="Retrain the entire model from scratch using all recorded feedback">Full Retrain</button>
+        </div>
+        <div id="sp-train-status" class="settings-info" style="margin-top:4px"></div>
+        <div id="sp-model-stats" class="settings-info" style="margin-top:4px;font-size:10px;color:#6b7280"></div>
+      </div>
     </div>
 
     <!-- Personality tab -->
