@@ -1072,7 +1072,7 @@ function goBack() {
   currentThread = null; currentMessages = []; currentMeta = null;
   document.body.classList.remove('view-thread');
   document.body.classList.add('view-inbox');
-  document.getElementById('header-title').textContent = 'Aggregaytor';
+  document.getElementById('header-title').innerHTML = '<span class="version-tag">v0.54</span>';
   document.getElementById('suggestions').classList.remove('active');
   document.getElementById('notes-section').style.display = 'none';
   document.getElementById('reminder-section').style.display = 'none';
@@ -1775,7 +1775,7 @@ function closeSettings() {
   settingsOpen = false;
   document.body.classList.remove('view-settings');
   document.body.classList.add('view-inbox');
-  document.getElementById('header-title').textContent = 'Aggregaytor';
+  document.getElementById('header-title').innerHTML = '<span class="version-tag">v0.54</span>';
   document.getElementById('settings-panel').style.display = 'none';
   loadThreads();
 }
