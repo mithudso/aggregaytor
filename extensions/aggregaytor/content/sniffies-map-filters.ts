@@ -169,23 +169,37 @@ function injectStyles(): void {
 // ── Marker Scanning ────────────────────────────────────────────────────────
 
 function resolveMarkerRoot(el: HTMLElement): HTMLElement | null {
-  return el.closest('.maplibregl-marker') as HTMLElement || null;
+  return (el.closest('.maplibregl-marker') ||
+    el.closest('.marker-avatar') ||
+    el.closest('[data-testid="cv-marker"]') ||
+    el.closest('.marker-container')) as HTMLElement || null;
 }
 
 function extractIdFromElement(el: HTMLElement): string {
-  // Try background-image URL on the element or children
-  const targets = [el, ...el.querySelectorAll('.marker-avatar-image, [style*="sniffiesassets"]')];
+  // Try background-image URL on the element or children — check both
+  // inline style AND computed style (Sniffies may set it via CSS class)
+  const targets = [el, ...el.querySelectorAll('.marker-avatar-image, [style*="sniffiesassets"], [class*="avatar"], [class*="marker"]')];
   for (const target of targets) {
-    const bg = (target as HTMLElement).style?.backgroundImage || '';
+    // Check inline style first (faster)
+    let bg = (target as HTMLElement).style?.backgroundImage || '';
+    // Fall back to computed style if inline is empty
+    if (!bg || !bg.includes('sniffiesassets')) {
+      try { bg = getComputedStyle(target).backgroundImage || ''; } catch {}
+    }
     const match = bg.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
     if (match) return match[1].toLowerCase();
   }
-  // Try href
+  // Try href on any link in or near the element
   const link = el.querySelector('a[href*="/profile/"]') || el.closest('a[href*="/profile/"]');
   if (link) {
     const href = link.getAttribute('href') || '';
     const match = href.match(/\/profile\/([0-9a-f]{6,})/i);
     if (match) return match[1].toLowerCase();
+  }
+  // Try data attributes
+  for (const attr of ['data-profile-id', 'data-user-id', 'data-cruiser-id']) {
+    const val = el.getAttribute(attr) || el.querySelector(`[${attr}]`)?.getAttribute(attr) || '';
+    if (val && /^[0-9a-f]{6,}$/i.test(val)) return val.toLowerCase();
   }
   return '';
 }
@@ -420,10 +434,37 @@ function applyFilters(): void {
 // ── Click Handlers ─────────────────────────────────────────────────────────
 
 function setupClickHandlers(): void {
-  // Middle-click on map marker = quick hide
+  // Middle-click behavior:
+  // - On map marker → quick-hide the profile
+  // - In/near chat input → quick-send first available phrase
   document.addEventListener('mousedown', (e) => {
     if (e.button !== 1) return; // middle click only
-    const marker = resolveMarkerRoot(e.target as HTMLElement);
+
+    // Check if we're in a chat area (not on a map marker)
+    const target = e.target as HTMLElement;
+    const chatArea = target.closest('[class*="chat"], [class*="message"], [class*="conversation"]');
+    const marker = resolveMarkerRoot(target);
+
+    // If in a chat area and NOT on a marker → quick-send a phrase
+    if (chatArea && !marker) {
+      e.preventDefault();
+      // Get a quick phrase from localStorage
+      try {
+        const phrases = JSON.parse(localStorage.getItem('aggregaytor_quick_phrases') || '[]');
+        const subs = JSON.parse(localStorage.getItem('aggregaytor_text_substitutions') || '[]');
+        // Use first intro phrase, or first quick phrase, or first substitution
+        const phrase = (phrases[0]) || (subs[0]?.phrase) || '';
+        if (phrase) {
+          // Dispatch auto-send event (handled by sniffies.ts)
+          window.dispatchEvent(new CustomEvent('__aggregaytor_send_message', {
+            detail: { text: phrase },
+          }));
+        }
+      } catch {}
+      return;
+    }
+
+    // On map marker → quick-hide
     if (!marker) return;
     const id = extractIdFromElement(marker);
     if (!id) return;

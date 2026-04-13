@@ -851,6 +851,7 @@ body {
 .star-btn.active { color: #fbbf24; }
 .star-btn:hover { color: #f59e0b; }
 .meta-badge.rating { color: #fbbf24; font-size: 9px; letter-spacing: -1px; }
+.meta-badge.deleted { color: #ef4444; font-size: 9px; }
 
 /* ── Quick Phrase Panel ────────────────────────────────────────────────── */
 .phrase-btn {

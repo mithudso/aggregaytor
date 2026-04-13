@@ -246,6 +246,7 @@ function renderThreads(summaries) {
 
     let badges = '';
     if (meta.rating > 0) badges += '<span class="meta-badge rating">' + '★'.repeat(meta.rating) + '</span>';
+    if (meta.deletedChatCount > 0) badges += `<span class="meta-badge deleted" title="${meta.deletedChatCount} deleted messages">🗑${meta.deletedChatCount}</span>`;
     if (meta.bookmarked) badges += '<span class="meta-badge bookmarked">🔖</span>';
     if (meta.autoRespondEnabled) badges += '<span class="meta-badge autorespond">🤖</span>';
 
@@ -652,8 +653,9 @@ async function loadProfileInfo(contactId) {
       </div>
       ${pics.length > 1 ? `<div class="profile-pics">${pics.map(p => `<div class="profile-pic"><img src="${esc(p)}" alt=""></div>`).join('')}</div>` : ''}
       ${renderStarRating(contactId, contact?.platform || currentThread?.platform || '', meta.rating || 0)}
+      ${meta.deletedChatCount ? `<div style="font-size:10px;color:#ef4444;margin-top:4px">🗑 ${meta.deletedChatCount} deleted messages</div>` : ''}
       ${!avatar ? `<button class="sync-pic-btn" id="sync-this-pic">📷 Sync photos for this profile</button>` : ''}
-      ${meta.notes ? `<div style="font-size:11px;color:#9ca3af;margin-top:4px;border-top:1px solid rgba(255,255,255,0.06);padding-top:4px">${esc(meta.notes)}</div>` : ''}
+      ${meta.notes ? `<div style="font-size:11px;color:#9ca3af;margin-top:4px;border-top:1px solid rgba(255,255,255,0.06);padding-top:4px">📝 ${esc(meta.notes)}</div>` : ''}
     `;
 
     // Per-profile sync handler
