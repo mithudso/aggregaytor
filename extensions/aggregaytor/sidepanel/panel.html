@@ -296,6 +296,7 @@
       </div>
       <div class="settings-section">
         <button class="settings-btn" id="sp-map-save">Save Map Filters</button>
+        <button class="settings-btn" id="sp-map-undo-hide" style="margin-top:4px">Undo Last Hide</button>
         <button class="settings-btn" id="sp-map-clear-blocked" style="margin-top:4px;border-color:rgba(239,68,68,0.3);color:#f87171">Clear All Hidden Profiles</button>
         <div id="sp-map-status" class="settings-status"></div>
       </div>
@@ -305,9 +306,18 @@
     <div class="settings-tab-content" id="tab-sync">
       <div class="settings-section">
         <h3 class="settings-heading">Google Account</h3>
-        <div class="settings-info">Connect your Google account to enable Calendar, Tasks, and Gmail integration.</div>
+        <div class="settings-info">Connect your Google account to enable Calendar, Tasks, Drive backup, and Gmail integration.</div>
         <button class="settings-btn" id="sp-google-connect">Connect Google Account</button>
         <div id="sp-google-status" class="settings-info" style="margin-top:4px"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Google Drive Backup</h3>
+        <div class="settings-info">Back up all Aggregaytor data to Google Drive.</div>
+        <div class="settings-row">
+          <button class="settings-btn" id="sp-drive-backup">Backup to Drive</button>
+          <button class="settings-btn" id="sp-drive-restore">Restore from Drive</button>
+        </div>
+        <div id="sp-drive-status" class="settings-info" style="margin-top:4px"></div>
       </div>
       <div class="settings-section">
         <h3 class="settings-heading">Sync</h3>

@@ -2005,6 +2005,38 @@ async function checkGoogleAuth() {
   } catch {}
 }
 
+// Google Drive backup/restore
+document.getElementById('sp-drive-backup')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-drive-backup');
+  const status = document.getElementById('sp-drive-status');
+  btn.disabled = true; btn.textContent = 'Backing up...';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'DRIVE_BACKUP' });
+    if (res?.ok) {
+      status.textContent = 'Backup saved to Google Drive!'; status.style.color = '#22c55e';
+    } else {
+      status.textContent = res?.error || 'Backup failed'; status.style.color = '#ef4444';
+    }
+  } catch (err) { status.textContent = 'Error: ' + err.message; status.style.color = '#ef4444'; }
+  btn.disabled = false; btn.textContent = 'Backup to Drive';
+});
+
+document.getElementById('sp-drive-restore')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-drive-restore');
+  const status = document.getElementById('sp-drive-status');
+  btn.disabled = true; btn.textContent = 'Restoring...';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'DRIVE_RESTORE' });
+    if (res?.ok) {
+      status.textContent = `Restored ${res.imported || 0} items from Drive!`; status.style.color = '#22c55e';
+      loadThreads();
+    } else {
+      status.textContent = res?.error || 'Restore failed'; status.style.color = '#ef4444';
+    }
+  } catch (err) { status.textContent = 'Error: ' + err.message; status.style.color = '#ef4444'; }
+  btn.disabled = false; btn.textContent = 'Restore from Drive';
+});
+
 // Sync
 document.getElementById('sp-sync-pics')?.addEventListener('click', async () => {
   const btn = document.getElementById('sp-sync-pics');
@@ -2284,6 +2316,18 @@ document.getElementById('sp-map-save')?.addEventListener('click', () => {
   });
   const status = document.getElementById('sp-map-status');
   if (status) { status.textContent = 'Saved!'; status.style.color = '#22c55e'; }
+});
+
+document.getElementById('sp-map-undo-hide')?.addEventListener('click', () => {
+  chrome.tabs.query({}).then(tabs => {
+    for (const tab of tabs) {
+      if (tab.id && tab.url?.includes('sniffies.com')) {
+        chrome.tabs.sendMessage(tab.id, { type: 'UNDO_LAST_HIDE' }).catch(() => {});
+      }
+    }
+  });
+  const status = document.getElementById('sp-map-status');
+  if (status) { status.textContent = 'Last hide undone!'; status.style.color = '#22c55e'; }
 });
 
 document.getElementById('sp-map-clear-blocked')?.addEventListener('click', () => {

@@ -255,6 +255,27 @@ try {
     // Two-pronged approach: dispatch an event to MAIN world (in case the
     // adapter has additional scraping logic), AND scrape directly from
     // ISOLATED world since we have full DOM access here.
+    // ── Quick phrase capture via Alt+Shift+right-click ──────────────────
+    // When the user Alt+Shift+right-clicks in a chat, capture the selected
+    // text and add it as a quick phrase. Works on any platform page.
+    if (message.type === 'CAPTURE_PHRASE') {
+      // Already handled below in the contextmenu listener
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (message.type === 'UNDO_LAST_HIDE') {
+      // Relay to MAIN world's map filter undo function
+      window.dispatchEvent(new CustomEvent('__aggregaytor_undo_hide'));
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (message.type === 'SET_ATTITUDE_OVERRIDE') {
+      window.dispatchEvent(new CustomEvent('__aggregaytor_set_attitude', {
+        detail: { profileId: message.profileId, attitude: message.attitude },
+      }));
+      sendResponse({ ok: true });
+      return true;
+    }
     if (message.type === 'MAP_FILTER_SETTINGS') {
       // Relay map filter settings from the side panel to the MAIN world
       window.dispatchEvent(new CustomEvent('__aggregaytor_map_filter_settings', {
@@ -621,10 +642,33 @@ if (location.href.match(/sniffies\.com\/chat\/?$/i)) {
 // browser Back/Forward buttons. Polling is the only reliable way to detect
 // when the user clicks a profile or opens a conversation within the SPA.
 setInterval(checkUrlChange, 3000);
-// Also listen for popstate to catch browser Back/Forward navigation, which
-// DOES fire this event. This gives us instant detection for those cases
-// instead of waiting for the next poll cycle.
 window.addEventListener('popstate', checkUrlChange);
+
+// ── Quick Phrase Capture (Alt+Shift+Right-Click) ──────────────────────────
+// When the user Alt+Shift+right-clicks in a chat, capture selected text
+// as a quick phrase. This lets you quickly save commonly used phrases
+// by highlighting text in a conversation and Alt+Shift+right-clicking.
+document.addEventListener('contextmenu', (e) => {
+  if (!e.altKey || !e.shiftKey) return;
+  if (!contextValid || !checkContext()) return;
+
+  const selection = window.getSelection()?.toString().trim();
+  if (!selection || selection.length < 2) return;
+
+  e.preventDefault();
+  // Send the captured text to the service worker to save as a quick phrase
+  chrome.runtime.sendMessage({
+    type: 'CAPTURE_QUICK_PHRASE',
+    text: selection.slice(0, 200),
+  }).catch(() => {});
+
+  // Visual feedback
+  const toast = document.createElement('div');
+  toast.textContent = `Phrase saved: "${selection.slice(0, 40)}${selection.length > 40 ? '...' : ''}"`;
+  toast.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#1a1f2e;color:#93c5fd;padding:8px 16px;border-radius:8px;font-size:12px;z-index:99999;border:1px solid rgba(59,130,246,0.3);pointer-events:none;';
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 2000);
+}, true);
 
 // ── MAIN World Script Injection ─────────────────────────────────────────────
 // The last thing the bridge does is inject the MAIN world content script

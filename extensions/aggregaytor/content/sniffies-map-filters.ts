@@ -72,9 +72,13 @@ const BLOCKED_KEY = 'aggregaytor_map_blocked';
 
 const idToMarker = new Map<string, HTMLElement>();
 const markerAttitudes = new Map<string, string>();
+const manualAttitudes = new Map<string, string>(); // user-corrected attitudes
 const markerProfileText = new Map<string, string>();
 const chatTimestamps = new Map<string, number>(); // profileId → last chat ms
+const chatPreviews = new Map<string, Array<{ dir: string; text: string; ts: number }>>(); // recent messages
 const badgeElements = new Map<string, HTMLElement>(); // profileId → badge div
+const hideHistory: string[] = []; // stack of recently hidden IDs for undo
+const hoverBound = new WeakSet<HTMLElement>(); // prevent duplicate hover listeners
 
 let settings: MapFilterSettings = {
   hideBottom: false, hideVersBottom: false, hideVers: false,
@@ -132,6 +136,32 @@ function injectStyles(): void {
       z-index: 20;
       border: 1px solid rgba(59, 130, 246, 0.3);
     }
+    .aggregaytor-chat-preview {
+      position: fixed;
+      z-index: 9999;
+      background: rgba(15, 20, 25, 0.95);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      border-radius: 8px;
+      padding: 8px 10px;
+      max-width: 280px;
+      max-height: 200px;
+      overflow-y: auto;
+      font-family: system-ui, sans-serif;
+      font-size: 11px;
+      color: #e7e9ea;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+      pointer-events: none;
+    }
+    .aggregaytor-chat-preview .cp-msg {
+      padding: 3px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .aggregaytor-chat-preview .cp-msg:last-child { border-bottom: none; }
+    .aggregaytor-chat-preview .cp-dir { font-weight: 600; margin-right: 4px; }
+    .aggregaytor-chat-preview .cp-dir.out { color: #6b7280; }
+    .aggregaytor-chat-preview .cp-dir.in { color: #3b82f6; }
+    .aggregaytor-chat-preview .cp-time { color: #4b5563; font-size: 9px; float: right; }
+    .aggregaytor-chat-preview .cp-empty { color: #4b5563; font-style: italic; }
   `;
   (document.head || document.documentElement).appendChild(style);
 }
@@ -263,6 +293,70 @@ function updateBadge(id: string, marker: HTMLElement): void {
   badge.style.display = '';
 }
 
+// ── Chat Preview Popup ─────────────────────────────────────────────────────
+
+let previewEl: HTMLElement | null = null;
+
+function showChatPreview(id: string, marker: HTMLElement): void {
+  hideChatPreview();
+  const messages = chatPreviews.get(id);
+  if (!messages || !messages.length) return;
+
+  previewEl = document.createElement('div');
+  previewEl.className = 'aggregaytor-chat-preview';
+
+  const sorted = [...messages].sort((a, b) => b.ts - a.ts).slice(0, 8);
+  previewEl.innerHTML = sorted.map(m => {
+    const dir = m.dir === 'out' ? '→' : '←';
+    const cls = m.dir === 'out' ? 'out' : 'in';
+    const age = formatAge(Date.now() - m.ts);
+    return `<div class="cp-msg"><span class="cp-dir ${cls}">${dir}</span>${escapeHtml(m.text.slice(0, 80))}${m.text.length > 80 ? '...' : ''}<span class="cp-time">${age}</span></div>`;
+  }).join('');
+
+  // Position near the marker
+  const rect = marker.getBoundingClientRect();
+  previewEl.style.left = `${Math.min(rect.right + 8, window.innerWidth - 290)}px`;
+  previewEl.style.top = `${Math.max(8, rect.top - 40)}px`;
+  document.body.appendChild(previewEl);
+}
+
+function hideChatPreview(): void {
+  if (previewEl) { previewEl.remove(); previewEl = null; }
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function ensureHoverBindings(id: string, marker: HTMLElement): void {
+  if (hoverBound.has(marker)) return;
+  hoverBound.add(marker);
+  marker.addEventListener('mouseenter', () => showChatPreview(id, marker), { passive: true });
+  marker.addEventListener('mouseleave', () => hideChatPreview(), { passive: true });
+}
+
+// ── Attitude Override ──────────────────────────────────────────────────────
+
+function getEffectiveAttitude(id: string): string {
+  // Manual override takes priority over adapter-detected attitude
+  return manualAttitudes.get(id) || markerAttitudes.get(id) || 'unspecified';
+}
+
+// ── Undo Last Hide ─────────────────────────────────────────────────────────
+
+function undoLastHide(): boolean {
+  const lastId = hideHistory.pop();
+  if (!lastId) return false;
+  settings.blockedIds.delete(lastId);
+  const marker = idToMarker.get(lastId);
+  if (marker) marker.classList.remove(HIDE_CLASS);
+  saveBlockedIds();
+  return true;
+}
+
+// Expose on window for bridge access
+(typeof window !== 'undefined' ? window : globalThis as any).__aggregaytor_undoLastHide = undoLastHide;
+
 // ── Main Filter Pass ───────────────────────────────────────────────────────
 
 function applyFilters(): void {
@@ -288,8 +382,8 @@ function applyFilters(): void {
       }
     }
 
-    // Priority 3: attitude hiding
-    const att = markerAttitudes.get(id) || 'unspecified';
+    // Priority 3: attitude hiding (uses manual override if set)
+    const att = getEffectiveAttitude(id);
     if (shouldHideAttitude(att)) {
       marker.classList.add(HIDE_CLASS);
       continue;
@@ -308,6 +402,9 @@ function applyFilters(): void {
 
     // Chat age badge
     updateBadge(id, marker);
+
+    // Hover preview bindings (chat preview popup)
+    ensureHoverBindings(id, marker);
   }
 }
 
@@ -325,7 +422,10 @@ function setupClickHandlers(): void {
     e.preventDefault();
     e.stopPropagation();
     settings.blockedIds.add(id);
+    hideHistory.push(id); // track for undo
+    if (hideHistory.length > 50) hideHistory.shift(); // cap history
     marker.classList.add(HIDE_CLASS);
+    hideChatPreview(); // dismiss any visible preview
     saveBlockedIds();
     // Notify bridge for aggregator tracking
     window.dispatchEvent(new CustomEvent('__aggregaytor_message', {
@@ -423,12 +523,38 @@ window.addEventListener('__aggregaytor_contact_data', ((event: CustomEvent) => {
   }
 }) as EventListener);
 
-// Chat timestamp updates from adapter messages
+// Chat timestamp + preview updates from adapter messages
 window.addEventListener('__aggregaytor_chat_timestamp', ((event: CustomEvent) => {
-  const { profileId, timestamp } = event.detail || {};
-  if (profileId && timestamp) {
-    chatTimestamps.set(profileId.toLowerCase(), timestamp);
+  const { profileId, timestamp, body, direction } = event.detail || {};
+  if (!profileId || !timestamp) return;
+  const id = profileId.toLowerCase();
+  chatTimestamps.set(id, timestamp);
+  // Also store message for chat preview popup
+  if (body) {
+    if (!chatPreviews.has(id)) chatPreviews.set(id, []);
+    const msgs = chatPreviews.get(id)!;
+    msgs.push({ dir: direction || 'in', text: String(body).slice(0, 100), ts: timestamp });
+    // Keep only last 20 messages per contact
+    if (msgs.length > 20) msgs.splice(0, msgs.length - 20);
   }
+}) as EventListener);
+
+// Undo last hide — triggered by bridge relay from side panel
+window.addEventListener('__aggregaytor_undo_hide', (() => {
+  const success = undoLastHide();
+  if (success) applyFilters();
+}) as EventListener);
+
+// Manual attitude override — set via side panel or bridge
+window.addEventListener('__aggregaytor_set_attitude', ((event: CustomEvent) => {
+  const { profileId, attitude } = event.detail || {};
+  if (!profileId || !attitude) return;
+  manualAttitudes.set(profileId.toLowerCase(), attitude);
+  // Persist
+  try {
+    localStorage.setItem('aggregaytor_manual_attitudes', JSON.stringify([...manualAttitudes.entries()]));
+  } catch {}
+  applyFilters();
 }) as EventListener);
 
 // ── Initialization ─────────────────────────────────────────────────────────
@@ -438,6 +564,17 @@ export function initMapFilters(): void {
   loadSettings();
   setupClickHandlers();
   filterEnabled = true;
+
+  // Load manual attitude overrides from localStorage
+  try {
+    const raw = localStorage.getItem('aggregaytor_manual_attitudes');
+    if (raw) {
+      const entries = JSON.parse(raw);
+      if (Array.isArray(entries)) {
+        for (const [k, v] of entries) manualAttitudes.set(k, v);
+      }
+    }
+  } catch {}
 
   // Start periodic scan
   setInterval(applyFilters, SCAN_INTERVAL_MS);

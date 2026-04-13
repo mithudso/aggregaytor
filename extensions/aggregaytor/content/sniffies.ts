@@ -73,12 +73,17 @@ adapter.on('messages', (event) => {
     platform: 'sniffies',
     payload: event.payload,
   });
-  // Relay chat timestamps to map filter module for chat age badges
+  // Relay chat timestamps + message body to map filter module for badges + preview
   for (const m of event.payload as any[]) {
     if (m.contactId && m.timestamp) {
       const profileId = m.contactId.replace('sniffies:', '');
       window.dispatchEvent(new CustomEvent('__aggregaytor_chat_timestamp', {
-        detail: { profileId, timestamp: new Date(m.timestamp).getTime() },
+        detail: {
+          profileId,
+          timestamp: new Date(m.timestamp).getTime(),
+          body: m.body,
+          direction: m.direction,
+        },
       }));
     }
   }

@@ -646,6 +646,37 @@ async function handleMessage(msg: any): Promise<any> {
       const meta = await upsertThreadMeta(msg.contactId, msg.platform, { rating: msg.rating });
       return { ok: true, meta };
     }
+    case 'CAPTURE_QUICK_PHRASE': {
+      // Save captured text as a quick phrase in chrome.storage
+      const data = await chrome.storage.local.get('aggregaytor_quick_phrases');
+      const phrases: string[] = data.aggregaytor_quick_phrases || [];
+      if (msg.text && !phrases.includes(msg.text)) {
+        phrases.push(msg.text);
+        await chrome.storage.local.set({ aggregaytor_quick_phrases: phrases });
+      }
+      return { ok: true, count: phrases.length };
+    }
+
+    // ── Google Drive Sync ──────────────────────────────────────────────────
+    case 'DRIVE_BACKUP': {
+      try {
+        const { backupToDrive } = await import('@aggregaytor/store');
+        return await backupToDrive();
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
+    case 'DRIVE_RESTORE': {
+      try {
+        invalidateThreadCache();
+        const { restoreFromDrive } = await import('@aggregaytor/store');
+        return await restoreFromDrive();
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
+    case 'DRIVE_STATUS': {
+      try {
+        const { getDriveBackupStatus } = await import('@aggregaytor/store');
+        return { ok: true, ...(await getDriveBackupStatus()) };
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
 
     // Debug commands (from MCP server or dev tools)
     case 'DEBUG_COMMAND': return { ok: true, result: await handleDebugCommand(msg.command, msg.params) };
