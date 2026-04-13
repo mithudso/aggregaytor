@@ -1371,11 +1371,20 @@ chrome.runtime.onMessage.addListener((message) => {
     if (message.contactId) {
       chrome.runtime.sendMessage({ type: 'MARK_THREAD_READ', threadId: message.contactId }).catch(() => {});
     }
-    if (document.body.classList.contains('view-inbox')) loadThreads();
-    setTimeout(() => {
-      const active = document.querySelector('.thread-item.active-on-site');
-      if (active) active.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }, 100);
+    // Auto-open the conversation in the side panel when the user opens
+    // a profile or chat on the platform site. This keeps the side panel
+    // in sync with what's on screen.
+    if (message.contactId && message.contactId !== 'sniffies:global-chat') {
+      const platform = message.platform || message.contactId.split(':')[0] || '';
+      const existingThread = currentThread?.contactId;
+      // Only auto-open if we're in inbox view OR viewing a different thread
+      if (!existingThread || existingThread !== message.contactId) {
+        openThread(message.contactId, platform, '');
+      }
+    } else {
+      // No specific profile — go back to inbox if we're in a thread
+      if (document.body.classList.contains('view-inbox')) loadThreads();
+    }
   }
   if (message.type === 'CONTACTS_UPDATED') {
     // Don't auto-refresh on every contact update — these fire constantly
