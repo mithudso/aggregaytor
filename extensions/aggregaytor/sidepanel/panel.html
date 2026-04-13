@@ -8,17 +8,17 @@
 </head>
 <body class="view-inbox">
   <div class="header">
-    <button class="header-back" id="back-btn">&larr; Back</button>
-    <h1 id="header-title" class="header-title-clickable"><span class="version-tag">v0.54</span></h1>
+    <button class="header-back" id="back-btn" title="Return to the inbox thread list">&larr; Back</button>
+    <h1 id="header-title"><span class="version-tag">v0.54</span></h1>
     <div id="header-actions" class="header-actions"></div>
     <span id="total-unread" class="unread-badge" style="display:none"></span>
-    <button class="header-settings" id="btn-show-floating" title="Show Quick Actions on page">⚡</button>
-    <button class="header-settings" id="btn-popout" title="Pop out to window / Pop back in">⧉</button>
-    <button class="header-settings" id="open-tasks" title="Tasks (Shift+T)">☑</button>
-    <button class="header-settings" id="btn-camera" title="Take a picture">📷</button>
-    <button class="header-settings" id="btn-gallery" title="Gallery">🖼</button>
-    <button class="header-settings" id="sync-pics-header" title="Sync profile pictures">🔄</button>
-    <button class="header-settings" id="open-settings" title="Settings">⚙</button>
+    <button class="header-settings" id="btn-show-floating" title="Show Quick Actions panel on the platform page — block, notes, rate, and send phrases directly on Sniffies/Grindr">⚡</button>
+    <button class="header-settings" id="btn-popout" title="Pop out this panel into its own window. Click again in the popup to close it and return to the side panel.">⧉</button>
+    <button class="header-settings" id="open-tasks" title="Open task list — create and manage to-do items linked to contacts. Syncs with Google Tasks. (Shift+T)">☑</button>
+    <button class="header-settings" id="btn-camera" title="Take a photo to add to your picture library">📷</button>
+    <button class="header-settings" id="btn-gallery" title="Open photo gallery — view all synced profile pictures and your own uploads">🖼</button>
+    <button class="header-settings" id="sync-pics-header" title="Sync profile pictures — scrape avatars from all open platform tabs and save to local cache">🔄</button>
+    <button class="header-settings" id="open-settings" title="Open settings — AI providers, personality, map filters, export/import, text expansions, and more">⚙</button>
   </div>
   <!-- Global search -->
   <div class="search-bar" id="search-bar" style="display:none">
@@ -30,14 +30,14 @@
   <!-- Global controls bar -->
   <div class="global-controls">
     <div class="platform-filters">
-      <span class="platform-chip active" data-platform="all">All</span>
-      <span class="platform-chip" data-platform="sniffies">Sniffies</span>
-      <span class="platform-chip" data-platform="grindr">Grindr</span>
-      <span class="platform-chip" data-platform="doublelist">DList</span>
-      <span class="platform-chip" data-platform="adam4adam">A4A</span>
-      <span class="platform-chip" data-platform="gmail">Gmail</span>
-      <span class="platform-chip" data-platform="yahoo">Yahoo</span>
-      <span class="platform-chip archive-chip" data-platform="archived">📦</span>
+      <span class="platform-chip active" data-platform="all" title="Show all platforms. Right-click to open all sites.">All</span>
+      <span class="platform-chip" data-platform="sniffies" title="Toggle Sniffies messages. Click multiple chips to combine. Right-click to open Sniffies.">Sniffies</span>
+      <span class="platform-chip" data-platform="grindr" title="Toggle Grindr messages. Right-click to open Grindr.">Grindr</span>
+      <span class="platform-chip" data-platform="doublelist" title="Toggle DoubleList messages. Right-click to open DoubleList.">DList</span>
+      <span class="platform-chip" data-platform="adam4adam" title="Toggle Adam4Adam messages. Right-click to open A4A.">A4A</span>
+      <span class="platform-chip" data-platform="gmail" title="Toggle Gmail messages. Right-click to open Gmail.">Gmail</span>
+      <span class="platform-chip" data-platform="yahoo" title="Toggle Yahoo Mail messages. Right-click to open Yahoo Mail.">Yahoo</span>
+      <span class="platform-chip archive-chip" data-platform="archived" title="Show archived/hidden conversations">📦</span>
     </div>
     <div class="controls-row">
       <div class="sort-control">
@@ -51,11 +51,11 @@
           <option value="name">Name</option>
         </select>
       </div>
-      <div class="filter-toggle-inline" id="filter-toggle">⫸ <span id="filter-count"></span></div>
-      <label class="fav-filter" title="Show favorites only">
+      <div class="filter-toggle-inline" id="filter-toggle" title="Toggle advanced filters — body type, position, distance, unread, bookmarked, and more">⫸ <span id="filter-count"></span></div>
+      <label class="fav-filter" title="Show only favorited/bookmarked contacts">
         <input type="checkbox" id="filter-favorites"> ⭐
       </label>
-      <label class="compact-toggle" title="Compact view">
+      <label class="compact-toggle" title="Toggle compact view — smaller thread items, less whitespace">
         <input type="checkbox" id="compact-mode"> ▤
       </label>
       <div class="global-ar">
@@ -517,13 +517,13 @@
   <div id="thread-detail" class="thread-detail">
     <!-- Thread toolbar -->
     <div class="thread-toolbar">
-      <button class="toolbar-btn" id="btn-resync" title="Re-fetch conversation from platform">↻ Resync</button>
-      <button class="toolbar-btn" id="btn-gallery" title="View photos">🖼 Photos</button>
-      <button class="toolbar-btn" id="btn-export" title="Export conversation">📋 Export</button>
-      <button class="toolbar-btn" id="btn-thread-search" title="Search this chat">🔍 Search</button>
-      <button class="toolbar-btn" id="btn-add-task" title="Create task for this contact (Shift+T)">☑ Task</button>
-      <button class="toolbar-btn" id="btn-archive-thread" title="Archive & hide profile">📦 Archive</button>
-      <button class="toolbar-btn danger" id="btn-clear-thread" title="Clear local message history">Clear</button>
+      <button class="toolbar-btn" id="btn-resync" title="Re-fetch this conversation from the platform — pulls in any messages the extension may have missed">↻ Resync</button>
+      <button class="toolbar-btn" id="btn-gallery" title="View all photos for this contact — profile pictures and any shared images">🖼 Photos</button>
+      <button class="toolbar-btn" id="btn-export" title="Copy this conversation to clipboard as plain text for sharing or saving">📋 Export</button>
+      <button class="toolbar-btn" id="btn-thread-search" title="Search within this conversation for specific words or phrases">🔍 Search</button>
+      <button class="toolbar-btn" id="btn-add-task" title="Create a to-do task linked to this contact (e.g. 'Follow up with...'). Keyboard: Shift+T">☑ Task</button>
+      <button class="toolbar-btn" id="btn-archive-thread" title="Archive this conversation — moves it to the 📦 Archive tab and hides from the main inbox">📦 Archive</button>
+      <button class="toolbar-btn danger" id="btn-clear-thread" title="Delete all locally stored messages for this conversation. Does NOT delete messages on the platform.">Clear</button>
     </div>
     <div class="thread-search-bar" id="thread-search-bar" style="display:none">
       <input type="text" id="thread-search-input" class="search-input" placeholder="Search this conversation...">
@@ -586,9 +586,9 @@
 
   <!-- Response bar -->
   <div class="response-bar">
-    <button class="phrase-btn" id="phrase-toggle" title="Quick phrases">💬</button>
-    <textarea id="response-input" rows="1" placeholder="Type a response..."></textarea>
-    <button class="suggest-btn" id="suggest-btn">Suggest</button>
+    <button class="phrase-btn" id="phrase-toggle" title="Quick phrases — click to show your saved phrases. Click any phrase to instantly send it.">💬</button>
+    <textarea id="response-input" rows="1" placeholder="Type a response..." title="Type a message to send on the platform. Text expansions work here (type a shortcut + space)."></textarea>
+    <button class="suggest-btn" id="suggest-btn" title="Generate AI-suggested responses based on the conversation context. Requires an LLM API key in Settings → AI.">Suggest</button>
   </div>
 
   <!-- Quick phrase floating panel (shown when 💬 is clicked in thread view) -->
