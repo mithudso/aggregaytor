@@ -6,7 +6,7 @@
  */
 
 let currentPlatform = 'all'; // legacy — still used for some checks
-let activePlatforms = new Set<string>(); // multi-select toggle: which platforms are shown
+let activePlatforms = new Set(); // multi-select toggle: which platforms are shown
 let currentThread = null;
 let currentMessages = [];
 
