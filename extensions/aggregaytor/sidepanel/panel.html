@@ -442,10 +442,14 @@
       </div>
       <div class="settings-section">
         <h3 class="settings-heading">Text Expansions</h3>
-        <div class="settings-info">Type a shortcut in any chat input followed by space to auto-expand. Format: <code>shortcut → phrase</code> (one per line).</div>
+        <div class="settings-info">Type a shortcut in any chat input followed by space to auto-expand. Auto-disabled on macOS (native Text Substitutions). Format: <code>shortcut → phrase</code> (one per line).</div>
+        <label class="settings-checkbox-label">
+          <input type="checkbox" id="sp-text-expander-enabled"> Enable text expander
+        </label>
         <textarea id="sp-text-expansions" class="settings-textarea" rows="8" placeholder="hg → Hey there. How's it going?&#10;yl → You looking?&#10;wt → What're you up to?"></textarea>
         <div class="settings-row" style="margin-top:4px">
           <button class="settings-btn" id="sp-save-expansions">Save Expansions</button>
+          <button class="settings-btn" id="sp-load-defaults">Load Defaults</button>
           <span id="sp-expansion-count" class="settings-info" style="margin-left:8px"></span>
         </div>
       </div>

@@ -198,6 +198,7 @@ window.addEventListener('__aggregaytor_text_expander_settings', ((event: CustomE
   }
   if (update?.enabled !== undefined) {
     expanderEnabled = !!update.enabled;
+    try { localStorage.setItem('aggregaytor_text_expander_enabled', String(expanderEnabled)); } catch {}
   }
 }) as EventListener);
 
@@ -218,8 +219,23 @@ export function initTextExpander(): void {
   }
   rebuildMap();
 
+  // Check user preference for enabled/disabled (persisted in localStorage)
+  try {
+    const enabledPref = localStorage.getItem('aggregaytor_text_expander_enabled');
+    if (enabledPref !== null) {
+      expanderEnabled = enabledPref === 'true';
+    } else {
+      // Auto-detect: disable on macOS since it has native Text Substitutions
+      const isMac = /Macintosh|Mac OS X/i.test(navigator.userAgent);
+      expanderEnabled = !isMac;
+      if (isMac) {
+        console.log(`[Aggregaytor:TextExpander] Auto-disabled on macOS (native Text Substitutions). Enable in Settings → Data.`);
+      }
+    }
+  } catch {}
+
+  console.log(`[Aggregaytor:TextExpander] ${expanderEnabled ? 'Active' : 'Disabled'} — ${substitutions.length} substitutions loaded`);
+
   // Listen for input events on the entire document (captures all inputs)
   document.addEventListener('input', handleInput, true);
-
-  console.log(`[Aggregaytor:TextExpander] Initialized with ${substitutions.length} substitutions`);
 }

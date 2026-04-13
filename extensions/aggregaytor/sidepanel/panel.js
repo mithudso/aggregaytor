@@ -2304,20 +2304,84 @@ document.getElementById('sp-broadcast-send')?.addEventListener('click', async ()
 // ── Text Expansions ──────────────────────────────────────────────────────────
 
 function loadTextExpansions() {
-  chrome.storage.local.get('aggregaytor_text_substitutions', (data) => {
+  chrome.storage.local.get(['aggregaytor_text_substitutions', 'aggregaytor_text_expander_enabled'], (data) => {
     let subs = data.aggregaytor_text_substitutions || [];
-    // If empty, the defaults are in the MAIN world text-expander.ts.
-    // Show count even if we don't have them in chrome.storage yet.
     const textarea = document.getElementById('sp-text-expansions');
     const count = document.getElementById('sp-expansion-count');
+    const enabledCb = document.getElementById('sp-text-expander-enabled');
+
+    // Show enabled state — default is auto-detected (disabled on macOS)
+    if (enabledCb) {
+      const isMac = /Macintosh|Mac OS X/i.test(navigator.userAgent);
+      const stored = data.aggregaytor_text_expander_enabled;
+      enabledCb.checked = stored !== undefined ? stored : !isMac;
+    }
+
     if (textarea && subs.length) {
       textarea.value = subs.map(s => `${s.shortcut} → ${s.phrase}`).join('\n');
-    } else if (textarea) {
-      textarea.placeholder = 'Defaults loaded from extension. Open Data tab to see them.\nhg → Hey there. How\'s it going?\nyl → You looking?\nwt → What\'re you up to?';
+      if (count) count.textContent = `${subs.length} expansions`;
+    } else {
+      // No saved expansions — load defaults into the textarea so user can see them
+      if (textarea) {
+        textarea.value = DEFAULT_TEXT_EXPANSIONS.map(s => `${s.shortcut} → ${s.phrase}`).join('\n');
+      }
+      if (count) count.textContent = `${DEFAULT_TEXT_EXPANSIONS.length} defaults (not yet saved)`;
     }
-    if (count) count.textContent = subs.length ? `${subs.length} expansions` : 'Using defaults (54 expansions)';
   });
 }
+
+// Default text expansions — shown when no saved expansions exist
+const DEFAULT_TEXT_EXPANSIONS = [
+  { shortcut: 'hg', phrase: "Hey there. How's it going?" },
+  { shortcut: 'ht', phrase: "Hey there. How's it going?" },
+  { shortcut: 'htw', phrase: "Hey there. How's it going? What're you up to? You looking?" },
+  { shortcut: 'hh', phrase: 'Howdy' },
+  { shortcut: 'dd', phrase: 'Doing alright.' },
+  { shortcut: 'ddt', phrase: "Doing alright. What're you up to? You looking?" },
+  { shortcut: 'wt', phrase: "What're you up to?" },
+  { shortcut: 'wtn', phrase: "What're you up to tonight?" },
+  { shortcut: 'wtt', phrase: "What're you up to today?" },
+  { shortcut: 'yl', phrase: 'You looking?' },
+  { shortcut: 'yln', phrase: 'You looking at all tonight?' },
+  { shortcut: 'ylt', phrase: 'You looking today?' },
+  { shortcut: 'ylb', phrase: 'You looking to breed?' },
+  { shortcut: 'ylbn', phrase: 'You looking to breed now?' },
+  { shortcut: 'wylf', phrase: "What're you looking for?" },
+  { shortcut: 'wylft', phrase: "What're you looking for tonight?" },
+  { shortcut: 'wyf', phrase: 'When are you free?' },
+  { shortcut: 'wbu', phrase: 'What about you?' },
+  { shortcut: 'wyd', phrase: "What're you doing?" },
+  { shortcut: 'ho', phrase: 'Host or travel?' },
+  { shortcut: 'whm', phrase: 'Woof! Hot man' },
+  { shortcut: 'omw', phrase: 'On my way!' },
+  { shortcut: 'ty', phrase: 'Thank you' },
+  { shortcut: 'sg', phrase: 'Sounds great.' },
+  { shortcut: 'gm', phrase: 'Good morning' },
+  { shortcut: 'wfh', phrase: 'Working from home.' },
+  { shortcut: 'zz', phrase: "Hey there, how's it going?" },
+];
+
+document.getElementById('sp-text-expander-enabled')?.addEventListener('change', (e) => {
+  const enabled = e.target.checked;
+  chrome.storage.local.set({ aggregaytor_text_expander_enabled: enabled });
+  // Relay to all tabs
+  chrome.tabs.query({}).then(tabs => {
+    for (const tab of tabs) {
+      if (!tab.id) continue;
+      chrome.tabs.sendMessage(tab.id, {
+        type: 'TEXT_EXPANDER_SETTINGS',
+        substitutions: null, // don't change subs, just toggle
+        enabled,
+      }).catch(() => {});
+    }
+  });
+});
+
+document.getElementById('sp-load-defaults')?.addEventListener('click', () => {
+  const textarea = document.getElementById('sp-text-expansions');
+  if (textarea) textarea.value = DEFAULT_TEXT_EXPANSIONS.map(s => `${s.shortcut} → ${s.phrase}`).join('\n');
+  document.getElementById('sp-expansion-count').textContent = `${DEFAULT_TEXT_EXPANSIONS.length} defaults loaded — click Save to apply`;
+});
 
 document.getElementById('sp-save-expansions')?.addEventListener('click', () => {
   const text = document.getElementById('sp-text-expansions').value;
