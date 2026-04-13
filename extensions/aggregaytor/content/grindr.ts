@@ -6,6 +6,7 @@
  */
 
 import { GrindrAdapter } from '@aggregaytor/adapter-grindr';
+import { getCapturedAuth } from '@aggregaytor/adapter-core';
 
 const LOG = '[Aggregaytor:Grindr]';
 
@@ -46,6 +47,48 @@ adapter.init().then(() => {
 }).catch((err) => {
   console.error(`${LOG} Adapter init failed:`, err);
 });
+
+// ── Block/Hide Profile Handler ──────────────────────────────────────────────
+// Middle-click on a profile triggers this via the bridge. Uses the captured
+// Grindr auth token (from intercepted API calls) to call the block API,
+// falling back to the hide API if blocking fails.
+window.addEventListener('__aggregaytor_block_profile', ((event: CustomEvent) => {
+  const { profileId } = event.detail || {};
+  if (!profileId) return;
+  console.log(`${LOG} Blocking profile: ${profileId}`);
+
+  const auth = getCapturedAuth('grindr.com');
+  if (!auth) {
+    console.warn(`${LOG} No captured auth for Grindr — browse a bit first to capture the JWT`);
+    return;
+  }
+
+  // Try block API first (POST /v3/me/blocks/{profileId}),
+  // fall back to hide (POST /v1/hides/{profileId})
+  fetch(`https://web.grindr.com/v3/me/blocks/${profileId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...auth },
+    body: JSON.stringify({}),
+  }).then(async (res) => {
+    if (res.ok) {
+      console.log(`${LOG} Block success for ${profileId}`);
+      sendToBridge({ type: 'PROFILE_BLOCKED', contactId: `grindr:${profileId}`, platform: 'grindr' });
+      return;
+    }
+    console.warn(`${LOG} Block failed (${res.status}), trying hide API...`);
+    const hideRes = await fetch(`https://web.grindr.com/v1/hides/${profileId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...auth },
+      body: JSON.stringify({}),
+    });
+    if (hideRes.ok) {
+      console.log(`${LOG} Hide success for ${profileId}`);
+      sendToBridge({ type: 'PROFILE_BLOCKED', contactId: `grindr:${profileId}`, platform: 'grindr' });
+    } else {
+      console.warn(`${LOG} Hide also failed (${hideRes.status})`);
+    }
+  }).catch(err => console.warn(`${LOG} Block/hide error:`, err));
+}) as EventListener);
 
 // Auto-send handler
 window.addEventListener('__aggregaytor_send_message', ((event: CustomEvent) => {
