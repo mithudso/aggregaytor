@@ -67,6 +67,34 @@ export class GrindrAdapter extends BaseAdapter {
       onObject: (obj, _ctx, _depth) => {
         this.selfIds.detectFromPayload(obj);
 
+        // Index profileId ↔ photoMediaHashes for middle-click block lookup.
+        // This runs inside the adapter's fetch interceptor which is installed
+        // BEFORE the page's own fetch, so it catches cascade API responses
+        // that the grindr.ts interceptor might miss.
+        const pid = String(obj.profileId || '');
+        if (pid && /^\d+$/.test(pid)) {
+          const w = (typeof window !== 'undefined' ? window : globalThis) as any;
+          if (!w.__grindr_hash_map) w.__grindr_hash_map = new Map();
+          // Index photoMediaHashes (cascade API format)
+          const pmh = obj.photoMediaHashes;
+          if (Array.isArray(pmh)) {
+            for (const h of pmh) {
+              if (typeof h === 'string' && h.length > 10) w.__grindr_hash_map.set(h, pid);
+            }
+          }
+          // Index profileImageMediaHash (individual profile API format)
+          const pimh = String(obj.profileImageMediaHash || '');
+          if (pimh && pimh.length > 10) w.__grindr_hash_map.set(pimh, pid);
+          // Index medias[].mediaHash
+          const medias = obj.medias;
+          if (Array.isArray(medias)) {
+            for (const m of medias) {
+              const mh = String((m as any)?.mediaHash || '');
+              if (mh && mh.length > 10) w.__grindr_hash_map.set(mh, pid);
+            }
+          }
+        }
+
         const body = extractBody(obj);
         const conversationId = String(obj.conversationId || obj.conversation_id || '');
         const profileId = String(obj.profileId || obj.senderId || obj.sender_id || '');

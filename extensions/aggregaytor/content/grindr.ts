@@ -11,12 +11,22 @@ import { getCapturedAuth } from '@aggregaytor/adapter-core';
 const LOG = '[Aggregaytor:Grindr]';
 
 // ── Profile ID ↔ Photo Hash Map ─────────────────────────────────────────────
-// Grindr's cascade grid doesn't expose profile IDs in the DOM. But the API
-// responses that populate the grid DO contain profileId + photoHash pairs.
-// We build a map of photoHash → profileId from intercepted API data, then
-// when the user middle-clicks a profile card, we extract the photoHash from
-// the <img> src URL and look up the profileId.
+// Grindr's cascade grid doesn't expose profile IDs in the DOM. The adapter
+// (which patches fetch BEFORE the page loads) indexes all profileId + photoHash
+// pairs from API responses into window.__grindr_hash_map. We use that global
+// map for lookups, plus maintain our own as a supplement.
 const photoHashToProfileId = new Map<string, string>();
+
+// Getter that checks both the adapter's global map and our local one
+function lookupProfileId(hash: string): string {
+  // Check adapter's map first (has cascade API data we might miss)
+  const w = window as any;
+  if (w.__grindr_hash_map instanceof Map) {
+    const pid = w.__grindr_hash_map.get(hash);
+    if (pid) return pid;
+  }
+  return photoHashToProfileId.get(hash) || '';
+}
 
 function indexProfileFromPayload(obj: Record<string, unknown>): void {
   const pid = String(obj.profileId || obj.profileID || '');
@@ -145,50 +155,26 @@ window.addEventListener('__aggregaytor_block_by_hash', (async (event: CustomEven
   const { photoHash } = event.detail || {};
   if (!photoHash) return;
 
-  let profileId = photoHashToProfileId.get(photoHash);
+  let profileId = lookupProfileId(photoHash);
 
-  // Fallback: if hash not in our map, search all cascade grid images for
-  // a profile link, or call the Grindr search-by-hash API endpoint
+  // Fallback: scan visible grid images for a /chat/ link near the matching img
   if (!profileId) {
-    console.log(`${LOG} Hash ${photoHash.slice(0, 12)} not in map (${photoHashToProfileId.size} entries), trying API lookup...`);
+    const adapterMapSize = (window as any).__grindr_hash_map?.size || 0;
+    console.log(`${LOG} Hash ${photoHash.slice(0, 12)} not in maps (adapter: ${adapterMapSize}, local: ${photoHashToProfileId.size}), scanning DOM...`);
 
-    // Try to find the profileId by fetching the profile details via hash
-    // Grindr has a photo-to-profile endpoint we can try
-    const auth = getCapturedAuth('grindr.com');
-    if (auth) {
-      try {
-        // Try the media hash lookup — some Grindr API versions support this
-        const res = await fetch(`https://web.grindr.com/api/v4/profiles?photoHash=${photoHash}`, {
-          headers: { ...auth },
-        });
-        if (res.ok) {
-          const data = await res.json();
-          const pid = data?.profileId || data?.profiles?.[0]?.profileId;
-          if (pid) {
-            profileId = String(pid);
+    const allImages = document.querySelectorAll('img[src*="cdns.grindr.com"]');
+    for (const img of allImages) {
+      const src = (img as HTMLImageElement).src;
+      if (src.includes(photoHash)) {
+        const card = (img as HTMLElement).closest('[data-testid="cascadeCellContainer"]');
+        if (card) {
+          const link = card.querySelector('a[href*="/chat/"]');
+          const href = link?.getAttribute('href') || '';
+          const match = href.match(/\/chat\/(\d+)/);
+          if (match) {
+            profileId = match[1];
             photoHashToProfileId.set(photoHash, profileId);
-          }
-        }
-      } catch {}
-    }
-
-    // Last resort: scan all visible grid images and try to match by src
-    if (!profileId) {
-      const allImages = document.querySelectorAll('img[src*="cdns.grindr.com"]');
-      for (const img of allImages) {
-        const src = (img as HTMLImageElement).src;
-        if (src.includes(photoHash)) {
-          // Found the img — try to find a profile link nearby
-          const card = (img as HTMLElement).closest('[data-testid="cascadeCellContainer"]');
-          if (card) {
-            const link = card.querySelector('a[href*="/chat/"]');
-            const href = link?.getAttribute('href') || '';
-            const match = href.match(/\/chat\/(\d+)/);
-            if (match) {
-              profileId = match[1];
-              photoHashToProfileId.set(photoHash, profileId);
-              break;
-            }
+            break;
           }
         }
       }
