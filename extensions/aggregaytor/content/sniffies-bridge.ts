@@ -287,6 +287,11 @@ try {
       sendResponse({ ok: true });
       return true;
     }
+    if (message.type === 'SHOW_FLOATING_PANEL') {
+      showFloatingPanel(message.contactId, message.platform || 'sniffies');
+      sendResponse({ ok: true });
+      return true;
+    }
     if (message.type === 'TEXT_EXPANDER_SETTINGS') {
       window.dispatchEvent(new CustomEvent('__aggregaytor_text_expander_settings', {
         detail: { substitutions: message.substitutions },
@@ -556,13 +561,13 @@ function showFloatingPanel(contactId: string, platform: string): void {
     <div class="fp-header">
       <span class="fp-header-title">⚡ Quick Actions</span>
       <div class="fp-header-btns">
-        <button class="fp-header-btn fp-collapse-btn">${collapsed ? '▼' : '▲'}</button>
-        <button class="fp-header-btn fp-close-btn">×</button>
+        <button class="fp-header-btn fp-minimize-btn" title="Minimize">−</button>
+        <button class="fp-header-btn fp-close-btn" title="Close panel">×</button>
       </div>
     </div>
     <div class="fp-body">
       <div class="fp-actions">
-        <button class="fp-action-btn danger fp-block-btn">🚫 Hide</button>
+        <button class="fp-action-btn danger fp-block-btn" title="Block/hide this profile">🚫 Block Profile</button>
         <button class="fp-action-btn fp-notes-btn">📝 Notes</button>
         <div class="fp-stars">${[1,2,3,4,5].map(n => `<span class="fp-star" data-star="${n}">★</span>`).join('')}</div>
       </div>
@@ -596,14 +601,13 @@ function showFloatingPanel(contactId: string, platform: string): void {
     try { localStorage.setItem('aggregaytor_fp_pos', JSON.stringify({ x: parseInt(panel.style.left), y: parseInt(panel.style.top) })); } catch {}
   });
 
-  // Collapse
-  panel.querySelector('.fp-collapse-btn')!.addEventListener('click', () => {
+  // Minimize — collapse to just the header bar
+  panel.querySelector('.fp-minimize-btn')!.addEventListener('click', () => {
     const c = panel.classList.toggle('collapsed');
-    (panel.querySelector('.fp-collapse-btn') as HTMLElement).textContent = c ? '▼' : '▲';
     try { localStorage.setItem('aggregaytor_fp_collapsed', String(c)); } catch {}
   });
 
-  // Close
+  // Close — hide the panel entirely (can be re-opened from side panel)
   panel.querySelector('.fp-close-btn')!.addEventListener('click', () => hideFloatingPanel());
 
   // Block

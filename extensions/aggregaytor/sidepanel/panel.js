@@ -2694,6 +2694,30 @@ if (isPopout) {
   if (btn) { btn.title = 'Pop back into side panel'; btn.textContent = '⧉'; }
 }
 
+// Show floating quick actions panel on the active platform tab
+document.getElementById('btn-show-floating')?.addEventListener('click', () => {
+  if (!currentThread) return;
+  const platformHosts = {
+    sniffies: 'sniffies.com', grindr: 'web.grindr.com',
+    doublelist: 'doublelist.com', adam4adam: 'adam4adam.com',
+  };
+  const platform = currentThread.platform || currentThread.contactId?.split(':')[0] || '';
+  const host = platformHosts[platform];
+  if (!host) return;
+  chrome.tabs.query({}).then(tabs => {
+    for (const tab of tabs) {
+      if (tab.id && tab.url?.includes(host)) {
+        chrome.tabs.sendMessage(tab.id, {
+          type: 'SHOW_FLOATING_PANEL',
+          contactId: currentThread.contactId,
+          platform,
+        }).catch(() => {});
+        break;
+      }
+    }
+  });
+});
+
 // Camera button — placeholder for take-picture feature
 document.getElementById('btn-camera')?.addEventListener('click', () => {
   // TODO: implement camera capture
