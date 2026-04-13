@@ -2627,12 +2627,41 @@ chrome.runtime.onMessage.addListener((message) => {
   if (message.type) addDevLog(`← ${message.type} ${message.platform || ''} ${message.count || ''}`);
 });
 
-// ── Open all sites on title click ───────────────────────────────────────────
+// ── Right-click context menu on platform chips ─────────────────────────────
+// Right-click "All" → Open all sites
+// Right-click individual chip → Open that platform
+const PLATFORM_OPEN_URLS = {
+  sniffies: 'https://sniffies.com',
+  grindr: 'https://web.grindr.com',
+  doublelist: 'https://doublelist.com',
+  adam4adam: 'https://www.adam4adam.com',
+  gmail: 'https://mail.google.com',
+  yahoo: 'https://mail.yahoo.com',
+};
 
-document.getElementById('header-title').addEventListener('click', (e) => {
-  // Only in inbox view (not thread detail where it shows contact name)
-  if (!document.body.classList.contains('view-inbox')) return;
-  chrome.runtime.sendMessage({ type: 'OPEN_ALL_SITES' }).catch(() => {});
+document.querySelectorAll('.platform-chip').forEach(chip => {
+  chip.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const platform = chip.dataset.platform;
+    if (platform === 'all') {
+      chrome.runtime.sendMessage({ type: 'OPEN_ALL_SITES' }).catch(() => {});
+    } else if (PLATFORM_OPEN_URLS[platform]) {
+      chrome.tabs.create({ url: PLATFORM_OPEN_URLS[platform] }).catch(() => {});
+    }
+  });
+});
+
+// Camera button — placeholder for take-picture feature
+document.getElementById('btn-camera')?.addEventListener('click', () => {
+  // TODO: implement camera capture
+  alert('Camera feature coming soon');
+});
+
+// Gallery button — open gallery overlay
+document.getElementById('btn-gallery')?.addEventListener('click', () => {
+  // Open the gallery overlay if it exists
+  const gallery = document.getElementById('gallery-overlay');
+  if (gallery) gallery.style.display = '';
 });
 
 // ── Global search ───────────────────────────────────────────────────────────

@@ -10,11 +10,13 @@
   <div class="header">
     <button class="header-back" id="back-btn">&larr; Back</button>
     <span id="connection-dot" class="connection-dot" title="Service worker status"></span>
-    <h1 id="header-title" class="header-title-clickable" title="Click to open all sites">Aggregaytor</h1>
+    <h1 id="header-title" class="header-title-clickable">Aggregaytor <span class="version-tag">v0.52</span></h1>
     <div id="header-actions" class="header-actions"></div>
     <span id="total-unread" class="unread-badge" style="display:none"></span>
     <button class="header-settings" id="open-tasks" title="Tasks (Shift+T)">☑</button>
-    <button class="header-settings" id="sync-pics-header" title="Sync profile pictures">📷</button>
+    <button class="header-settings" id="btn-camera" title="Take a picture">📷</button>
+    <button class="header-settings" id="btn-gallery" title="Gallery">🖼</button>
+    <button class="header-settings" id="sync-pics-header" title="Sync profile pictures">🔄</button>
     <button class="header-settings" id="open-settings" title="Settings">⚙</button>
   </div>
   <!-- Global search -->
@@ -32,8 +34,9 @@
       <span class="platform-chip" data-platform="grindr">Grindr</span>
       <span class="platform-chip" data-platform="doublelist">DList</span>
       <span class="platform-chip" data-platform="adam4adam">A4A</span>
+      <span class="platform-chip" data-platform="gmail">Gmail</span>
       <span class="platform-chip" data-platform="yahoo">Yahoo</span>
-      <span class="platform-chip archive-chip" data-platform="archived">📦 Archive</span>
+      <span class="platform-chip archive-chip" data-platform="archived">📦</span>
     </div>
     <div class="controls-row">
       <div class="sort-control">
@@ -47,6 +50,7 @@
           <option value="name">Name</option>
         </select>
       </div>
+      <div class="filter-toggle-inline" id="filter-toggle">⫸ <span id="filter-count"></span></div>
       <label class="fav-filter" title="Show favorites only">
         <input type="checkbox" id="filter-favorites"> ⭐
       </label>
@@ -92,7 +96,6 @@
 
   <!-- Advanced filters -->
   <div class="filter-bar" id="filter-bar">
-    <div class="filter-toggle" id="filter-toggle">Filters <span id="filter-count"></span></div>
     <div class="filter-panel" id="filter-panel" style="display:none">
       <div class="filter-row">
         <label>Search</label>
