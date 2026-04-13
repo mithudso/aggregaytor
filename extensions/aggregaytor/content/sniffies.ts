@@ -17,6 +17,7 @@
 import { SniffiesAdapter } from '@aggregaytor/adapter-sniffies';
 import { setLogLevel, perf } from '@aggregaytor/adapter-core';
 import { initMapFilters } from './sniffies-map-filters.js';
+import { initTextExpander } from './text-expander.js';
 
 // ── Performance Counters ────────────────────────────────────────────────────
 // Expose perf counters on window so you can inspect from DevTools console:
@@ -117,9 +118,11 @@ adapter.init().catch((err) => {
 });
 
 // ── Map Filter Module ────────────────────────────────────────────────────
-// Initialize the map marker filtering system (hide/highlight by attitude,
-// text terms, chat age badges, middle-click/shift-click blocking).
 initMapFilters();
+
+// ── Text Expander ────────────────────────────────────────────────────────
+// Type a shortcut (e.g. "hg ") and it auto-expands to the full phrase.
+initTextExpander();
 
 // ── Auto-Send Mechanism ────────────────────────────────────────────────────
 // When the service worker wants to auto-send a message (from the auto-respond

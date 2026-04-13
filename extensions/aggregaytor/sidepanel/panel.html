@@ -379,6 +379,15 @@
         <button class="settings-btn" id="sp-save-phrases" style="margin-top:4px">Save Phrases</button>
       </div>
       <div class="settings-section">
+        <h3 class="settings-heading">Text Expansions</h3>
+        <div class="settings-info">Type a shortcut in any chat input followed by space to auto-expand. Format: <code>shortcut → phrase</code> (one per line).</div>
+        <textarea id="sp-text-expansions" class="settings-textarea" rows="8" placeholder="hg → Hey there. How's it going?&#10;yl → You looking?&#10;wt → What're you up to?"></textarea>
+        <div class="settings-row" style="margin-top:4px">
+          <button class="settings-btn" id="sp-save-expansions">Save Expansions</button>
+          <span id="sp-expansion-count" class="settings-info" style="margin-left:8px"></span>
+        </div>
+      </div>
+      <div class="settings-section">
         <h3 class="settings-heading">Broadcast</h3>
         <div class="settings-info">Send a message to all bookmarked contacts on a platform.</div>
         <input type="text" id="sp-broadcast-msg" class="settings-input" placeholder="Message to broadcast...">

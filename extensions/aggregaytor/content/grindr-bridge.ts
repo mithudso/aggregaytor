@@ -40,6 +40,14 @@ try {
       sendResponse({ ok: true });
       return true;
     }
+    if (message.type === 'TEXT_EXPANDER_SETTINGS') {
+      window.dispatchEvent(new CustomEvent('__aggregaytor_text_expander_settings', {
+        detail: { substitutions: message.substitutions },
+      }));
+      try { localStorage.setItem('aggregaytor_text_substitutions', JSON.stringify(message.substitutions)); } catch {}
+      sendResponse({ ok: true });
+      return true;
+    }
     if (message.type === 'SCRAPE_AVATARS') {
       let count = 0;
       // Grindr profile images are <img> elements in the grid/chat

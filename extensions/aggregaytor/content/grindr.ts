@@ -7,6 +7,7 @@
 
 import { GrindrAdapter } from '@aggregaytor/adapter-grindr';
 import { getCapturedAuth } from '@aggregaytor/adapter-core';
+import { initTextExpander } from './text-expander.js';
 
 const LOG = '[Aggregaytor:Grindr]';
 
@@ -117,6 +118,9 @@ adapter.init().then(() => {
 }).catch((err) => {
   console.error(`${LOG} Adapter init failed:`, err);
 });
+
+// Text expander — type "hg " to expand to "Hey there. How's it going?"
+initTextExpander();
 
 // ── Proactive Profile Indexing ──────────────────────────────────────────────
 // Intercept ALL fetch responses on grindr.com to build the photoHash→profileId

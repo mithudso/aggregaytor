@@ -1841,6 +1841,7 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     if (tab.dataset.tab === 'tab-rules') loadBlockRules();
     if (tab.dataset.tab === 'tab-pictures') loadPictures();
     if (tab.dataset.tab === 'tab-map') loadMapFilterSettings();
+    if (tab.dataset.tab === 'tab-data') loadTextExpansions();
     if (tab.dataset.tab === 'tab-sync') { loadCalendarStatus(); checkGoogleAuth(); }
     if (tab.dataset.tab === 'tab-personality') loadStyleGuide();
   });
@@ -2290,6 +2291,50 @@ document.getElementById('sp-broadcast-send')?.addEventListener('click', async ()
     } else { status.textContent = res?.error || 'Failed'; status.style.color = '#ef4444'; }
   } catch (err) { status.textContent = 'Error: ' + err.message; status.style.color = '#ef4444'; }
   btn.disabled = false; btn.textContent = 'Send Broadcast';
+});
+
+// ── Text Expansions ──────────────────────────────────────────────────────────
+
+function loadTextExpansions() {
+  chrome.storage.local.get('aggregaytor_text_substitutions', (data) => {
+    let subs = data.aggregaytor_text_substitutions || [];
+    // If empty, the defaults are in the MAIN world text-expander.ts.
+    // Show count even if we don't have them in chrome.storage yet.
+    const textarea = document.getElementById('sp-text-expansions');
+    const count = document.getElementById('sp-expansion-count');
+    if (textarea && subs.length) {
+      textarea.value = subs.map(s => `${s.shortcut} → ${s.phrase}`).join('\n');
+    } else if (textarea) {
+      textarea.placeholder = 'Defaults loaded from extension. Open Data tab to see them.\nhg → Hey there. How\'s it going?\nyl → You looking?\nwt → What\'re you up to?';
+    }
+    if (count) count.textContent = subs.length ? `${subs.length} expansions` : 'Using defaults (54 expansions)';
+  });
+}
+
+document.getElementById('sp-save-expansions')?.addEventListener('click', () => {
+  const text = document.getElementById('sp-text-expansions').value;
+  const lines = text.split('\n').filter(l => l.trim());
+  const subs = [];
+  for (const line of lines) {
+    // Parse "shortcut → phrase" or "shortcut = phrase" or "shortcut: phrase"
+    const match = line.match(/^(.+?)\s*[→=:]\s*(.+)$/);
+    if (match) {
+      subs.push({ shortcut: match[1].trim(), phrase: match[2].trim() });
+    }
+  }
+  chrome.storage.local.set({ aggregaytor_text_substitutions: subs });
+  document.getElementById('sp-expansion-count').textContent = `${subs.length} expansions saved!`;
+
+  // Relay to all platform tabs
+  chrome.tabs.query({}).then(tabs => {
+    for (const tab of tabs) {
+      if (!tab.id) continue;
+      chrome.tabs.sendMessage(tab.id, {
+        type: 'TEXT_EXPANDER_SETTINGS',
+        substitutions: subs,
+      }).catch(() => {});
+    }
+  });
 });
 
 // ── Map Filter Settings ──────────────────────────────────────────────────────
