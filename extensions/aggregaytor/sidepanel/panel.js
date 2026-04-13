@@ -2651,6 +2651,39 @@ document.querySelectorAll('.platform-chip').forEach(chip => {
   });
 });
 
+// ── Pop out / Pop back in ────────────────────────────────────────────────────
+// Detects if we're running in the side panel or a popup window.
+// In side panel: ⧉ opens panel.html in a standalone popup window.
+// In popup window: ⧉ closes the window (side panel auto-reopens on icon click).
+const isPopout = window.location.search.includes('popout=true') ||
+  (window.outerWidth > 0 && window.outerWidth < 600 && !window.chrome?.sidePanel);
+
+document.getElementById('btn-popout')?.addEventListener('click', () => {
+  if (isPopout) {
+    // We're in a popup window — close it (user can reopen side panel via extension icon)
+    window.close();
+  } else {
+    // We're in the side panel — open panel.html as a standalone popup window
+    const panelUrl = chrome.runtime.getURL('sidepanel/panel.html?popout=true');
+    chrome.windows.create({
+      url: panelUrl,
+      type: 'popup',
+      width: 380,
+      height: 700,
+      focused: true,
+    }).catch(() => {
+      // Fallback: open as a regular tab
+      chrome.tabs.create({ url: panelUrl }).catch(() => {});
+    });
+  }
+});
+
+// Update button tooltip based on context
+if (isPopout) {
+  const btn = document.getElementById('btn-popout');
+  if (btn) { btn.title = 'Pop back into side panel'; btn.textContent = '⧉'; }
+}
+
 // Camera button — placeholder for take-picture feature
 document.getElementById('btn-camera')?.addEventListener('click', () => {
   // TODO: implement camera capture
