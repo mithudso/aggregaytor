@@ -256,6 +256,12 @@ function isMetadataText(body: string): boolean {
   if (/^(monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|yesterday)$/i.test(lower)) return true;
   // Rollup: concatenation of timestamps + messages (starts with relative time, contains "Seen")
   if (/^\d+\s+(day|hour|minute)s?\s*ago\s+/.test(lower) && lower.includes('seen')) return true;
+  // Sniffies system messages about deleted conversations
+  if (lower.includes('deleted previous messages in this conversation')) return true;
+  if (lower.includes('deleted the conversation')) return true;
+  if (lower.includes('conversation deleted')) return true;
+  // System/notification messages
+  if (lower.startsWith('this conversation') || lower.startsWith('you blocked') || lower.startsWith('you unblocked')) return true;
   return false;
 }
 
@@ -515,7 +521,22 @@ export class SniffiesAdapter extends BaseAdapter {
         if (!body) return;
         // Double-check: reject profile attributes and UI metadata
         if (PROFILE_ATTRIBUTE_VALUES.has(body.toLowerCase())) return;
-        if (isMetadataText(body)) return;
+        if (isMetadataText(body)) {
+          // Track deletion events — count how many times they deleted messages
+          // and update the contact's deletedChatCount via bridge → service worker
+          if (body.toLowerCase().includes('deleted previous messages') && profileId) {
+            const deleteCount = (body.match(/deleted previous messages/gi) || []).length;
+            window.dispatchEvent(new CustomEvent('__aggregaytor_message', {
+              detail: JSON.parse(JSON.stringify({
+                type: 'UPDATE_DELETE_COUNT',
+                contactId: `sniffies:${profileId}`,
+                platform: 'sniffies',
+                count: deleteCount,
+              })),
+            }));
+          }
+          return; // don't store as a regular message
+        }
 
         const ts = extractTimestampFromObj(obj);
         if (!ts || !profileId) {

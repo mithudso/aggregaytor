@@ -260,6 +260,17 @@ async function handleMessage(msg: any): Promise<any> {
       chrome.runtime.sendMessage({ type: 'ACTIVE_PROFILE_CHANGED', contactId: msg.contactId, platform: msg.platform }).catch(() => {})
       return { ok: true };
     }
+    case 'UPDATE_DELETE_COUNT': {
+      // Increment deletedChatCount on thread meta when deletion messages detected
+      try {
+        const existing = await getThreadMeta(msg.contactId);
+        const currentCount = existing?.deletedChatCount || 0;
+        await upsertThreadMeta(msg.contactId, msg.platform, {
+          deletedChatCount: currentCount + (msg.count || 1),
+        });
+      } catch {}
+      return { ok: true };
+    }
     case 'PROFILE_CLOSED': {
       // Relay to side panel so it goes back to inbox
       chrome.runtime.sendMessage({ type: 'PROFILE_CLOSED', platform: msg.platform }).catch(() => {})

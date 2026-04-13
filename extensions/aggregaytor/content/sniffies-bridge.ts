@@ -203,6 +203,10 @@ try {
           if (lower.includes('beginning of your chat history')) return;
           // Rollup: timestamp + message text concatenated (starts with "N days ago" + has "Seen")
           if (/^\d+\s+(day|hour|minute)s?\s+ago\s+/i.test(text) && text.length > 30) return;
+          // System messages about deleted conversations
+          if (lower.includes('deleted previous messages in this conversation')) return;
+          if (lower.includes('deleted the conversation') || lower.includes('conversation deleted')) return;
+          if (lower.startsWith('this conversation') || lower.startsWith('you blocked')) return;
 
           // Determine message direction by checking CSS classes for common
           // "sent" indicators. Sniffies typically styles outgoing messages with
