@@ -246,32 +246,31 @@ window.addEventListener('__aggregaytor_block_profile', ((event: CustomEvent) => 
     }
     if (success) {
       sendToBridge({ type: 'PROFILE_BLOCKED', contactId: `grindr:${profileId}`, platform: 'grindr' });
-      // Remove the hidden profile's card from the DOM directly instead of
-      // refreshing the entire cascade (which caused Grindr's service worker
-      // to throw fetch errors from the pushState navigation trick).
-      // Find and fade out the card element containing the blocked profile's image.
+      // Remove ONLY the blocked profile's card from the DOM.
+      // Find the card by matching photo hashes associated with this profileId.
       setTimeout(() => {
-        document.querySelectorAll(`img[src*="${profileId}"], img[src*="cdns.grindr.com"]`).forEach(img => {
-          const card = (img as HTMLElement).closest('[data-testid="cascadeCellContainer"], [class*="cascade"], [class*="profile-card"]');
-          if (card) {
-            (card as HTMLElement).style.transition = 'opacity 0.3s, height 0.3s';
-            (card as HTMLElement).style.opacity = '0';
-            setTimeout(() => { (card as HTMLElement).style.display = 'none'; }, 300);
-          }
-        });
-        // Also try to find by the photo hash that triggered the block
-        const hashToFind = photoHashToProfileId.entries();
-        for (const [hash, pid] of hashToFind) {
-          if (pid === profileId) {
-            document.querySelectorAll(`img[src*="${hash}"]`).forEach(img => {
-              const card = (img as HTMLElement).closest('[data-testid="cascadeCellContainer"], [class*="cascade"], [class*="profile-card"]');
-              if (card) {
-                (card as HTMLElement).style.transition = 'opacity 0.3s';
-                (card as HTMLElement).style.opacity = '0';
-                setTimeout(() => { (card as HTMLElement).style.display = 'none'; }, 300);
-              }
-            });
-          }
+        // Collect all hashes that map to this profileId
+        const targetHashes: string[] = [];
+        for (const [hash, pid] of photoHashToProfileId.entries()) {
+          if (pid === profileId) targetHashes.push(hash);
+        }
+        if (!targetHashes.length) return;
+
+        // Find images matching any of the target hashes and fade their card
+        let found = false;
+        for (const hash of targetHashes) {
+          document.querySelectorAll(`img[src*="${hash}"]`).forEach(img => {
+            const card = (img as HTMLElement).closest(
+              '[data-testid="cascadeCellContainer"], [class*="cascade-cell"], [class*="profile-card"]'
+            );
+            if (card && !found) {
+              found = true;
+              (card as HTMLElement).style.transition = 'opacity 0.3s';
+              (card as HTMLElement).style.opacity = '0';
+              setTimeout(() => { (card as HTMLElement).style.display = 'none'; }, 300);
+            }
+          });
+          if (found) break;
         }
       }, 300);
     }

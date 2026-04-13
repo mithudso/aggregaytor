@@ -890,3 +890,6 @@ body {
   font-family: inherit; resize: vertical;
 }
 .settings-textarea:focus { border-color: rgba(59,130,246,0.5); outline: none; }
+.filter-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px;
+}

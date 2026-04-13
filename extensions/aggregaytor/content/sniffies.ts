@@ -16,6 +16,7 @@
 
 import { SniffiesAdapter } from '@aggregaytor/adapter-sniffies';
 import { setLogLevel, perf } from '@aggregaytor/adapter-core';
+import { initMapFilters } from './sniffies-map-filters.js';
 
 // ── Performance Counters ────────────────────────────────────────────────────
 // Expose perf counters on window so you can inspect from DevTools console:
@@ -72,6 +73,15 @@ adapter.on('messages', (event) => {
     platform: 'sniffies',
     payload: event.payload,
   });
+  // Relay chat timestamps to map filter module for chat age badges
+  for (const m of event.payload as any[]) {
+    if (m.contactId && m.timestamp) {
+      const profileId = m.contactId.replace('sniffies:', '');
+      window.dispatchEvent(new CustomEvent('__aggregaytor_chat_timestamp', {
+        detail: { profileId, timestamp: new Date(m.timestamp).getTime() },
+      }));
+    }
+  }
 });
 
 // 'contacts' — user profile data extracted from API responses and WebSocket events.
@@ -81,6 +91,10 @@ adapter.on('contacts', (event) => {
     platform: 'sniffies',
     payload: event.payload,
   });
+  // Also relay contact data to the map filter module for attitude/text caching
+  window.dispatchEvent(new CustomEvent('__aggregaytor_contact_data', {
+    detail: { contacts: event.payload },
+  }));
 });
 
 // 'error' — adapter-level errors (network failures, parse errors, block detection).
@@ -96,6 +110,11 @@ adapter.on('error', (event) => {
 adapter.init().catch((err) => {
   console.error('[Aggregaytor] Sniffies adapter init failed:', err);
 });
+
+// ── Map Filter Module ────────────────────────────────────────────────────
+// Initialize the map marker filtering system (hide/highlight by attitude,
+// text terms, chat age badges, middle-click/shift-click blocking).
+initMapFilters();
 
 // ── Auto-Send Mechanism ────────────────────────────────────────────────────
 // When the service worker wants to auto-send a message (from the auto-respond

@@ -154,6 +154,7 @@
       <span class="settings-tab" data-tab="tab-personality">Style</span>
       <span class="settings-tab" data-tab="tab-rules">Rules</span>
       <span class="settings-tab" data-tab="tab-pictures">Pics</span>
+      <span class="settings-tab" data-tab="tab-map">Map</span>
       <span class="settings-tab" data-tab="tab-sync">Sync</span>
       <span class="settings-tab" data-tab="tab-data">Data</span>
     </div>
@@ -247,6 +248,56 @@
           <label class="settings-btn" style="cursor:pointer;margin:0">Upload<input type="file" id="sp-pic-upload" accept="image/*" style="display:none"></label>
         </div>
         <div id="sp-pic-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px"></div>
+      </div>
+    </div>
+
+    <!-- Map tab (Sniffies map marker filtering) -->
+    <div class="settings-tab-content" id="tab-map">
+      <div class="settings-section">
+        <h3 class="settings-heading">Hide by Attitude</h3>
+        <div class="settings-info">Hide profiles on the Sniffies map by position. Middle-click a marker to quick-hide. Shift+click to toggle.</div>
+        <div class="filter-grid">
+          <label class="settings-checkbox-label"><input type="checkbox" data-map-filter="hideBottom"> Bottom</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-map-filter="hideVersBottom"> Vers Bottom</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-map-filter="hideVers"> Vers</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-map-filter="hideVersTop"> Vers Top</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-map-filter="hideTop"> Top</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-map-filter="hideSide"> Side</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-map-filter="hideUnspecified"> Unspecified</label>
+        </div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Highlight by Attitude</h3>
+        <div class="settings-info">Blue outline on matching profiles.</div>
+        <div class="filter-grid">
+          <label class="settings-checkbox-label"><input type="checkbox" data-map-filter="highlightBottom"> Bottom</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-map-filter="highlightVersBottom"> Vers Bottom</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-map-filter="highlightVers"> Vers</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-map-filter="highlightVersTop"> Vers Top</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-map-filter="highlightTop"> Top</label>
+        </div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Profile Text Filters</h3>
+        <label class="settings-checkbox-label">
+          <input type="checkbox" data-map-filter="excludeEnabled"> Enable exclude filter
+        </label>
+        <textarea id="sp-map-exclude-terms" class="settings-textarea" rows="2" placeholder="Exclude keywords (one per line)"></textarea>
+        <label class="settings-checkbox-label" style="margin-top:6px">
+          <input type="checkbox" data-map-filter="includeEnabled"> Enable include highlight
+        </label>
+        <textarea id="sp-map-include-terms" class="settings-textarea" rows="2" placeholder="Highlight keywords (one per line)"></textarea>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Chat Age Badges</h3>
+        <label class="settings-checkbox-label">
+          <input type="checkbox" data-map-filter="showChatAgeBadges"> Show last chat time on markers
+        </label>
+      </div>
+      <div class="settings-section">
+        <button class="settings-btn" id="sp-map-save">Save Map Filters</button>
+        <button class="settings-btn" id="sp-map-clear-blocked" style="margin-top:4px;border-color:rgba(239,68,68,0.3);color:#f87171">Clear All Hidden Profiles</button>
+        <div id="sp-map-status" class="settings-status"></div>
       </div>
     </div>
 

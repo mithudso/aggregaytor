@@ -1840,6 +1840,7 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     // Load tab-specific data
     if (tab.dataset.tab === 'tab-rules') loadBlockRules();
     if (tab.dataset.tab === 'tab-pictures') loadPictures();
+    if (tab.dataset.tab === 'tab-map') loadMapFilterSettings();
     if (tab.dataset.tab === 'tab-sync') { loadCalendarStatus(); checkGoogleAuth(); }
     if (tab.dataset.tab === 'tab-personality') loadStyleGuide();
   });
@@ -2258,6 +2259,57 @@ document.getElementById('sp-broadcast-send')?.addEventListener('click', async ()
   } catch (err) { status.textContent = 'Error: ' + err.message; status.style.color = '#ef4444'; }
   btn.disabled = false; btn.textContent = 'Send Broadcast';
 });
+
+// ── Map Filter Settings ──────────────────────────────────────────────────────
+
+document.getElementById('sp-map-save')?.addEventListener('click', () => {
+  const update = {};
+  document.querySelectorAll('[data-map-filter]').forEach(el => {
+    update[el.dataset.mapFilter] = el.checked;
+  });
+  update.excludeTerms = (document.getElementById('sp-map-exclude-terms')?.value || '')
+    .split('\n').map(l => l.trim()).filter(l => l);
+  update.includeTerms = (document.getElementById('sp-map-include-terms')?.value || '')
+    .split('\n').map(l => l.trim()).filter(l => l);
+
+  // Save to chrome.storage and relay to Sniffies tabs
+  chrome.storage.local.set({ aggregaytor_map_filter_settings: update });
+  // Relay to all Sniffies tabs
+  chrome.tabs.query({}).then(tabs => {
+    for (const tab of tabs) {
+      if (tab.id && tab.url?.includes('sniffies.com')) {
+        chrome.tabs.sendMessage(tab.id, { type: 'MAP_FILTER_SETTINGS', settings: update }).catch(() => {});
+      }
+    }
+  });
+  const status = document.getElementById('sp-map-status');
+  if (status) { status.textContent = 'Saved!'; status.style.color = '#22c55e'; }
+});
+
+document.getElementById('sp-map-clear-blocked')?.addEventListener('click', () => {
+  chrome.storage.local.set({ aggregaytor_map_blocked: [] });
+  chrome.tabs.query({}).then(tabs => {
+    for (const tab of tabs) {
+      if (tab.id && tab.url?.includes('sniffies.com')) {
+        chrome.tabs.sendMessage(tab.id, { type: 'MAP_FILTER_SETTINGS', settings: { blockedIds: [] } }).catch(() => {});
+      }
+    }
+  });
+  const status = document.getElementById('sp-map-status');
+  if (status) { status.textContent = 'All hidden profiles cleared!'; status.style.color = '#22c55e'; }
+});
+
+// Load map filter settings when Map tab is opened
+function loadMapFilterSettings() {
+  chrome.storage.local.get('aggregaytor_map_filter_settings', (data) => {
+    const s = data.aggregaytor_map_filter_settings || {};
+    document.querySelectorAll('[data-map-filter]').forEach(el => {
+      if (s[el.dataset.mapFilter] !== undefined) el.checked = !!s[el.dataset.mapFilter];
+    });
+    if (s.excludeTerms) document.getElementById('sp-map-exclude-terms').value = (s.excludeTerms || []).join('\n');
+    if (s.includeTerms) document.getElementById('sp-map-include-terms').value = (s.includeTerms || []).join('\n');
+  });
+}
 
 // ── Star Ratings (in thread view) ────────────────────────────────────────────
 function renderStarRating(contactId, platform, currentRating) {

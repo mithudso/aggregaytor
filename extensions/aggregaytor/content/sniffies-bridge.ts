@@ -255,6 +255,14 @@ try {
     // Two-pronged approach: dispatch an event to MAIN world (in case the
     // adapter has additional scraping logic), AND scrape directly from
     // ISOLATED world since we have full DOM access here.
+    if (message.type === 'MAP_FILTER_SETTINGS') {
+      // Relay map filter settings from the side panel to the MAIN world
+      window.dispatchEvent(new CustomEvent('__aggregaytor_map_filter_settings', {
+        detail: message.settings,
+      }));
+      sendResponse({ ok: true });
+      return true;
+    }
     if (message.type === 'SCRAPE_AVATARS') {
       // Notify MAIN world in case the adapter wants to do its own scraping
       window.dispatchEvent(new CustomEvent('__aggregaytor_scrape_avatars'));
