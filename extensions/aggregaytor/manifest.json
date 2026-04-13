@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Aggregaytor",
-  "version": "0.51.4",
+  "version": "0.51.5",
   "description": "Unified message inbox across platforms",
   "permissions": [
     "storage",

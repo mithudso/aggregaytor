@@ -190,9 +190,11 @@ function isLikelyMessage(obj: Record<string, unknown>): boolean {
   const bodyVal = String(obj.body || obj.text || obj.message || obj.content || '').trim().toLowerCase();
   if (PROFILE_ATTRIBUTE_VALUES.has(bodyVal)) return false;
 
-  // Tier 4: single short words are almost always profile enum values, not messages
+  // Tier 4: single very short words (< 4 chars) are usually profile enum values.
+  // Raised threshold from 8 to 4 chars because real messages like "Howdy" (5),
+  // "Hey" (3+punctuation), "Sup" (3) were being rejected.
   const wordCount = bodyVal.split(/\s+/).length;
-  if (wordCount <= 1 && bodyVal.length < 8) return false;
+  if (wordCount <= 1 && bodyVal.length < 4) return false;
 
   return true;
 }
