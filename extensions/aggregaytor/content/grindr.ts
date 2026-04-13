@@ -110,29 +110,27 @@ window.addEventListener('__aggregaytor_block_profile', ((event: CustomEvent) => 
     return;
   }
 
-  // Try block API first (POST /v3/me/blocks/{profileId}),
-  // fall back to hide (POST /v1/hides/{profileId})
-  fetch(`https://web.grindr.com/v3/me/blocks/${profileId}`, {
+  // Hide API: POST /api/v1/me/hides/{profileId} (confirmed from HAR capture)
+  // No request body needed. Falls back to block API if hide fails.
+  fetch(`https://web.grindr.com/api/v1/me/hides/${profileId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...auth },
-    body: JSON.stringify({}),
   }).then(async (res) => {
     if (res.ok) {
-      console.log(`${LOG} Block success for ${profileId}`);
+      console.log(`${LOG} Hide success for ${profileId}`);
       sendToBridge({ type: 'PROFILE_BLOCKED', contactId: `grindr:${profileId}`, platform: 'grindr' });
       return;
     }
-    console.warn(`${LOG} Block failed (${res.status}), trying hide API...`);
-    const hideRes = await fetch(`https://web.grindr.com/v1/hides/${profileId}`, {
+    console.warn(`${LOG} Hide failed (${res.status}), trying block API...`);
+    const blockRes = await fetch(`https://web.grindr.com/api/v3/me/blocks/${profileId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...auth },
-      body: JSON.stringify({}),
     });
-    if (hideRes.ok) {
-      console.log(`${LOG} Hide success for ${profileId}`);
+    if (blockRes.ok) {
+      console.log(`${LOG} Block success for ${profileId}`);
       sendToBridge({ type: 'PROFILE_BLOCKED', contactId: `grindr:${profileId}`, platform: 'grindr' });
     } else {
-      console.warn(`${LOG} Hide also failed (${hideRes.status})`);
+      console.warn(`${LOG} Block also failed (${blockRes.status})`);
     }
   }).catch(err => console.warn(`${LOG} Block/hide error:`, err));
 }) as EventListener);
