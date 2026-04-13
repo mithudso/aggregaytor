@@ -10,6 +10,24 @@ let activePlatforms = new Set(); // multi-select toggle: which platforms are sho
 let currentThread = null;
 let currentMessages = [];
 
+// ── Instant Tooltips ──────────────────────────────────────────────────────────
+// Convert all title attributes to data-tip for instant CSS tooltips
+// (Chrome's native title tooltip has a ~2 second delay that can't be changed)
+function convertTitlesToTips() {
+  document.querySelectorAll('[title]').forEach(el => {
+    const title = el.getAttribute('title');
+    if (title && !el.hasAttribute('data-tip')) {
+      el.setAttribute('data-tip', title);
+      el.removeAttribute('title'); // remove native tooltip
+      // Header buttons get bottom tooltips (they're at the top of the screen)
+      if (el.closest('.header')) el.setAttribute('data-tip-pos', 'bottom');
+    }
+  });
+}
+// Run on load and periodically (for dynamically created elements)
+convertTitlesToTips();
+setInterval(convertTitlesToTips, 5000);
+
 // ── User Preferences (loaded from chrome.storage.local) ─────────────────────
 let prefTimestampAbsolute = false; // true = "11:42 PM", false = "5m" (relative)
 let prefAutoNavigate = true;       // true = open platform tab on thread click
