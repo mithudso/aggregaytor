@@ -28,9 +28,19 @@ function indexProfileFromPayload(obj: Record<string, unknown>): void {
     photoHashToProfileId.set(hash, pid);
   }
 
-  // Also index all hashes from the medias array — Grindr stores additional
-  // photos here, and profileImageMediaHash is often null while medias[0]
-  // contains the actual display photo hash used in the cascade grid img src.
+  // Index from photoMediaHashes array — THIS IS THE KEY FIELD.
+  // The cascade API (/api/v3/cascade/) uses items[].data.photoMediaHashes
+  // (an array of hash strings), NOT profileImageMediaHash.
+  const photoMediaHashes = obj.photoMediaHashes;
+  if (Array.isArray(photoMediaHashes)) {
+    for (const h of photoMediaHashes) {
+      if (typeof h === 'string' && h.length > 10) {
+        photoHashToProfileId.set(h, pid);
+      }
+    }
+  }
+
+  // Also index from medias array (individual profile API format)
   const medias = obj.medias;
   if (Array.isArray(medias)) {
     for (const m of medias) {
@@ -131,16 +141,66 @@ window.fetch = async function(...args: Parameters<typeof fetch>) {
 // When the bridge can't find a profile ID directly in the DOM (most common
 // on the cascade grid), it sends the photo hash from the img src. We look it
 // up in our photoHash→profileId map and trigger the block.
-window.addEventListener('__aggregaytor_block_by_hash', ((event: CustomEvent) => {
+window.addEventListener('__aggregaytor_block_by_hash', (async (event: CustomEvent) => {
   const { photoHash } = event.detail || {};
   if (!photoHash) return;
-  const profileId = photoHashToProfileId.get(photoHash);
+
+  let profileId = photoHashToProfileId.get(photoHash);
+
+  // Fallback: if hash not in our map, search all cascade grid images for
+  // a profile link, or call the Grindr search-by-hash API endpoint
   if (!profileId) {
-    console.warn(`${LOG} No profile ID found for hash ${photoHash.slice(0, 12)}... (map has ${photoHashToProfileId.size} entries)`);
+    console.log(`${LOG} Hash ${photoHash.slice(0, 12)} not in map (${photoHashToProfileId.size} entries), trying API lookup...`);
+
+    // Try to find the profileId by fetching the profile details via hash
+    // Grindr has a photo-to-profile endpoint we can try
+    const auth = getCapturedAuth('grindr.com');
+    if (auth) {
+      try {
+        // Try the media hash lookup — some Grindr API versions support this
+        const res = await fetch(`https://web.grindr.com/api/v4/profiles?photoHash=${photoHash}`, {
+          headers: { ...auth },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const pid = data?.profileId || data?.profiles?.[0]?.profileId;
+          if (pid) {
+            profileId = String(pid);
+            photoHashToProfileId.set(photoHash, profileId);
+          }
+        }
+      } catch {}
+    }
+
+    // Last resort: scan all visible grid images and try to match by src
+    if (!profileId) {
+      const allImages = document.querySelectorAll('img[src*="cdns.grindr.com"]');
+      for (const img of allImages) {
+        const src = (img as HTMLImageElement).src;
+        if (src.includes(photoHash)) {
+          // Found the img — try to find a profile link nearby
+          const card = (img as HTMLElement).closest('[data-testid="cascadeCellContainer"]');
+          if (card) {
+            const link = card.querySelector('a[href*="/chat/"]');
+            const href = link?.getAttribute('href') || '';
+            const match = href.match(/\/chat\/(\d+)/);
+            if (match) {
+              profileId = match[1];
+              photoHashToProfileId.set(photoHash, profileId);
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!profileId) {
+    console.warn(`${LOG} Could not resolve hash ${photoHash.slice(0, 12)} to profileId`);
     return;
   }
+
   console.log(`${LOG} Resolved hash → profileId: ${profileId}`);
-  // Dispatch the standard block event
   window.dispatchEvent(new CustomEvent('__aggregaytor_block_profile', {
     detail: { profileId },
   }));
