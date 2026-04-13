@@ -462,9 +462,9 @@ function setupClickHandlers(): void {
       // Get a quick phrase from localStorage
       try {
         const phrases = JSON.parse(localStorage.getItem('aggregaytor_quick_phrases') || '[]');
-        const subs = JSON.parse(localStorage.getItem('aggregaytor_text_substitutions') || '[]');
-        // Use first intro phrase, or first quick phrase, or first substitution
-        const phrase = (phrases[0]) || (subs[0]?.phrase) || '';
+        // Only use quick phrases — NOT text substitutions (those include
+        // long entries like parking directions that shouldn't be auto-sent)
+        const phrase = phrases[0] || '';
         if (phrase) {
           // Dispatch auto-send event (handled by sniffies.ts)
           window.dispatchEvent(new CustomEvent('__aggregaytor_send_message', {

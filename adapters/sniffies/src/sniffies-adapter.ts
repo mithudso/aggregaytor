@@ -844,18 +844,12 @@ export class SniffiesAdapter extends BaseAdapter {
    * ```
    * So we search up to 4 levels deep via {@link deepFindAvatarUrl}.
    */
-  private resolveAvatarUrl(obj: Record<string, unknown>, profileId: string): string {
+  private resolveAvatarUrl(obj: Record<string, unknown>, _profileId: string): string {
     const found = this.deepFindAvatarUrl(obj, 0);
     if (found) return found;
-    // Fallback: construct Sniffies CDN URL from the profile ID.
-    // Pattern: https://profile.sniffiesassets.com/{profileId}/0
-    // These are publicly accessible (no auth required — the Sniffies SPA
-    // loads them cross-origin). If the profile has no photo, the CDN returns
-    // a default avatar or 404, and the panel's image error handler hides it
-    // gracefully (falls back to the letter initial).
-    if (profileId && /^[0-9a-f]{10,}$/i.test(profileId)) {
-      return `https://profile.sniffiesassets.com/${profileId}/0`;
-    }
+    // Don't construct CDN fallback URLs — they require auth cookies
+    // and return 403 from the extension side panel, causing log spam.
+    // Only use URLs actually found in API responses.
     return '';
   }
 

@@ -618,15 +618,10 @@ function showFloatingPanel(contactId: string, platform: string): void {
   // Block — hide the profile on Sniffies map AND mark in aggregator
   panel.querySelector('.fp-block-btn')!.addEventListener('click', () => {
     const pid = fpContactId.replace(/^[a-z]+:/, '');
-    // Inject script to dispatch events in MAIN world (ISOLATED world
-    // CustomEvents don't reach MAIN world listeners)
-    const script = document.createElement('script');
-    script.textContent = `
-      window.dispatchEvent(new CustomEvent('__aggregaytor_block_by_map_filter', { detail: { profileId: '${pid}' } }));
-      window.dispatchEvent(new CustomEvent('__aggregaytor_block_profile', { detail: { profileId: '${pid}' } }));
-    `;
-    document.documentElement.appendChild(script);
-    script.remove();
+    // Use postMessage to cross the ISOLATED→MAIN world boundary.
+    // postMessage works across worlds (unlike CustomEvent which is per-world).
+    // The MAIN world listens for these via window.addEventListener('message').
+    window.postMessage({ type: '__aggregaytor_block', profileId: pid }, '*');
     // Mark as blocked in the aggregator service worker
     chrome.runtime.sendMessage({
       type: 'PROFILE_BLOCKED',
@@ -696,12 +691,12 @@ function showFloatingPanel(contactId: string, platform: string): void {
     c.innerHTML = phrases.map((p: string) => `<button class="fp-phrase-btn" title="${p}">${p.length > 18 ? p.slice(0, 16) + '…' : p}</button>`).join('');
     c.querySelectorAll('.fp-phrase-btn').forEach((btn, i) => {
       btn.addEventListener('click', () => {
-        // ISOLATED world can't dispatch events to MAIN world directly.
-        // Inject a <script> tag that dispatches the event in the page context.
-        const script = document.createElement('script');
-        script.textContent = `window.dispatchEvent(new CustomEvent('__aggregaytor_send_message', { detail: ${JSON.stringify({ text: phrases[i], contactId: fpContactId })} }));`;
-        document.documentElement.appendChild(script);
-        script.remove();
+        // Use postMessage to cross ISOLATED→MAIN world boundary
+        window.postMessage({
+          type: '__aggregaytor_send',
+          text: phrases[i],
+          contactId: fpContactId,
+        }, '*');
         (btn as HTMLElement).style.background = 'rgba(34,197,94,0.2)';
         setTimeout(() => { (btn as HTMLElement).style.background = ''; }, 500);
       });

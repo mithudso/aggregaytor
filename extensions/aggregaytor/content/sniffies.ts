@@ -124,6 +124,30 @@ initMapFilters();
 // Type a shortcut (e.g. "hg ") and it auto-expands to the full phrase.
 initTextExpander();
 
+// ── Cross-World Message Handler ────────────────────────────────────────────
+// The floating panel runs in ISOLATED world and can't dispatch CustomEvents
+// to MAIN world. Instead it uses postMessage which crosses world boundaries.
+// We listen here in MAIN world and dispatch the appropriate CustomEvents.
+window.addEventListener('message', (event) => {
+  if (!event.data || typeof event.data !== 'object') return;
+  if (event.data.type === '__aggregaytor_block') {
+    const pid = event.data.profileId;
+    if (pid) {
+      window.dispatchEvent(new CustomEvent('__aggregaytor_block_by_map_filter', {
+        detail: { profileId: pid },
+      }));
+      window.dispatchEvent(new CustomEvent('__aggregaytor_block_profile', {
+        detail: { profileId: pid },
+      }));
+    }
+  }
+  if (event.data.type === '__aggregaytor_send') {
+    window.dispatchEvent(new CustomEvent('__aggregaytor_send_message', {
+      detail: { text: event.data.text, contactId: event.data.contactId },
+    }));
+  }
+});
+
 // ── Auto-Send Mechanism ────────────────────────────────────────────────────
 // When the service worker wants to auto-send a message (from the auto-respond
 // system), it sends a command through the bridge, which dispatches this event.
