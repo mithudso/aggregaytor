@@ -212,42 +212,51 @@ function scanMarkers(): void {
   }
 }
 
-// ── Attitude Detection ─────────────────────────────────────────────────────
+// ── Attitude Detection (Fuzzy Cross-Platform Matching) ─────────────────────
+// Each checkbox uses FUZZY matching so it catches ALL variations of that
+// position across all platforms:
+//   "Top"    → top, vers top, passive top, dom top, dom top breeder
+//   "Bottom" → bottom, vers bottom, power bottom, submissive bottom
+//   "Vers"   → vers, versatile, vers top, vers bottom
+//   "Side"   → side
+//
+// The Vers checkbox catches pure vers only (not vers top/vers bottom).
+// The Vers Top and Vers Bottom checkboxes catch those specific combos.
+// This means: hiding "Top" hides ALL top-leaning positions.
 
-function normalizeAttitude(att: string): string {
-  const lower = (att || '').toLowerCase().trim();
-  if (lower.includes('dom top') || lower.includes('breeder')) return 'dom top breeder';
-  if (lower.includes('passive top')) return 'passive top';
-  if (lower.includes('vers top')) return 'vers top';
-  if (lower.includes('power bottom')) return 'power bottom';
-  if (lower.includes('submissive bottom')) return 'submissive bottom';
-  if (lower.includes('vers bottom')) return 'vers bottom';
-  if (lower === 'top') return 'top';
-  if (lower === 'bottom') return 'bottom';
-  if (lower === 'vers' || lower === 'versatile') return 'vers';
-  if (lower === 'side') return 'side';
-  return lower || 'unspecified';
+function attitudeContains(att: string, keyword: string): boolean {
+  return att.toLowerCase().includes(keyword);
 }
 
 function shouldHideAttitude(att: string): boolean {
-  const norm = normalizeAttitude(att);
-  if (norm === 'bottom' && settings.hideBottom) return true;
-  if (norm === 'vers bottom' && settings.hideVersBottom) return true;
-  if (norm === 'vers' && settings.hideVers) return true;
-  if (norm === 'vers top' && settings.hideVersTop) return true;
-  if (norm === 'top' && settings.hideTop) return true;
-  if (norm === 'side' && settings.hideSide) return true;
-  if (norm === 'unspecified' && settings.hideUnspecified) return true;
-  return false;
+  const lower = (att || '').toLowerCase().trim();
+  if (!lower || lower === 'unspecified' || lower === 'unknown' || lower === '') {
+    return settings.hideUnspecified;
+  }
+  // Vers Bottom — check before generic bottom/vers
+  if (attitudeContains(lower, 'vers') && attitudeContains(lower, 'bottom')) return settings.hideVersBottom;
+  // Vers Top — check before generic top/vers
+  if (attitudeContains(lower, 'vers') && attitudeContains(lower, 'top')) return settings.hideVersTop;
+  // Pure vers/versatile (no top/bottom qualifier)
+  if (attitudeContains(lower, 'vers') || attitudeContains(lower, 'versatile')) return settings.hideVers;
+  // Bottom (catches: bottom, power bottom, submissive bottom)
+  if (attitudeContains(lower, 'bottom')) return settings.hideBottom;
+  // Top (catches: top, passive top, dom top, dom top breeder)
+  if (attitudeContains(lower, 'top') || attitudeContains(lower, 'breeder')) return settings.hideTop;
+  // Side
+  if (attitudeContains(lower, 'side')) return settings.hideSide;
+  // Anything else unrecognized
+  return settings.hideUnspecified;
 }
 
 function shouldHighlightAttitude(att: string): boolean {
-  const norm = normalizeAttitude(att);
-  if (norm === 'bottom' && settings.highlightBottom) return true;
-  if (norm === 'vers bottom' && settings.highlightVersBottom) return true;
-  if (norm === 'vers' && settings.highlightVers) return true;
-  if (norm === 'vers top' && settings.highlightVersTop) return true;
-  if (norm === 'top' && settings.highlightTop) return true;
+  const lower = (att || '').toLowerCase().trim();
+  if (!lower) return false;
+  if (attitudeContains(lower, 'vers') && attitudeContains(lower, 'bottom')) return settings.highlightVersBottom;
+  if (attitudeContains(lower, 'vers') && attitudeContains(lower, 'top')) return settings.highlightVersTop;
+  if (attitudeContains(lower, 'vers') || attitudeContains(lower, 'versatile')) return settings.highlightVers;
+  if (attitudeContains(lower, 'bottom')) return settings.highlightBottom;
+  if (attitudeContains(lower, 'top') || attitudeContains(lower, 'breeder')) return settings.highlightTop;
   return false;
 }
 
