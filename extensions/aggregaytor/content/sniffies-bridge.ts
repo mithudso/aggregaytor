@@ -518,12 +518,12 @@ function injectFloatingCSS(): void {
   const s = document.createElement('style');
   s.id = 'aggregaytor-fp-css';
   s.textContent = `
-    #${FP_ID}{position:fixed;z-index:99999;width:250px;background:rgba(15,20,25,0.95);border:1px solid rgba(59,130,246,0.3);border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.5);font-family:system-ui,sans-serif;font-size:12px;color:#e7e9ea;overflow:hidden}
-    #${FP_ID}.collapsed .fp-body{display:none}#${FP_ID}.collapsed{width:150px}
+    #${FP_ID}{position:fixed;z-index:99999;width:320px;background:rgba(15,20,25,0.95);border:1px solid rgba(59,130,246,0.3);border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.5);font-family:system-ui,sans-serif;font-size:12px;color:#e7e9ea;overflow:hidden}
+    #${FP_ID}.collapsed .fp-body{display:none}#${FP_ID}.collapsed{width:170px}
     .fp-header{display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:rgba(59,130,246,0.15);cursor:move;user-select:none;border-bottom:1px solid rgba(59,130,246,0.2)}
     .fp-header-title{font-weight:600;font-size:11px;color:#93c5fd}.fp-header-btns{display:flex;gap:4px}
     .fp-header-btn{background:none;border:none;color:#6b7280;cursor:pointer;font-size:14px;padding:0 2px}.fp-header-btn:hover{color:#e7e9ea}
-    .fp-body{padding:8px 10px}.fp-actions{display:flex;gap:6px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+    .fp-body{padding:8px 10px}.fp-actions{display:flex;gap:6px;align-items:center;margin-bottom:8px;flex-wrap:nowrap}
     .fp-action-btn{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 8px;color:#e7e9ea;cursor:pointer;font-size:11px;font-family:inherit;transition:background 0.15s}
     .fp-action-btn:hover{background:rgba(59,130,246,0.2);border-color:rgba(59,130,246,0.4)}
     .fp-action-btn.danger{border-color:rgba(239,68,68,0.3);color:#f87171}.fp-action-btn.danger:hover{background:rgba(239,68,68,0.15)}
@@ -571,8 +571,9 @@ function showFloatingPanel(contactId: string, platform: string): void {
     </div>
     <div class="fp-body">
       <div class="fp-actions">
-        <button class="fp-action-btn danger fp-block-btn" title="Block/hide this profile">🚫 Block Profile</button>
-        <button class="fp-action-btn fp-notes-btn">📝 Notes</button>
+        <button class="fp-action-btn danger fp-block-btn" title="Block/hide this profile">🚫</button>
+        <button class="fp-action-btn fp-notes-btn" title="Notes">📝</button>
+        <button class="fp-action-btn fp-reminder-btn" title="Set reminder">⏰</button>
         <div class="fp-stars">${[1,2,3,4,5].map(n => `<span class="fp-star" data-star="${n}">★</span>`).join('')}</div>
       </div>
       <div class="fp-phrases" id="fp-phrases"></div>
@@ -620,6 +621,21 @@ function showFloatingPanel(contactId: string, platform: string): void {
     window.dispatchEvent(new CustomEvent('__aggregaytor_block_profile', { detail: { profileId: pid } }));
     chrome.runtime.sendMessage({ type: 'PROFILE_BLOCKED', contactId: fpContactId, platform: fpPlatform }).catch(() => {});
     hideFloatingPanel();
+  });
+
+  // Reminder — quick 1-hour reminder
+  panel.querySelector('.fp-reminder-btn')!.addEventListener('click', () => {
+    const dueAt = new Date(Date.now() + 3600_000).toISOString(); // 1 hour from now
+    chrome.runtime.sendMessage({
+      type: 'CREATE_REMINDER',
+      contactId: fpContactId,
+      platform: fpPlatform,
+      note: 'Follow up',
+      dueAt,
+    }).catch(() => {});
+    const btn = panel.querySelector('.fp-reminder-btn') as HTMLElement;
+    btn.textContent = '✅';
+    setTimeout(() => { btn.textContent = '⏰'; }, 1500);
   });
 
   // Notes toggle
