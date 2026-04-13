@@ -294,6 +294,44 @@
         </select>
       </div>
       <div class="settings-section">
+        <h3 class="settings-heading">Export / Import</h3>
+        <div class="settings-row">
+          <button class="settings-btn" id="sp-export-all">Export All Data</button>
+          <button class="settings-btn" id="sp-export-blocked">Export Blocked</button>
+        </div>
+        <div class="settings-row" style="margin-top:6px">
+          <button class="settings-btn" id="sp-import-all">Import All Data</button>
+          <button class="settings-btn" id="sp-import-blocked">Import Blocked</button>
+          <input type="file" id="sp-import-file" accept=".json" style="display:none">
+        </div>
+        <label class="settings-checkbox-label" style="margin-top:6px">
+          <input type="checkbox" id="sp-export-encrypt">
+          Encrypt with passphrase (AES-256)
+        </label>
+        <input type="password" id="sp-export-passphrase" class="settings-input" placeholder="Encryption passphrase..." style="display:none">
+        <div id="sp-export-status" class="settings-status"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Quick Phrases</h3>
+        <div class="settings-info">Predefined messages to send with one click. One per line.</div>
+        <textarea id="sp-quick-phrases" class="settings-textarea" rows="4" placeholder="Hey there!&#10;What are you up to?&#10;Looking?"></textarea>
+        <button class="settings-btn" id="sp-save-phrases" style="margin-top:4px">Save Phrases</button>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Broadcast</h3>
+        <div class="settings-info">Send a message to all bookmarked contacts on a platform.</div>
+        <input type="text" id="sp-broadcast-msg" class="settings-input" placeholder="Message to broadcast...">
+        <div class="settings-row" style="margin-top:4px">
+          <select id="sp-broadcast-platform" class="settings-select" style="flex:1">
+            <option value="sniffies">Sniffies</option>
+            <option value="grindr">Grindr</option>
+            <option value="adam4adam">A4A</option>
+          </select>
+          <button class="settings-btn" id="sp-broadcast-send" style="border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.1);color:#f87171">Send Broadcast</button>
+        </div>
+        <div id="sp-broadcast-status" class="settings-status"></div>
+      </div>
+      <div class="settings-section">
         <h3 class="settings-heading">Data</h3>
         <button class="settings-btn" id="sp-clear-all" style="border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.1);color:#f87171">Clear all messages &amp; data</button>
         <div id="sp-clear-status" class="settings-status"></div>
@@ -397,8 +435,18 @@
 
   <!-- Response bar -->
   <div class="response-bar">
+    <button class="phrase-btn" id="phrase-toggle" title="Quick phrases">💬</button>
     <textarea id="response-input" rows="1" placeholder="Type a response..."></textarea>
     <button class="suggest-btn" id="suggest-btn">Suggest</button>
+  </div>
+
+  <!-- Quick phrase floating panel (shown when 💬 is clicked in thread view) -->
+  <div id="phrase-panel" class="phrase-panel" style="display:none">
+    <div class="phrase-header">
+      <span>Quick Phrases</span>
+      <button class="phrase-close" id="phrase-close">&times;</button>
+    </div>
+    <div id="phrase-list" class="phrase-list"></div>
   </div>
 
   <!-- Keyboard shortcuts help overlay -->

@@ -841,3 +841,52 @@ body {
 .task-item:hover .task-delete { opacity: 1; }
 .task-delete:hover { color: #ef4444; }
 .task-empty { padding: 24px 16px; text-align: center; color: #4b5563; font-size: 13px; }
+
+/* ── Star Ratings ──────────────────────────────────────────────────────── */
+.star-rating { display: flex; gap: 2px; margin: 4px 0; }
+.star-btn {
+  font-size: 16px; cursor: pointer; color: #4b5563;
+  transition: color 0.15s; user-select: none;
+}
+.star-btn.active { color: #fbbf24; }
+.star-btn:hover { color: #f59e0b; }
+.meta-badge.rating { color: #fbbf24; font-size: 9px; letter-spacing: -1px; }
+
+/* ── Quick Phrase Panel ────────────────────────────────────────────────── */
+.phrase-btn {
+  background: none; border: none; font-size: 16px; cursor: pointer;
+  padding: 4px; opacity: 0.6; transition: opacity 0.15s;
+}
+.phrase-btn:hover { opacity: 1; }
+.phrase-panel {
+  position: fixed; bottom: 48px; left: 8px; right: 8px; z-index: 40;
+  background: #1a1f2e; border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 10px; box-shadow: 0 -4px 12px rgba(0,0,0,0.4);
+  max-height: 40vh; overflow: hidden; display: flex; flex-direction: column;
+}
+.phrase-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,0.08);
+  font-size: 13px; color: #e7e9ea;
+}
+.phrase-close {
+  background: none; border: none; color: #6b7280; font-size: 18px; cursor: pointer;
+}
+.phrase-list { overflow-y: auto; padding: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
+.phrase-item {
+  background: rgba(59,130,246,0.1); border: 1px solid rgba(59,130,246,0.25);
+  color: #93c5fd; border-radius: 6px; padding: 6px 10px; font-size: 12px;
+  cursor: pointer; font-family: inherit; transition: background 0.15s;
+}
+.phrase-item:hover { background: rgba(59,130,246,0.2); }
+.phrase-empty { padding: 16px; text-align: center; color: #4b5563; font-size: 12px; }
+
+/* ── Settings Layout Helpers ───────────────────────────────────────────── */
+.settings-row { display: flex; gap: 6px; align-items: center; }
+.settings-textarea {
+  width: 100%; background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;
+  padding: 8px 10px; color: #e7e9ea; font-size: 12px;
+  font-family: inherit; resize: vertical;
+}
+.settings-textarea:focus { border-color: rgba(59,130,246,0.5); outline: none; }

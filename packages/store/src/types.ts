@@ -192,6 +192,8 @@ export interface ThreadMetaDoc {
   autoRespondSettings: AutoRespondSettings;
   /** LLM-generated nickname when the platform provides no username */
   generatedNickname: string;
+  /** User rating for this contact (1-5 stars, 0 = unrated) */
+  rating?: number;
   /** True if this contact has blocked the user on the platform */
   blockedByThem: boolean;
   /** Cached distance string from the platform (e.g. "2 miles") */

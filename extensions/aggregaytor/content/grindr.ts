@@ -20,9 +20,25 @@ const photoHashToProfileId = new Map<string, string>();
 
 function indexProfileFromPayload(obj: Record<string, unknown>): void {
   const pid = String(obj.profileId || obj.profileID || '');
+  if (!pid || !/^\d+$/.test(pid)) return;
+
+  // Index the primary photo hash
   const hash = String(obj.photoHash || obj.profileImageMediaHash || obj.mediahash || obj.primaryPhotoHash || '');
-  if (pid && /^\d+$/.test(pid) && hash) {
+  if (hash && hash !== 'undefined' && hash !== 'null') {
     photoHashToProfileId.set(hash, pid);
+  }
+
+  // Also index all hashes from the medias array — Grindr stores additional
+  // photos here, and profileImageMediaHash is often null while medias[0]
+  // contains the actual display photo hash used in the cascade grid img src.
+  const medias = obj.medias;
+  if (Array.isArray(medias)) {
+    for (const m of medias) {
+      const mHash = String((m as any)?.mediaHash || '');
+      if (mHash && mHash !== 'undefined') {
+        photoHashToProfileId.set(mHash, pid);
+      }
+    }
   }
 }
 
@@ -47,6 +63,12 @@ const adapter = new GrindrAdapter({ platform: 'grindr' });
 
 adapter.on('messages', (event) => {
   console.log(`${LOG} Messages captured:`, (event.payload as any[]).length);
+  // Index profileIds from message metadata for middle-click block lookup
+  for (const m of event.payload as any[]) {
+    if (m.metadata?.profileId && m.metadata?.conversationId) {
+      photoHashToProfileId.set(m.metadata.conversationId, m.metadata.profileId);
+    }
+  }
   sendToBridge({
     type: 'ADAPTER_MESSAGES',
     platform: 'grindr',
@@ -75,6 +97,35 @@ adapter.init().then(() => {
 }).catch((err) => {
   console.error(`${LOG} Adapter init failed:`, err);
 });
+
+// ── Proactive Profile Indexing ──────────────────────────────────────────────
+// Intercept ALL fetch responses on grindr.com to build the photoHash→profileId
+// map. This catches cascade API responses, profile fetches, and any other
+// endpoint that returns profile data with mediaHash fields.
+const origFetch = window.fetch;
+window.fetch = async function(...args: Parameters<typeof fetch>) {
+  const res = await origFetch.apply(this, args);
+  try {
+    const url = String((args[0] as any)?.url || args[0] || '');
+    if (!url.includes('grindr.com')) return res;
+    const ct = String(res.headers?.get('content-type') || '');
+    if (!ct.includes('json')) return res;
+    const clone = res.clone();
+    clone.json().then((data: any) => {
+      // Walk the response for profile objects with profileId + medias/photoHash
+      const walk = (obj: any, depth = 0) => {
+        if (!obj || typeof obj !== 'object' || depth > 5) return;
+        if (Array.isArray(obj)) { obj.slice(0, 50).forEach(item => walk(item, depth + 1)); return; }
+        indexProfileFromPayload(obj);
+        for (const v of Object.values(obj)) {
+          if (v && typeof v === 'object') walk(v, depth + 1);
+        }
+      };
+      walk(data);
+    }).catch(() => {});
+  } catch {}
+  return res;
+} as typeof fetch;
 
 // ── Block by Photo Hash Handler ──────────────────────────────────────────────
 // When the bridge can't find a profile ID directly in the DOM (most common
@@ -116,21 +167,37 @@ window.addEventListener('__aggregaytor_block_profile', ((event: CustomEvent) => 
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...auth },
   }).then(async (res) => {
+    let success = false;
     if (res.ok) {
       console.log(`${LOG} Hide success for ${profileId}`);
-      sendToBridge({ type: 'PROFILE_BLOCKED', contactId: `grindr:${profileId}`, platform: 'grindr' });
-      return;
-    }
-    console.warn(`${LOG} Hide failed (${res.status}), trying block API...`);
-    const blockRes = await fetch(`https://web.grindr.com/api/v3/me/blocks/${profileId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...auth },
-    });
-    if (blockRes.ok) {
-      console.log(`${LOG} Block success for ${profileId}`);
-      sendToBridge({ type: 'PROFILE_BLOCKED', contactId: `grindr:${profileId}`, platform: 'grindr' });
+      success = true;
     } else {
-      console.warn(`${LOG} Block also failed (${blockRes.status})`);
+      console.warn(`${LOG} Hide failed (${res.status}), trying block API...`);
+      const blockRes = await fetch(`https://web.grindr.com/api/v3/me/blocks/${profileId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...auth },
+      });
+      if (blockRes.ok) {
+        console.log(`${LOG} Block success for ${profileId}`);
+        success = true;
+      } else {
+        console.warn(`${LOG} Block also failed (${blockRes.status})`);
+      }
+    }
+    if (success) {
+      sendToBridge({ type: 'PROFILE_BLOCKED', contactId: `grindr:${profileId}`, platform: 'grindr' });
+      // Refresh the cascade grid so the hidden profile disappears.
+      // Grindr's React app watches for navigation/state changes — the
+      // simplest way to trigger a refresh is to navigate away and back.
+      setTimeout(() => {
+        const currentUrl = window.location.href;
+        window.history.pushState({}, '', '/');
+        window.dispatchEvent(new PopStateEvent('popstate'));
+        setTimeout(() => {
+          window.history.pushState({}, '', currentUrl);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        }, 300);
+      }, 500);
     }
   }).catch(err => console.warn(`${LOG} Block/hide error:`, err));
 }) as EventListener);

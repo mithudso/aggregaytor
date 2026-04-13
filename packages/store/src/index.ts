@@ -30,3 +30,4 @@ export { createTask, getAllTasks, updateTask, deleteTask, getTasksByContact } fr
 export { createGoogleTask, updateGoogleTask, deleteGoogleTask, pullGoogleTasks, syncGoogleTasks, authenticateGoogle, isGoogleAuthenticated } from './google-tasks.js';
 export { startSync, stopSync } from './sync.js';
 export type { SyncConfig } from './sync.js';
+export { exportAllData, importAllData, exportBlocked, importBlocked } from './export-import.js';

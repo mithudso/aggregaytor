@@ -239,7 +239,8 @@ function renderThreads(summaries) {
     totalUnread += unread;
 
     let badges = '';
-    if (meta.bookmarked) badges += '<span class="meta-badge bookmarked">★</span>';
+    if (meta.rating > 0) badges += '<span class="meta-badge rating">' + '★'.repeat(meta.rating) + '</span>';
+    if (meta.bookmarked) badges += '<span class="meta-badge bookmarked">🔖</span>';
     if (meta.autoRespondEnabled) badges += '<span class="meta-badge autorespond">🤖</span>';
 
     const avatarUrl = t.contact?.avatarUrl;
@@ -644,6 +645,7 @@ async function loadProfileInfo(contactId) {
         </div>
       </div>
       ${pics.length > 1 ? `<div class="profile-pics">${pics.map(p => `<div class="profile-pic"><img src="${esc(p)}" alt=""></div>`).join('')}</div>` : ''}
+      ${renderStarRating(contactId, contact?.platform || currentThread?.platform || '', meta.rating || 0)}
       ${!avatar ? `<button class="sync-pic-btn" id="sync-this-pic">📷 Sync photos for this profile</button>` : ''}
       ${meta.notes ? `<div style="font-size:11px;color:#9ca3af;margin-top:4px;border-top:1px solid rgba(255,255,255,0.06);padding-top:4px">${esc(meta.notes)}</div>` : ''}
     `;
@@ -2109,6 +2111,178 @@ document.getElementById('sp-toggle-devlog').addEventListener('click', () => {
   devLogEl.style.display = devLogVisible ? '' : 'none';
   document.getElementById('sp-toggle-devlog').textContent = devLogVisible ? 'Hide activity log' : 'Show activity log';
   if (devLogVisible) renderDevLog();
+});
+
+// ── Export / Import ──────────────────────────────────────────────────────────
+document.getElementById('sp-export-encrypt')?.addEventListener('change', (e) => {
+  document.getElementById('sp-export-passphrase').style.display = e.target.checked ? '' : 'none';
+});
+
+document.getElementById('sp-export-all')?.addEventListener('click', async () => {
+  const status = document.getElementById('sp-export-status');
+  status.textContent = 'Exporting...';
+  try {
+    const encrypt = document.getElementById('sp-export-encrypt').checked;
+    const passphrase = encrypt ? document.getElementById('sp-export-passphrase').value : undefined;
+    if (encrypt && !passphrase) { status.textContent = 'Enter a passphrase first'; return; }
+    const res = await chrome.runtime.sendMessage({ type: 'EXPORT_ALL_DATA', passphrase });
+    if (res?.ok) {
+      const blob = new Blob([res.data], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `aggregaytor-export-${new Date().toISOString().slice(0,10)}.json`;
+      a.click(); URL.revokeObjectURL(url);
+      status.textContent = 'Export downloaded!'; status.style.color = '#22c55e';
+    } else { status.textContent = res?.error || 'Export failed'; status.style.color = '#ef4444'; }
+  } catch (err) { status.textContent = 'Error: ' + err.message; status.style.color = '#ef4444'; }
+});
+
+document.getElementById('sp-export-blocked')?.addEventListener('click', async () => {
+  const status = document.getElementById('sp-export-status');
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'EXPORT_BLOCKED' });
+    if (res?.ok) {
+      const blob = new Blob([res.data], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `aggregaytor-blocked-${new Date().toISOString().slice(0,10)}.json`;
+      a.click(); URL.revokeObjectURL(url);
+      status.textContent = 'Blocked list exported!'; status.style.color = '#22c55e';
+    }
+  } catch (err) { status.textContent = 'Error: ' + err.message; }
+});
+
+let importMode = 'all'; // 'all' or 'blocked'
+document.getElementById('sp-import-all')?.addEventListener('click', () => {
+  importMode = 'all';
+  document.getElementById('sp-import-file').click();
+});
+document.getElementById('sp-import-blocked')?.addEventListener('click', () => {
+  importMode = 'blocked';
+  document.getElementById('sp-import-file').click();
+});
+document.getElementById('sp-import-file')?.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const status = document.getElementById('sp-export-status');
+  status.textContent = 'Importing...';
+  try {
+    const text = await file.text();
+    const encrypt = document.getElementById('sp-export-encrypt').checked;
+    const passphrase = encrypt ? document.getElementById('sp-export-passphrase').value : undefined;
+    const msgType = importMode === 'blocked' ? 'IMPORT_BLOCKED' : 'IMPORT_ALL_DATA';
+    const res = await chrome.runtime.sendMessage({ type: msgType, data: text, passphrase });
+    if (res?.ok) {
+      status.textContent = `Imported ${res.imported} items!`; status.style.color = '#22c55e';
+      loadThreads();
+    } else { status.textContent = res?.error || 'Import failed'; status.style.color = '#ef4444'; }
+  } catch (err) { status.textContent = 'Error: ' + err.message; status.style.color = '#ef4444'; }
+  e.target.value = ''; // reset file input
+});
+
+// ── Quick Phrases ────────────────────────────────────────────────────────────
+let quickPhrases = [];
+
+document.getElementById('sp-save-phrases')?.addEventListener('click', () => {
+  const text = document.getElementById('sp-quick-phrases').value;
+  quickPhrases = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  chrome.storage.local.set({ aggregaytor_quick_phrases: quickPhrases });
+});
+
+// Load phrases on startup
+chrome.storage.local.get('aggregaytor_quick_phrases', (data) => {
+  quickPhrases = data.aggregaytor_quick_phrases || ['Hey there!', "What's up?", 'Looking?', 'You host?'];
+  const el = document.getElementById('sp-quick-phrases');
+  if (el) el.value = quickPhrases.join('\n');
+});
+
+document.getElementById('phrase-toggle')?.addEventListener('click', () => {
+  const panel = document.getElementById('phrase-panel');
+  const visible = panel.style.display !== 'none';
+  panel.style.display = visible ? 'none' : '';
+  if (!visible) renderPhrasePanel();
+});
+document.getElementById('phrase-close')?.addEventListener('click', () => {
+  document.getElementById('phrase-panel').style.display = 'none';
+});
+
+function renderPhrasePanel() {
+  const list = document.getElementById('phrase-list');
+  if (!quickPhrases.length) {
+    list.innerHTML = '<div class="phrase-empty">No phrases yet. Add them in Settings → Data.</div>';
+    return;
+  }
+  list.innerHTML = quickPhrases.map((p, i) =>
+    `<button class="phrase-item" data-phrase-idx="${i}">${esc(p)}</button>`
+  ).join('');
+  list.querySelectorAll('.phrase-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const text = quickPhrases[parseInt(btn.dataset.phraseIdx)];
+      if (!text || !currentThread) return;
+      // Put in the response input and auto-send
+      const input = document.getElementById('response-input');
+      input.value = text;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      // Send via platform
+      chrome.runtime.sendMessage({
+        type: 'SEND_AUTO_RESPONSE_DIRECT',
+        text,
+        contactId: currentThread.contactId,
+        platform: currentThread.platform,
+      }).catch(() => {});
+      document.getElementById('phrase-panel').style.display = 'none';
+    });
+  });
+}
+
+// ── Broadcast ────────────────────────────────────────────────────────────────
+document.getElementById('sp-broadcast-send')?.addEventListener('click', async () => {
+  const msg = document.getElementById('sp-broadcast-msg').value.trim();
+  if (!msg) return;
+  const platform = document.getElementById('sp-broadcast-platform').value;
+  const status = document.getElementById('sp-broadcast-status');
+  const btn = document.getElementById('sp-broadcast-send');
+  btn.disabled = true; btn.textContent = 'Sending...';
+  status.textContent = 'Broadcasting... this may take a while';
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'BROADCAST_TO_FAVORITES',
+      message: msg,
+      platform,
+      maxRecipients: 50,
+      delay: 5000,
+    });
+    if (res?.ok) {
+      status.textContent = `Sent to ${res.sent} of ${res.total} favorites`; status.style.color = '#22c55e';
+    } else { status.textContent = res?.error || 'Failed'; status.style.color = '#ef4444'; }
+  } catch (err) { status.textContent = 'Error: ' + err.message; status.style.color = '#ef4444'; }
+  btn.disabled = false; btn.textContent = 'Send Broadcast';
+});
+
+// ── Star Ratings (in thread view) ────────────────────────────────────────────
+function renderStarRating(contactId, platform, currentRating) {
+  const stars = [1, 2, 3, 4, 5].map(n =>
+    `<span class="star-btn ${n <= (currentRating || 0) ? 'active' : ''}" data-star="${n}">★</span>`
+  ).join('');
+  return `<div class="star-rating" data-contact="${esc(contactId)}" data-platform="${esc(platform)}">${stars}</div>`;
+}
+
+// Delegate star click handler
+document.addEventListener('click', (e) => {
+  const star = e.target.closest('.star-btn');
+  if (!star) return;
+  const container = star.closest('.star-rating');
+  const contactId = container?.dataset.contact;
+  const platform = container?.dataset.platform;
+  const rating = parseInt(star.dataset.star);
+  if (!contactId || !rating) return;
+  // Toggle: clicking same star = clear rating
+  const current = container.querySelectorAll('.star-btn.active').length;
+  const newRating = rating === current ? 0 : rating;
+  chrome.runtime.sendMessage({ type: 'SET_RATING', contactId, platform, rating: newRating }).catch(() => {});
+  container.querySelectorAll('.star-btn').forEach((s, i) => {
+    s.classList.toggle('active', i < newRating);
+  });
 });
 
 function addDevLog(msg) {

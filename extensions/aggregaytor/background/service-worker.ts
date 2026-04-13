@@ -17,6 +17,7 @@ import {
   createTask, getAllTasks, updateTask, deleteTask, getTasksByContact,
   createGoogleTask, updateGoogleTask, deleteGoogleTask, pullGoogleTasks, syncGoogleTasks, authenticateGoogle, isGoogleAuthenticated,
   getContact, getDB, destroyDB,
+  exportAllData, importAllData, exportBlocked, importBlocked,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
 import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS } from './llm.js';
@@ -560,6 +561,90 @@ async function handleMessage(msg: any): Promise<any> {
       } catch (err) {
         return { ok: false, error: (err as Error).message };
       }
+    }
+
+    // ── Export/Import ──────────────────────────────────────────────────────
+    case 'EXPORT_ALL_DATA': {
+      try {
+        const json = await exportAllData(msg.passphrase);
+        return { ok: true, data: json };
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
+    case 'IMPORT_ALL_DATA': {
+      try {
+        invalidateThreadCache();
+        const result = await importAllData(msg.data, msg.passphrase);
+        return { ok: true, ...result };
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
+    case 'EXPORT_BLOCKED': {
+      try {
+        const json = await exportBlocked();
+        return { ok: true, data: json };
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
+    case 'IMPORT_BLOCKED': {
+      try {
+        const result = await importBlocked(msg.data);
+        return { ok: true, ...result };
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
+
+    // ── Broadcast Message ──────────────────────────────────────────────────
+    case 'BROADCAST_TO_FAVORITES': {
+      // Send a message to all favorited contacts on a specific platform
+      try {
+        const allMeta = await getAllThreadMeta();
+        const favorites = allMeta.filter(m =>
+          (m.bookmarked || m.favorited) &&
+          (!msg.platform || m.platform === msg.platform)
+        );
+        let sent = 0;
+        const maxRecipients = Math.min(favorites.length, msg.maxRecipients || 50);
+
+        for (let i = 0; i < maxRecipients; i++) {
+          const meta = favorites[i];
+          const contactId = meta._id?.replace('meta:', '') || meta.contactId;
+          if (!contactId) continue;
+
+          // Queue as auto-respond with the broadcast message
+          try {
+            const platform = meta.platform || contactId.split(':')[0];
+            const tabs = await chrome.tabs.query({});
+            for (const tab of tabs) {
+              if (!tab.id || !tab.url) continue;
+              const platformHosts: Record<string, string> = {
+                sniffies: 'sniffies.com', grindr: 'web.grindr.com',
+                doublelist: 'doublelist.com', adam4adam: 'adam4adam.com',
+              };
+              if (tab.url.includes(platformHosts[platform] || '___none___')) {
+                await chrome.tabs.sendMessage(tab.id, {
+                  type: 'SEND_AUTO_RESPONSE',
+                  text: msg.message,
+                  contactId,
+                }).catch(() => {});
+                // Navigate to the conversation first
+                await chrome.tabs.sendMessage(tab.id, {
+                  type: 'SPA_NAVIGATE',
+                  url: PLATFORM_URLS[platform]?.(contactId) || '',
+                  path: new URL(PLATFORM_URLS[platform]?.(contactId) || 'about:blank').pathname,
+                }).catch(() => {});
+                sent++;
+                // Wait between sends to avoid rate limiting
+                await new Promise(r => setTimeout(r, msg.delay || 3000));
+                break;
+              }
+            }
+          } catch {}
+        }
+        return { ok: true, sent, total: favorites.length };
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
+
+    // ── Profile Rating ─────────────────────────────────────────────────────
+    case 'SET_RATING': {
+      const meta = await upsertThreadMeta(msg.contactId, msg.platform, { rating: msg.rating });
+      return { ok: true, meta };
     }
 
     // Debug commands (from MCP server or dev tools)
