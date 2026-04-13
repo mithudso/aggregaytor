@@ -186,18 +186,34 @@ window.addEventListener('__aggregaytor_block_profile', ((event: CustomEvent) => 
     }
     if (success) {
       sendToBridge({ type: 'PROFILE_BLOCKED', contactId: `grindr:${profileId}`, platform: 'grindr' });
-      // Refresh the cascade grid so the hidden profile disappears.
-      // Grindr's React app watches for navigation/state changes — the
-      // simplest way to trigger a refresh is to navigate away and back.
+      // Remove the hidden profile's card from the DOM directly instead of
+      // refreshing the entire cascade (which caused Grindr's service worker
+      // to throw fetch errors from the pushState navigation trick).
+      // Find and fade out the card element containing the blocked profile's image.
       setTimeout(() => {
-        const currentUrl = window.location.href;
-        window.history.pushState({}, '', '/');
-        window.dispatchEvent(new PopStateEvent('popstate'));
-        setTimeout(() => {
-          window.history.pushState({}, '', currentUrl);
-          window.dispatchEvent(new PopStateEvent('popstate'));
-        }, 300);
-      }, 500);
+        document.querySelectorAll(`img[src*="${profileId}"], img[src*="cdns.grindr.com"]`).forEach(img => {
+          const card = (img as HTMLElement).closest('[data-testid="cascadeCellContainer"], [class*="cascade"], [class*="profile-card"]');
+          if (card) {
+            (card as HTMLElement).style.transition = 'opacity 0.3s, height 0.3s';
+            (card as HTMLElement).style.opacity = '0';
+            setTimeout(() => { (card as HTMLElement).style.display = 'none'; }, 300);
+          }
+        });
+        // Also try to find by the photo hash that triggered the block
+        const hashToFind = photoHashToProfileId.entries();
+        for (const [hash, pid] of hashToFind) {
+          if (pid === profileId) {
+            document.querySelectorAll(`img[src*="${hash}"]`).forEach(img => {
+              const card = (img as HTMLElement).closest('[data-testid="cascadeCellContainer"], [class*="cascade"], [class*="profile-card"]');
+              if (card) {
+                (card as HTMLElement).style.transition = 'opacity 0.3s';
+                (card as HTMLElement).style.opacity = '0';
+                setTimeout(() => { (card as HTMLElement).style.display = 'none'; }, 300);
+              }
+            });
+          }
+        }
+      }, 300);
     }
   }).catch(err => console.warn(`${LOG} Block/hide error:`, err));
 }) as EventListener);
