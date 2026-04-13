@@ -10,6 +10,27 @@ import { getCapturedAuth } from '@aggregaytor/adapter-core';
 
 const LOG = '[Aggregaytor:Grindr]';
 
+// ── Profile ID ↔ Photo Hash Map ─────────────────────────────────────────────
+// Grindr's cascade grid doesn't expose profile IDs in the DOM. But the API
+// responses that populate the grid DO contain profileId + photoHash pairs.
+// We build a map of photoHash → profileId from intercepted API data, then
+// when the user middle-clicks a profile card, we extract the photoHash from
+// the <img> src URL and look up the profileId.
+const photoHashToProfileId = new Map<string, string>();
+
+function indexProfileFromPayload(obj: Record<string, unknown>): void {
+  const pid = String(obj.profileId || obj.profileID || '');
+  const hash = String(obj.photoHash || obj.profileImageMediaHash || obj.mediahash || obj.primaryPhotoHash || '');
+  if (pid && /^\d+$/.test(pid) && hash) {
+    photoHashToProfileId.set(hash, pid);
+  }
+}
+
+// Expose the lookup function on window so the bridge can use it
+(window as any).__aggregaytor_grindr_lookupProfileId = function(photoHash: string): string {
+  return photoHashToProfileId.get(photoHash) || '';
+};
+
 function sendToBridge(message: Record<string, unknown>): void {
   try {
     window.dispatchEvent(
@@ -35,6 +56,13 @@ adapter.on('messages', (event) => {
 
 adapter.on('contacts', (event) => {
   console.log(`${LOG} Contacts captured:`, (event.payload as any[]).length);
+  // Index photo hashes for middle-click profile ID lookup
+  for (const c of event.payload as any[]) {
+    if (c.avatarUrl && c.platformUserId) {
+      const hashMatch = c.avatarUrl.match(/\/([a-f0-9]{32,})/i);
+      if (hashMatch) photoHashToProfileId.set(hashMatch[1], c.platformUserId);
+    }
+  }
   sendToBridge({
     type: 'ADAPTER_CONTACTS',
     platform: 'grindr',
@@ -47,6 +75,25 @@ adapter.init().then(() => {
 }).catch((err) => {
   console.error(`${LOG} Adapter init failed:`, err);
 });
+
+// ── Block by Photo Hash Handler ──────────────────────────────────────────────
+// When the bridge can't find a profile ID directly in the DOM (most common
+// on the cascade grid), it sends the photo hash from the img src. We look it
+// up in our photoHash→profileId map and trigger the block.
+window.addEventListener('__aggregaytor_block_by_hash', ((event: CustomEvent) => {
+  const { photoHash } = event.detail || {};
+  if (!photoHash) return;
+  const profileId = photoHashToProfileId.get(photoHash);
+  if (!profileId) {
+    console.warn(`${LOG} No profile ID found for hash ${photoHash.slice(0, 12)}... (map has ${photoHashToProfileId.size} entries)`);
+    return;
+  }
+  console.log(`${LOG} Resolved hash → profileId: ${profileId}`);
+  // Dispatch the standard block event
+  window.dispatchEvent(new CustomEvent('__aggregaytor_block_profile', {
+    detail: { profileId },
+  }));
+}) as EventListener);
 
 // ── Block/Hide Profile Handler ──────────────────────────────────────────────
 // Middle-click on a profile triggers this via the bridge. Uses the captured

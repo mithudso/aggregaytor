@@ -93,30 +93,53 @@ document.addEventListener('auxclick', (e) => {
   );
   if (!profileEl) return;
 
-  // Extract profile ID — try multiple sources:
-  // 1. data-profile-id attribute (most direct)
-  // 2. data-conversation-id attribute
-  // 3. /chat/{profileId} in a link href
-  // 4. Profile ID from the page's React state (via data attributes or URL)
+  // Extract profile ID — Grindr's DOM doesn't expose IDs directly, but
+  // profile card images use CDN URLs with the photo hash:
+  //   https://cdns.grindr.com/images/profile/1024x1024/{hash}
+  // The MAIN world adapter builds a photoHash→profileId map from API data.
+  // We extract the hash from the <img> src and look up the profile ID.
+
+  // Strategy 1: data-profile-id attribute (rare but possible)
   let profileId = profileEl.getAttribute('data-profile-id')
     || profileEl.getAttribute('data-conversation-id')
     || '';
+
+  // Strategy 2: /chat/ link href
   if (!profileId) {
     const link = profileEl.querySelector('a[href*="/chat/"]') || profileEl.closest('a[href*="/chat/"]');
     const href = link?.getAttribute('href') || '';
     const match = href.match(/\/chat\/([^/?#]+)/);
     if (match) profileId = match[1];
   }
-  // Try to find profile ID from nearby text or hidden elements
+
+  // Strategy 3: Extract photo hash from img src → dispatch to MAIN world
+  // for profileId lookup via the photoHash→profileId map built from API data.
+  // Since bridge (ISOLATED) can't access MAIN world variables, we dispatch
+  // a CustomEvent with the photo hash and let the MAIN world handle the block.
   if (!profileId) {
-    // Grindr may embed the ID in a data attribute we haven't checked
-    for (const el of profileEl.querySelectorAll('[data-testid]')) {
-      const testId = el.getAttribute('data-testid') || '';
-      const idMatch = testId.match(/(\d{6,})/);
-      if (idMatch) { profileId = idMatch[1]; break; }
+    const img = profileEl.querySelector('img[src*="cdns.grindr.com"]') || target.closest('img');
+    if (img) {
+      const src = img.getAttribute('src') || '';
+      const hashMatch = src.match(/\/([a-f0-9]{32,})/i);
+      if (hashMatch) {
+        console.log(`${LOG} Middle-click: dispatching block-by-hash for ${hashMatch[1].slice(0, 12)}...`);
+        // Send hash to MAIN world — it will look up the profileId and call the block API
+        window.dispatchEvent(new CustomEvent('__aggregaytor_block_by_hash', {
+          detail: { photoHash: hashMatch[1] },
+        }));
+        // Visual feedback
+        const orig = (profileEl as HTMLElement).style.opacity;
+        (profileEl as HTMLElement).style.opacity = '0.3';
+        setTimeout(() => { (profileEl as HTMLElement).style.opacity = orig || ''; }, 500);
+        return;
+      }
     }
   }
-  if (!profileId || !/^\d+$/.test(profileId)) return; // Grindr profile IDs are numeric
+
+  if (!profileId || !/^\d+$/.test(profileId)) {
+    console.log(`${LOG} Middle-click: could not extract profile ID from element`);
+    return;
+  }
 
   e.preventDefault();
   console.log(`${LOG} Middle-click block on profile: ${profileId}`);
