@@ -85,11 +85,33 @@ document.addEventListener('auxclick', (e) => {
   if (!contextValid || !checkContext()) return;
 
   const target = e.target as HTMLElement;
+
+  // Strategy 0: Check if we're on a profile view page — the URL or query
+  // params contain the profile ID directly (most reliable source).
+  // Grindr URLs: /chat/{profileId}, /?profile=true with profileId in URL
+  const urlMatch = location.href.match(/\/chat\/(\d{6,})/);
+  const profileParam = new URLSearchParams(location.search).get('profileId');
+  if (urlMatch || profileParam) {
+    const urlProfileId = urlMatch?.[1] || profileParam || '';
+    if (urlProfileId && /^\d+$/.test(urlProfileId)) {
+      e.preventDefault();
+      console.log(`${LOG} Middle-click block from URL: ${urlProfileId}`);
+      window.dispatchEvent(new CustomEvent('__aggregaytor_block_profile', {
+        detail: { profileId: urlProfileId },
+      }));
+      chrome.runtime.sendMessage({
+        type: 'PROFILE_BLOCKED', contactId: `grindr:${urlProfileId}`, platform: 'grindr',
+      }).catch(() => {});
+      return;
+    }
+  }
+
   // Find the nearest profile container — Grindr's cascade grid uses
   // data-testid="cascadeCellContainer" on each profile card
   const profileEl = target.closest(
     '[data-testid="cascadeCellContainer"], [data-profile-id], [data-conversation-id], ' +
-    'a[href*="/chat/"], [class*="profile-card"], [class*="cascade-item"]'
+    'a[href*="/chat/"], [class*="profile-card"], [class*="cascade-item"], ' +
+    '[class*="profile-detail"], [class*="ProfileView"], [data-testid*="profile"]'
   );
   if (!profileEl) return;
 
