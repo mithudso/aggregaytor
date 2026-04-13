@@ -578,12 +578,21 @@ export class SniffiesAdapter extends BaseAdapter {
     //    timestamp rounded to 1-minute buckets (to handle slight time diffs).
     const newMessages = messages.filter(m => {
       if (this.seenMessageIds.has(m.id)) return false;
-      // Content-based dedup: same person + same body text + same minute
-      const tsMinute = m.timestamp.slice(0, 16); // "2025-04-12T23:14"
-      const contentKey = `${m.contactId}|${m.body.slice(0, 100)}|${tsMinute}`;
+      // Content-based dedup: same person + same body text within 10 min.
+      // Round timestamp to 10-minute buckets to catch messages captured
+      // from different sources (API, DOM scrape, WS) seconds apart.
+      const tsDate = new Date(m.timestamp);
+      const bucket = new Date(Math.floor(tsDate.getTime() / 600_000) * 600_000).toISOString().slice(0, 16);
+      const contentKey = `${m.contactId}|${m.body.slice(0, 60)}|${bucket}`;
       if (this.seenMessageIds.has(contentKey)) return false;
+      // Also check body-only dedup for very recent messages (within session)
+      // This catches exact duplicates regardless of timestamp
+      const bodyKey = `${m.contactId}|${m.body.slice(0, 100)}`;
+      if (this.seenMessageIds.has(bodyKey)) return false;
       this.seenMessageIds.add(m.id);
       this.seenMessageIds.add(contentKey);
+      // Body-only key expires after we cap the set (effectively ~session-length)
+      this.seenMessageIds.add(bodyKey);
       return true;
     });
 

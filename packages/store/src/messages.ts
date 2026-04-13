@@ -49,6 +49,11 @@ function messageDocId(msg: UnifiedMessage): string {
  */
 function toMessageDoc(msg: UnifiedMessage): MessageDoc {
   const now = new Date().toISOString();
+  // Round timestamp to 10-minute buckets for content hash — this ensures that
+  // the same message captured from different sources (API, DOM, WS) with
+  // slightly different timestamps produces the SAME hash, preventing duplicates
+  // in PouchDB even when the adapter-level dedup misses them.
+  const tsRounded = new Date(Math.floor(new Date(msg.timestamp).getTime() / 600_000) * 600_000).toISOString();
   return {
     _id: messageDocId(msg),
     docType: 'message',
@@ -60,7 +65,7 @@ function toMessageDoc(msg: UnifiedMessage): MessageDoc {
     timestamp: msg.timestamp,
     read: msg.read,
     metadata: msg.metadata || {},
-    contentHash: stableContentHash(`${msg.platform}:${msg.contactId}:${msg.body}:${msg.timestamp}`),
+    contentHash: stableContentHash(`${msg.platform}:${msg.contactId}:${msg.body.slice(0, 100)}:${tsRounded}`),
     createdAt: now,
     updatedAt: now,
   };
@@ -136,22 +141,44 @@ export async function upsertMessages(
     }
   }
 
-  // Merge _rev and createdAt from existing docs to avoid conflicts
+  // Also check for content-hash duplicates — messages with different IDs
+  // but identical content (same person, same text, same ~10 min window).
+  // This catches cross-source duplicates that have different platform message IDs.
+  const existingHashes = new Set<string>();
+  for (const row of existing.rows) {
+    if ('error' in row) continue;
+    if (row.doc) existingHashes.add((row.doc as any).contentHash || '');
+  }
+
+  // Merge _rev and createdAt, skip content-hash duplicates
   let created = 0;
   let updated = 0;
+  const toWrite: MessageDoc[] = [];
+  const seenHashes = new Set<string>();
   for (const doc of docs) {
+    // Skip if we've already seen this content hash in this batch
+    if (seenHashes.has(doc.contentHash)) continue;
+    seenHashes.add(doc.contentHash);
+
     const prev = existingMap.get(doc._id);
     if (prev) {
-      (doc as any)._rev = prev._rev;   // attach rev for conflict-free update
-      doc.createdAt = prev.createdAt;   // preserve original creation timestamp
+      (doc as any)._rev = prev._rev;
+      doc.createdAt = prev.createdAt;
       updated++;
+      toWrite.push(doc);
+    } else if (existingHashes.has(doc.contentHash)) {
+      // Different ID but same content hash — skip (it's a duplicate)
+      continue;
     } else {
       created++;
+      toWrite.push(doc);
     }
   }
 
   // Write all docs in a single bulk operation
-  await withRetry(() => store.bulkDocs(docs));
+  if (toWrite.length) {
+    await withRetry(() => store.bulkDocs(toWrite));
+  }
   return { created, updated };
 }
 
