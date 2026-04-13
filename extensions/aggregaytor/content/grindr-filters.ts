@@ -69,6 +69,9 @@ interface GrindrFilterSettings {
   keywordFilter: FilterMode;
   keywords: string[]; // keywords to match in aboutMe
 
+  // Auto-block: call the Grindr hide API for profiles matching filters
+  autoBlock: boolean;
+
   enabled: boolean;
 }
 
@@ -87,8 +90,13 @@ let settings: GrindrFilterSettings = {
   neverChattedFilter: 'off',
   keywordFilter: 'off',
   keywords: [],
+  autoBlock: false,
   enabled: false,
 };
+
+// Track which profiles we've already auto-blocked this session
+// (so we don't spam the hide API on every filter pass)
+const autoBlockedThisSession = new Set<string>();
 
 // ── CSS Injection ──────────────────────────────────────────────────────────
 
@@ -196,6 +204,14 @@ function applyFilters(): void {
 
     if (shouldHideProfile(profile)) {
       (card as HTMLElement).classList.add(HIDE_CLASS);
+      // Auto-block: call Grindr hide API for matching profiles
+      if (settings.autoBlock && !autoBlockedThisSession.has(profileId)) {
+        autoBlockedThisSession.add(profileId);
+        // Dispatch to MAIN world to call the hide API with captured auth
+        window.dispatchEvent(new CustomEvent('__aggregaytor_block_profile', {
+          detail: { profileId },
+        }));
+      }
     } else {
       (card as HTMLElement).classList.remove(HIDE_CLASS);
     }

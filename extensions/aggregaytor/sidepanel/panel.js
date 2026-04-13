@@ -2350,6 +2350,7 @@ document.getElementById('sp-save-expansions')?.addEventListener('click', () => {
 document.getElementById('sp-grindr-filter-save')?.addEventListener('click', () => {
   const s = {
     enabled: document.getElementById('gf-enabled').checked,
+    autoBlock: document.getElementById('gf-auto-block').checked,
     ethnicityFilter: document.getElementById('gf-ethnicity-mode').value,
     ethnicityValues: [...document.querySelectorAll('[data-eth]:checked')].map(el => parseInt(el.dataset.eth)),
     genderFilter: document.getElementById('gf-gender-mode').value,
@@ -2375,6 +2376,7 @@ function loadGrindrFilterSettings() {
   chrome.storage.local.get('aggregaytor_grindr_filter_settings', (data) => {
     const s = data.aggregaytor_grindr_filter_settings || {};
     if (s.enabled) document.getElementById('gf-enabled').checked = true;
+    if (s.autoBlock) document.getElementById('gf-auto-block').checked = true;
     if (s.ethnicityFilter) document.getElementById('gf-ethnicity-mode').value = s.ethnicityFilter;
     if (s.genderFilter) document.getElementById('gf-gender-mode').value = s.genderFilter;
     if (s.neverChattedFilter) document.getElementById('gf-chatted-mode').value = s.neverChattedFilter;
