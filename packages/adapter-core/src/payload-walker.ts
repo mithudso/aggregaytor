@@ -66,12 +66,12 @@ export function walkPayload(
   const seen = new WeakSet();
   const queue: QueueItem[] = [{ value: payload, contextId, depth: 0 }];
 
-  // Node count cap: prevent unbounded traversal on very large payloads
-  // (e.g. Sniffies chat-data returning 100+ conversations × multiple messages
-  // = thousands of objects, each of which runs isLikelyMessage + findProfileId).
-  // 500 nodes is enough to cover any realistic conversation set.
+  // Node count cap: prevent unbounded traversal on very large payloads.
+  // Raised from 500 to 2000 to handle conversation history pagination
+  // responses that can contain 100+ messages with nested metadata objects.
+  // The 500 cap was causing silent message drops on large API responses.
   let visited = 0;
-  const MAX_NODES = 500;
+  const MAX_NODES = 2000;
 
   while (queue.length) {
     const { value, contextId: ctx, depth } = queue.shift()!;

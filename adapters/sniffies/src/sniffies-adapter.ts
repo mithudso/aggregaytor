@@ -636,7 +636,11 @@ export class SniffiesAdapter extends BaseAdapter {
 
     if (newMessages.length) {
       this.captureCount += newMessages.length;
-      log.info(`Captured ${newMessages.length} new messages from ${url} (${messages.length - newMessages.length} dupes skipped, total: ${this.captureCount})`);
+      log.info(`Captured ${newMessages.length} new messages from ${url.slice(0, 80)} (${messages.length - newMessages.length} dupes skipped, total: ${this.captureCount})`);
+    } else if (url.includes('/api/') || url.includes('/chat') || url.includes('/message')) {
+      // Log API calls that returned 0 messages — helps identify pagination
+      // endpoints whose response format we're not parsing correctly
+      log.debug(`API response parsed, 0 messages from: ${url.slice(0, 100)}`);
     }
     if (contacts.length) {
       this.emit({ type: 'contacts', payload: contacts });

@@ -573,7 +573,8 @@ async function openThread(contactId, platform, displayName) {
   // #19 Badge sync — update badge immediately on read
   chrome.runtime.sendMessage({ type: 'GET_UNREAD_COUNT' }).catch(() => {});
 
-  // Load messages
+  // Load messages — reset scroll state so renderMessages scrolls to bottom
+  document.getElementById('message-list').dataset.hasRendered = '';
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_MESSAGES_BY_CONTACT', contactId, limit: 500 });
     if (res?.ok) {
@@ -609,6 +610,7 @@ async function openThread(contactId, platform, displayName) {
           const refreshRes = await chrome.runtime.sendMessage({ type: 'GET_MESSAGES_BY_CONTACT', contactId, limit: 500 });
           if (refreshRes?.ok && currentThread?.contactId === contactId) {
             currentMessages = refreshRes.messages || [];
+            document.getElementById('message-list').dataset.hasRendered = ''; // force scroll to bottom
             renderMessages(currentMessages);
           }
         }
