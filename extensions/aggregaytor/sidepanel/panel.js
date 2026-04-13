@@ -13,12 +13,14 @@ let currentMessages = [];
 // ── User Preferences (loaded from chrome.storage.local) ─────────────────────
 let prefTimestampAbsolute = false; // true = "11:42 PM", false = "5m" (relative)
 let prefAutoNavigate = true;       // true = open platform tab on thread click
+let prefToolbarMode = 'icon';      // 'icon', 'icon-text', 'text'
 let selectedThreadIndex = -1;      // keyboard navigation: currently highlighted thread
 
 // Load preferences from storage at startup
-chrome.storage.local.get(['aggregaytor_timestamp_format', 'aggregaytor_auto_navigate'], (result) => {
+chrome.storage.local.get(['aggregaytor_timestamp_format', 'aggregaytor_auto_navigate', 'aggregaytor_toolbar_mode'], (result) => {
   prefTimestampAbsolute = result.aggregaytor_timestamp_format === 'absolute';
-  prefAutoNavigate = result.aggregaytor_auto_navigate !== false; // default true
+  prefAutoNavigate = result.aggregaytor_auto_navigate !== false;
+  prefToolbarMode = result.aggregaytor_toolbar_mode || 'icon';
 });
 
 // ── Global image error handler ──────────────────────────────────────────────
@@ -778,15 +780,22 @@ async function recordPrefAction(liked) {
 function renderHeaderActions() {
   const container = document.getElementById('header-actions');
   const m = currentMeta || {};
+  // Toolbar display mode: icon, icon-text, or text
+  const mode = prefToolbarMode;
+  function tb(icon, label, extra = '') {
+    if (mode === 'text') return `<span class="action-icon toolbar-text${extra}" data-action="${label.toLowerCase()}" title="${label}">${label}</span>`;
+    if (mode === 'icon-text') return `<span class="action-icon toolbar-icon-text${extra}" data-action="${label.toLowerCase()}" title="${label}">${icon} ${label}</span>`;
+    return `<span class="action-icon${extra}" data-action="${label.toLowerCase()}" title="${label}">${icon}</span>`;
+  }
   container.innerHTML = `
-    <span class="action-icon${m.bookmarked ? ' active' : ''}" data-action="bookmark" title="Bookmark">${m.bookmarked ? '★' : '☆'}</span>
-    <span class="action-icon" data-action="notes" title="Notes">📝</span>
-    <span class="action-icon" data-action="dossier" title="Dossier">📋</span>
-    <span class="action-icon" data-action="reminder" title="Reminder">⏰</span>
-    <span class="action-icon" data-action="archive" title="Archive">📦</span>
-    <span class="action-icon" data-action="hide" title="Hide until reply">🙈</span>
-    <span class="action-icon" data-action="greet" title="Greeting">👋</span>
-    <span class="action-icon${m.autoRespondEnabled ? ' active' : ''}" data-action="autorespond" title="Auto-respond">🤖</span>
+    ${tb(m.bookmarked ? '★' : '☆', 'Bookmark', m.bookmarked ? ' active' : '')}
+    ${tb('📝', 'Notes')}
+    ${tb('📋', 'Dossier')}
+    ${tb('⏰', 'Reminder')}
+    ${tb('📦', 'Archive')}
+    ${tb('🙈', 'Hide')}
+    ${tb('👋', 'Greet')}
+    ${tb('🤖', 'Autorespond', m.autoRespondEnabled ? ' active' : '')}
   `;
   container.querySelectorAll('.action-icon').forEach(icon => {
     icon.addEventListener('click', () => {
@@ -1814,9 +1823,10 @@ async function loadInlineSettings() {
   } catch {}
   // Load display preferences
   try {
-    const prefs = await chrome.storage.local.get(['aggregaytor_timestamp_format', 'aggregaytor_auto_navigate']);
+    const prefs = await chrome.storage.local.get(['aggregaytor_timestamp_format', 'aggregaytor_auto_navigate', 'aggregaytor_toolbar_mode']);
     document.getElementById('sp-timestamp-absolute').checked = prefs.aggregaytor_timestamp_format === 'absolute';
     document.getElementById('sp-auto-navigate').checked = prefs.aggregaytor_auto_navigate !== false;
+    document.getElementById('sp-toolbar-mode').value = prefs.aggregaytor_toolbar_mode || 'icon';
   } catch {}
 }
 
@@ -1879,6 +1889,11 @@ document.getElementById('sp-timestamp-absolute').addEventListener('change', (e) 
 document.getElementById('sp-auto-navigate').addEventListener('change', (e) => {
   prefAutoNavigate = e.target.checked;
   chrome.storage.local.set({ aggregaytor_auto_navigate: e.target.checked });
+});
+document.getElementById('sp-toolbar-mode')?.addEventListener('change', (e) => {
+  const mode = e.target.value;
+  chrome.storage.local.set({ aggregaytor_toolbar_mode: mode });
+  if (currentThread) renderHeaderActions(); // re-render toolbar with new mode
 });
 
 // Hotkey help button in settings

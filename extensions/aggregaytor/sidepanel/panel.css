@@ -897,3 +897,11 @@ body {
 .settings-divider {
   height: 1px; background: rgba(255,255,255,0.08); margin: 12px 0;
 }
+
+/* ── Toolbar Display Modes ─────────────────────────────────────────────── */
+.toolbar-text {
+  font-size: 10px !important; padding: 2px 6px; min-width: auto;
+}
+.toolbar-icon-text {
+  font-size: 10px !important; padding: 2px 5px; min-width: auto;
+}

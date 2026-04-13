@@ -485,6 +485,182 @@ window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
   }
 }) as EventListener);
 
+// ── Floating Quick-Action Panel ────────────────────────────────────────────
+// Injected directly on the platform page when a profile is opened.
+// Provides block, notes, ratings, and quick phrase buttons.
+
+const FP_ID = 'aggregaytor-floating-actions';
+let fpContactId = '';
+let fpPlatform = '';
+
+function injectFloatingCSS(): void {
+  if (document.getElementById('aggregaytor-fp-css')) return;
+  const s = document.createElement('style');
+  s.id = 'aggregaytor-fp-css';
+  s.textContent = `
+    #${FP_ID}{position:fixed;z-index:99999;width:250px;background:rgba(15,20,25,0.95);border:1px solid rgba(59,130,246,0.3);border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.5);font-family:system-ui,sans-serif;font-size:12px;color:#e7e9ea;overflow:hidden}
+    #${FP_ID}.collapsed .fp-body{display:none}#${FP_ID}.collapsed{width:150px}
+    .fp-header{display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:rgba(59,130,246,0.15);cursor:move;user-select:none;border-bottom:1px solid rgba(59,130,246,0.2)}
+    .fp-header-title{font-weight:600;font-size:11px;color:#93c5fd}.fp-header-btns{display:flex;gap:4px}
+    .fp-header-btn{background:none;border:none;color:#6b7280;cursor:pointer;font-size:14px;padding:0 2px}.fp-header-btn:hover{color:#e7e9ea}
+    .fp-body{padding:8px 10px}.fp-actions{display:flex;gap:6px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+    .fp-action-btn{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 8px;color:#e7e9ea;cursor:pointer;font-size:11px;font-family:inherit;transition:background 0.15s}
+    .fp-action-btn:hover{background:rgba(59,130,246,0.2);border-color:rgba(59,130,246,0.4)}
+    .fp-action-btn.danger{border-color:rgba(239,68,68,0.3);color:#f87171}.fp-action-btn.danger:hover{background:rgba(239,68,68,0.15)}
+    .fp-stars{display:flex;gap:1px;margin-left:auto}.fp-star{font-size:14px;cursor:pointer;color:#4b5563;user-select:none}.fp-star.active{color:#fbbf24}.fp-star:hover{color:#f59e0b}
+    .fp-phrases{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px}
+    .fp-phrase-btn{background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.25);color:#93c5fd;border-radius:5px;padding:3px 8px;font-size:10px;cursor:pointer;font-family:inherit;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .fp-phrase-btn:hover{background:rgba(59,130,246,0.2)}
+    .fp-notes-area{border-top:1px solid rgba(255,255,255,0.06);padding-top:6px}
+    .fp-notes-input{width:100%;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:5px;padding:5px 7px;color:#e7e9ea;font-size:11px;font-family:inherit;resize:vertical;min-height:32px;box-sizing:border-box}
+    .fp-notes-input:focus{border-color:rgba(59,130,246,0.5);outline:none}
+    .fp-status{font-size:9px;color:#22c55e;margin-top:2px;min-height:11px}
+  `;
+  (document.head || document.documentElement).appendChild(s);
+}
+
+function showFloatingPanel(contactId: string, platform: string): void {
+  if (!contactId || !contextValid) return;
+  if (document.getElementById(FP_ID) && fpContactId === contactId) return;
+  fpContactId = contactId;
+  fpPlatform = platform;
+
+  injectFloatingCSS();
+  const existing = document.getElementById(FP_ID);
+  if (existing) existing.remove();
+
+  const panel = document.createElement('div');
+  panel.id = FP_ID;
+
+  // Load position
+  let pos = { x: 20, y: 120 };
+  try { const s = localStorage.getItem('aggregaytor_fp_pos'); if (s) pos = JSON.parse(s); } catch {}
+  panel.style.left = `${pos.x}px`;
+  panel.style.top = `${pos.y}px`;
+
+  const collapsed = localStorage.getItem('aggregaytor_fp_collapsed') === 'true';
+  if (collapsed) panel.classList.add('collapsed');
+
+  panel.innerHTML = `
+    <div class="fp-header">
+      <span class="fp-header-title">⚡ Quick Actions</span>
+      <div class="fp-header-btns">
+        <button class="fp-header-btn fp-collapse-btn">${collapsed ? '▼' : '▲'}</button>
+        <button class="fp-header-btn fp-close-btn">×</button>
+      </div>
+    </div>
+    <div class="fp-body">
+      <div class="fp-actions">
+        <button class="fp-action-btn danger fp-block-btn">🚫 Hide</button>
+        <button class="fp-action-btn fp-notes-btn">📝 Notes</button>
+        <div class="fp-stars">${[1,2,3,4,5].map(n => `<span class="fp-star" data-star="${n}">★</span>`).join('')}</div>
+      </div>
+      <div class="fp-phrases" id="fp-phrases"></div>
+      <div class="fp-notes-area" id="fp-notes-area" style="display:none">
+        <textarea class="fp-notes-input" id="fp-notes-input" placeholder="Add notes..."></textarea>
+        <div class="fp-status" id="fp-status"></div>
+      </div>
+    </div>`;
+
+  document.body.appendChild(panel);
+
+  // Drag
+  let dragging = false, dx = 0, dy = 0;
+  panel.querySelector('.fp-header')!.addEventListener('mousedown', (e: Event) => {
+    const me = e as MouseEvent;
+    if ((me.target as HTMLElement).closest('.fp-header-btn')) return;
+    dragging = true;
+    const r = panel.getBoundingClientRect();
+    dx = me.clientX - r.left; dy = me.clientY - r.top;
+    me.preventDefault();
+  });
+  document.addEventListener('mousemove', (e: MouseEvent) => {
+    if (!dragging) return;
+    panel.style.left = `${Math.max(0, e.clientX - dx)}px`;
+    panel.style.top = `${Math.max(0, e.clientY - dy)}px`;
+  });
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    try { localStorage.setItem('aggregaytor_fp_pos', JSON.stringify({ x: parseInt(panel.style.left), y: parseInt(panel.style.top) })); } catch {}
+  });
+
+  // Collapse
+  panel.querySelector('.fp-collapse-btn')!.addEventListener('click', () => {
+    const c = panel.classList.toggle('collapsed');
+    (panel.querySelector('.fp-collapse-btn') as HTMLElement).textContent = c ? '▼' : '▲';
+    try { localStorage.setItem('aggregaytor_fp_collapsed', String(c)); } catch {}
+  });
+
+  // Close
+  panel.querySelector('.fp-close-btn')!.addEventListener('click', () => hideFloatingPanel());
+
+  // Block
+  panel.querySelector('.fp-block-btn')!.addEventListener('click', () => {
+    const pid = fpContactId.replace(/^[a-z]+:/, '');
+    window.dispatchEvent(new CustomEvent('__aggregaytor_block_profile', { detail: { profileId: pid } }));
+    chrome.runtime.sendMessage({ type: 'PROFILE_BLOCKED', contactId: fpContactId, platform: fpPlatform }).catch(() => {});
+    hideFloatingPanel();
+  });
+
+  // Notes toggle
+  panel.querySelector('.fp-notes-btn')!.addEventListener('click', () => {
+    const a = panel.querySelector('#fp-notes-area') as HTMLElement;
+    a.style.display = a.style.display === 'none' ? '' : 'none';
+  });
+
+  // Notes save (debounced)
+  let nt: ReturnType<typeof setTimeout> | null = null;
+  panel.querySelector('#fp-notes-input')!.addEventListener('input', (e) => {
+    if (nt) clearTimeout(nt);
+    nt = setTimeout(() => {
+      chrome.runtime.sendMessage({ type: 'UPSERT_THREAD_META', contactId: fpContactId, platform: fpPlatform, updates: { notes: (e.target as HTMLTextAreaElement).value } }).catch(() => {});
+      const st = panel.querySelector('#fp-status') as HTMLElement;
+      if (st) { st.textContent = 'Saved'; setTimeout(() => { st.textContent = ''; }, 1500); }
+    }, 800);
+  });
+
+  // Stars
+  panel.querySelectorAll('.fp-star').forEach(star => {
+    star.addEventListener('click', () => {
+      const r = parseInt((star as HTMLElement).dataset.star || '0');
+      const cur = panel.querySelectorAll('.fp-star.active').length;
+      const nr = r === cur ? 0 : r;
+      panel.querySelectorAll('.fp-star').forEach((s, i) => s.classList.toggle('active', i < nr));
+      chrome.runtime.sendMessage({ type: 'SET_RATING', contactId: fpContactId, platform: fpPlatform, rating: nr }).catch(() => {});
+    });
+  });
+
+  // Populate data
+  chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId }).then((res: any) => {
+    const m = res?.meta || {};
+    (panel.querySelector('#fp-notes-input') as HTMLTextAreaElement).value = m.notes || '';
+    const rating = m.rating || 0;
+    panel.querySelectorAll('.fp-star').forEach((s, i) => s.classList.toggle('active', i < rating));
+    if (m.notes) (panel.querySelector('#fp-notes-area') as HTMLElement).style.display = '';
+  }).catch(() => {});
+
+  // Phrases
+  chrome.storage.local.get('aggregaytor_quick_phrases', (data: any) => {
+    const phrases = (data.aggregaytor_quick_phrases || ['Hey there!', "What's up?", 'Looking?']).slice(0, 3);
+    const c = panel.querySelector('#fp-phrases') as HTMLElement;
+    if (!c) return;
+    c.innerHTML = phrases.map((p: string) => `<button class="fp-phrase-btn" title="${p}">${p.length > 18 ? p.slice(0, 16) + '…' : p}</button>`).join('');
+    c.querySelectorAll('.fp-phrase-btn').forEach((btn, i) => {
+      btn.addEventListener('click', () => {
+        window.dispatchEvent(new CustomEvent('__aggregaytor_send_message', { detail: { text: phrases[i], contactId: fpContactId } }));
+        (btn as HTMLElement).style.background = 'rgba(34,197,94,0.2)';
+        setTimeout(() => { (btn as HTMLElement).style.background = ''; }, 500);
+      });
+    });
+  });
+}
+
+function hideFloatingPanel(): void {
+  document.getElementById(FP_ID)?.remove();
+  fpContactId = '';
+}
+
 // ── URL Change Detection ────────────────────────────────────────────────────
 // Sniffies is an SPA (Angular) that uses pushState for navigation. When the
 // user opens a profile or conversation, the URL changes but NO page load or
@@ -510,10 +686,14 @@ function checkUrlChange() {
   const match = url.match(/\/profile\/([0-9a-f]{6,})(?:\/chat)?/i);
   if (match) {
     const contactId = `sniffies:${match[1].toLowerCase()}`;
-    // Notify the service worker of the active profile change so the UI can update
     try {
       chrome.runtime.sendMessage({ type: 'ACTIVE_PROFILE_CHANGED', contactId, platform: 'sniffies' }).catch(() => {});
-    } catch { /* context invalidated */ }
+    } catch {}
+    // Show floating quick-action panel on the page
+    showFloatingPanel(contactId, 'sniffies');
+  } else {
+    // Left profile view — hide the panel
+    hideFloatingPanel();
   }
 
   // If the user navigated to the chat panel (/chat), scrape the conversation
