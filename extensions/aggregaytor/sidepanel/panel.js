@@ -1414,6 +1414,14 @@ chrome.runtime.onMessage.addListener((message) => {
     debouncedLoadDrafts();
   }
   if (message.type === 'DRAFTS_UPDATED') loadDrafts();
+  if (message.type === 'PROFILE_CLOSED') {
+    // User left the profile/chat view on the platform (e.g., clicked map)
+    // Go back to inbox if we're in a thread view
+    activeOnSiteContactId = null;
+    if (document.body.classList.contains('view-thread')) {
+      goBack();
+    }
+  }
   if (message.type === 'ACTIVE_PROFILE_CHANGED') {
     activeOnSiteContactId = message.contactId || null;
     // Mark as read since user is looking at it on the site

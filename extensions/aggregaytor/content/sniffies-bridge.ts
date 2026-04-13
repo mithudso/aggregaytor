@@ -703,8 +703,13 @@ function checkUrlChange() {
     // Show floating quick-action panel on the page
     showFloatingPanel(contactId, 'sniffies');
   } else {
-    // Left profile view — hide the panel
+    // Left profile view — hide the floating panel and tell the side panel
+    // to go back to inbox (restores the pre-v0.51.1 behavior where clicking
+    // the map closed the conversation view)
     hideFloatingPanel();
+    try {
+      chrome.runtime.sendMessage({ type: 'PROFILE_CLOSED', platform: 'sniffies' }).catch(() => {});
+    } catch {}
   }
 
   // If the user navigated to the chat panel (/chat), scrape the conversation

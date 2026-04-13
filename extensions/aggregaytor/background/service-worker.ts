@@ -260,6 +260,11 @@ async function handleMessage(msg: any): Promise<any> {
       chrome.runtime.sendMessage({ type: 'ACTIVE_PROFILE_CHANGED', contactId: msg.contactId, platform: msg.platform }).catch(() => {})
       return { ok: true };
     }
+    case 'PROFILE_CLOSED': {
+      // Relay to side panel so it goes back to inbox
+      chrome.runtime.sendMessage({ type: 'PROFILE_CLOSED', platform: msg.platform }).catch(() => {})
+      return { ok: true };
+    }
 
     // Thread meta
     case 'GET_THREAD_META': return { ok: true, meta: await getThreadMeta(msg.contactId) };
