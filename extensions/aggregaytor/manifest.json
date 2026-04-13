@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Aggregaytor",
-  "version": "0.54.3",
+  "version": "0.55.0",
   "description": "Unified message inbox across platforms",
   "permissions": [
     "storage",
@@ -44,12 +44,12 @@
     {
       "matches": ["https://doublelist.com/*"],
       "js": ["content/doublelist-bridge.js"],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     },
     {
       "matches": ["https://www.adam4adam.com/*", "https://m.adam4adam.com/*"],
       "js": ["content/adam4adam-bridge.js"],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     },
     {
       "matches": ["https://mail.google.com/*"],

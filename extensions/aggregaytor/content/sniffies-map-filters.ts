@@ -380,6 +380,17 @@ function undoLastHide(): boolean {
 // Expose on window for bridge access
 (typeof window !== 'undefined' ? window : globalThis as any).__aggregaytor_undoLastHide = undoLastHide;
 
+// Block from floating panel — adds profileId to the blocked set and applies
+window.addEventListener('__aggregaytor_block_by_map_filter', ((event: CustomEvent) => {
+  const { profileId } = event.detail || {};
+  if (!profileId) return;
+  settings.blockedIds.add(profileId);
+  hideHistory.push(profileId);
+  if (hideHistory.length > 50) hideHistory.shift();
+  saveBlockedIds();
+  applyFilters();
+}) as EventListener);
+
 // ── Main Filter Pass ───────────────────────────────────────────────────────
 
 function applyFilters(): void {

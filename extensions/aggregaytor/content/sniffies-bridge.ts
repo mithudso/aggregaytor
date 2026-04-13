@@ -615,11 +615,24 @@ function showFloatingPanel(contactId: string, platform: string): void {
   // Close — hide the panel entirely (can be re-opened from side panel)
   panel.querySelector('.fp-close-btn')!.addEventListener('click', () => hideFloatingPanel());
 
-  // Block
+  // Block — hide the profile on Sniffies map AND mark in aggregator
   panel.querySelector('.fp-block-btn')!.addEventListener('click', () => {
     const pid = fpContactId.replace(/^[a-z]+:/, '');
-    window.dispatchEvent(new CustomEvent('__aggregaytor_block_profile', { detail: { profileId: pid } }));
-    chrome.runtime.sendMessage({ type: 'PROFILE_BLOCKED', contactId: fpContactId, platform: fpPlatform }).catch(() => {});
+    // Tell the map filter module to add this profile to the blocked set
+    // (this is what makes the marker disappear from the map)
+    window.dispatchEvent(new CustomEvent('__aggregaytor_block_by_map_filter', {
+      detail: { profileId: pid },
+    }));
+    // Also dispatch the generic block event (for Grindr API blocking)
+    window.dispatchEvent(new CustomEvent('__aggregaytor_block_profile', {
+      detail: { profileId: pid },
+    }));
+    // Mark as blocked in the aggregator service worker
+    chrome.runtime.sendMessage({
+      type: 'PROFILE_BLOCKED',
+      contactId: fpContactId,
+      platform: fpPlatform,
+    }).catch(() => {});
     hideFloatingPanel();
   });
 
@@ -696,6 +709,121 @@ function hideFloatingPanel(): void {
   fpContactId = '';
 }
 
+// ── Map Filter Floating Panel ─────────────────────────────────────────────
+// Shows filter controls instead of profile actions when on the map view
+
+function showMapFilterPanel(): void {
+  if (document.getElementById(FP_ID)) return; // already showing something
+
+  injectFloatingCSS();
+  const panel = document.createElement('div');
+  panel.id = FP_ID;
+
+  let pos = { x: 20, y: 120 };
+  try { const s = localStorage.getItem('aggregaytor_fp_pos'); if (s) pos = JSON.parse(s); } catch {}
+  panel.style.left = `${pos.x}px`;
+  panel.style.top = `${pos.y}px`;
+
+  const collapsed = localStorage.getItem('aggregaytor_fp_collapsed') === 'true';
+  if (collapsed) panel.classList.add('collapsed');
+
+  // Load current filter settings
+  const settings = JSON.parse(localStorage.getItem('aggregaytor_map_filter_settings') || '{}');
+
+  panel.innerHTML = `
+    <div class="fp-header">
+      <span class="fp-header-title">⚡ Map Filters</span>
+      <div class="fp-header-btns">
+        <button class="fp-header-btn fp-minimize-btn" title="Minimize">−</button>
+        <button class="fp-header-btn fp-close-btn" title="Close panel">×</button>
+      </div>
+    </div>
+    <div class="fp-body" style="font-size:11px">
+      <div style="margin-bottom:6px;color:#6b7280;font-size:10px">Hide by position:</div>
+      <div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:8px">
+        ${['Bottom', 'VersBottom', 'Vers', 'VersTop', 'Top', 'Side', 'Unspecified'].map(att => {
+          const key = `hide${att}`;
+          const checked = settings[key] ? 'checked' : '';
+          return `<label style="display:flex;align-items:center;gap:2px;font-size:10px;color:#9ca3af;cursor:pointer">
+            <input type="checkbox" class="fp-filter-cb" data-key="${key}" ${checked} style="margin:0"> ${att.replace('Vers', 'V.')}
+          </label>`;
+        }).join('')}
+      </div>
+      <div style="margin-bottom:6px;color:#6b7280;font-size:10px">Chat filters:</div>
+      <div style="display:flex;flex-direction:column;gap:3px;margin-bottom:8px">
+        <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#9ca3af;cursor:pointer">
+          <input type="checkbox" class="fp-filter-cb" data-key="hideRecentChats" ${settings.hideRecentChats ? 'checked' : ''} style="margin:0"> Hide chatted (24h)
+        </label>
+        <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#9ca3af;cursor:pointer">
+          <input type="checkbox" class="fp-filter-cb" data-key="showChatAgeBadges" ${settings.showChatAgeBadges ? 'checked' : ''} style="margin:0"> Show chat age badges
+        </label>
+      </div>
+      <div style="margin-bottom:4px;color:#6b7280;font-size:10px">Exclude terms:</div>
+      <textarea class="fp-notes-input" id="fp-exclude-terms" rows="2" style="font-size:10px;min-height:24px" placeholder="one per line">${(settings.excludeTerms || []).join('\n')}</textarea>
+      <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#9ca3af;margin-top:3px;cursor:pointer">
+        <input type="checkbox" class="fp-filter-cb" data-key="excludeEnabled" ${settings.excludeEnabled ? 'checked' : ''} style="margin:0"> Enable exclude
+      </label>
+      <div style="margin-top:6px;margin-bottom:4px;color:#6b7280;font-size:10px">Include/highlight terms:</div>
+      <textarea class="fp-notes-input" id="fp-include-terms" rows="2" style="font-size:10px;min-height:24px" placeholder="one per line">${(settings.includeTerms || []).join('\n')}</textarea>
+      <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#9ca3af;margin-top:3px;cursor:pointer">
+        <input type="checkbox" class="fp-filter-cb" data-key="includeEnabled" ${settings.includeEnabled ? 'checked' : ''} style="margin:0"> Enable include
+      </label>
+      <button class="fp-action-btn" id="fp-apply-filters" style="margin-top:8px;width:100%;text-align:center">Apply Filters</button>
+    </div>`;
+
+  document.body.appendChild(panel);
+
+  // Drag
+  let dragging = false, dx = 0, dy = 0;
+  panel.querySelector('.fp-header')!.addEventListener('mousedown', (e: Event) => {
+    const me = e as MouseEvent;
+    if ((me.target as HTMLElement).closest('.fp-header-btn')) return;
+    dragging = true;
+    const r = panel.getBoundingClientRect();
+    dx = me.clientX - r.left; dy = me.clientY - r.top;
+    me.preventDefault();
+  });
+  document.addEventListener('mousemove', (e: MouseEvent) => {
+    if (!dragging) return;
+    panel.style.left = `${Math.max(0, e.clientX - dx)}px`;
+    panel.style.top = `${Math.max(0, e.clientY - dy)}px`;
+  });
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    try { localStorage.setItem('aggregaytor_fp_pos', JSON.stringify({ x: parseInt(panel.style.left), y: parseInt(panel.style.top) })); } catch {}
+  });
+
+  panel.querySelector('.fp-minimize-btn')!.addEventListener('click', () => {
+    const c = panel.classList.toggle('collapsed');
+    try { localStorage.setItem('aggregaytor_fp_collapsed', String(c)); } catch {}
+  });
+  panel.querySelector('.fp-close-btn')!.addEventListener('click', () => {
+    panel.remove();
+  });
+
+  // Apply filters button
+  panel.querySelector('#fp-apply-filters')!.addEventListener('click', () => {
+    const update: Record<string, any> = {};
+    panel.querySelectorAll('.fp-filter-cb').forEach((cb: any) => {
+      update[cb.dataset.key] = cb.checked;
+    });
+    update.excludeTerms = ((panel.querySelector('#fp-exclude-terms') as HTMLTextAreaElement)?.value || '')
+      .split('\n').map((l: string) => l.trim()).filter((l: string) => l);
+    update.includeTerms = ((panel.querySelector('#fp-include-terms') as HTMLTextAreaElement)?.value || '')
+      .split('\n').map((l: string) => l.trim()).filter((l: string) => l);
+
+    // Save and relay to MAIN world
+    localStorage.setItem('aggregaytor_map_filter_settings', JSON.stringify({ ...settings, ...update }));
+    window.dispatchEvent(new CustomEvent('__aggregaytor_map_filter_settings', { detail: update }));
+
+    // Flash button
+    const btn = panel.querySelector('#fp-apply-filters') as HTMLElement;
+    btn.textContent = '✅ Applied!';
+    setTimeout(() => { btn.textContent = 'Apply Filters'; }, 1500);
+  });
+}
+
 // ── URL Change Detection ────────────────────────────────────────────────────
 // Sniffies is an SPA (Angular) that uses pushState for navigation. When the
 // user opens a profile or conversation, the URL changes but NO page load or
@@ -727,10 +855,12 @@ function checkUrlChange() {
     // Show floating quick-action panel on the page
     showFloatingPanel(contactId, 'sniffies');
   } else {
-    // Left profile view — hide the floating panel and tell the side panel
-    // to go back to inbox (restores the pre-v0.51.1 behavior where clicking
-    // the map closed the conversation view)
+    // Left profile view — show map filter panel instead of profile actions
     hideFloatingPanel();
+    // Show map filter controls on the map view
+    if (url.match(/sniffies\.com\/?(\?|$|#)/i) || url.match(/sniffies\.com\/map/i)) {
+      showMapFilterPanel();
+    }
     try {
       chrome.runtime.sendMessage({ type: 'PROFILE_CLOSED', platform: 'sniffies' }).catch(() => {});
     } catch {}
