@@ -200,6 +200,36 @@ document.addEventListener('auxclick', (e) => {
   }).catch(() => {});
 }, true);
 
+// ── Session Keepalive ─────────────────────────────────────────────────────
+// Grindr aggressively logs out after inactivity. This keepalive prevents
+// that by periodically triggering a lightweight action that refreshes the
+// session. We simulate minimal activity to keep the auth token alive.
+let keepaliveInterval: ReturnType<typeof setInterval> | null = null;
+
+function startSessionKeepalive(): void {
+  if (keepaliveInterval) return;
+  keepaliveInterval = setInterval(() => {
+    if (!contextValid) return;
+    try {
+      // Method 1: Dispatch a visibilitychange event to trick Grindr into
+      // thinking the tab just became visible (resets inactivity timer)
+      document.dispatchEvent(new Event('visibilitychange'));
+      document.dispatchEvent(new Event('focus'));
+      window.dispatchEvent(new Event('focus'));
+
+      // Method 2: Touch a lightweight API endpoint to refresh the session.
+      // The profile endpoint is a simple GET that keeps auth alive.
+      fetch('https://web.grindr.com/api/v3/me', {
+        method: 'GET',
+        credentials: 'include',
+        headers: { 'Accept': 'application/json' },
+      }).catch(() => {});
+    } catch {}
+  }, 4 * 60_000); // Every 4 minutes
+}
+
+startSessionKeepalive();
+
 // Watch for URL changes (user opening conversations on Grindr web)
 let lastUrl = location.href;
 function checkUrlChange() {

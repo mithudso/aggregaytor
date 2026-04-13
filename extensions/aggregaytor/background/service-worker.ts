@@ -1200,7 +1200,7 @@ async function openAllSites(): Promise<void> {
 
 // ── Grindr auto-relogin check ───────────────────────────────────────────────
 
-chrome.alarms.create('grindr-login-check', { periodInMinutes: 2 });
+chrome.alarms.create('grindr-login-check', { periodInMinutes: 1 }); // check every minute
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== 'grindr-login-check') return;
@@ -1234,20 +1234,30 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       await chrome.scripting.executeScript({
         target: { tabId: grindrTab.id },
         func: () => {
-          // Look for Apple sign-in button
-          const appleBtn = document.querySelector<HTMLElement>(
-            'button[data-testid="apple-login"], [aria-label*="Apple"], [class*="apple"], button:has(svg[class*="apple"])'
-          );
-          if (appleBtn) {
-            appleBtn.click();
-            return 'clicked';
+          // Try multiple login button selectors — Grindr changes these
+          const selectors = [
+            // Apple Sign-In
+            'button[data-testid="apple-login"]',
+            '[aria-label*="Apple"]',
+            '[class*="apple-login"]',
+            'button:has(svg[class*="apple"])',
+            // Google Sign-In
+            'button[data-testid="google-login"]',
+            '[aria-label*="Google"]',
+            '[class*="google-login"]',
+            // Generic sign-in
+            'button[data-testid="login-button"]',
+            'a[href*="login"]',
+            'button[class*="sign-in"]',
+            'button[class*="login"]',
+          ];
+          for (const sel of selectors) {
+            const btn = document.querySelector<HTMLElement>(sel);
+            if (btn) { btn.click(); return `clicked: ${sel}`; }
           }
-          // Fallback: look for any "Sign in" or "Log in" button and click it first
-          const signInBtn = document.querySelector<HTMLElement>(
-            'button[data-testid="login-button"], button:has(span:text("Sign in")), a[href*="login"]'
-          );
-          if (signInBtn) signInBtn.click();
-          return 'no-apple-button';
+          // Last resort: just reload the page — sometimes clears the logout state
+          location.reload();
+          return 'reloaded';
         },
       });
     }
