@@ -618,15 +618,15 @@ function showFloatingPanel(contactId: string, platform: string): void {
   // Block — hide the profile on Sniffies map AND mark in aggregator
   panel.querySelector('.fp-block-btn')!.addEventListener('click', () => {
     const pid = fpContactId.replace(/^[a-z]+:/, '');
-    // Tell the map filter module to add this profile to the blocked set
-    // (this is what makes the marker disappear from the map)
-    window.dispatchEvent(new CustomEvent('__aggregaytor_block_by_map_filter', {
-      detail: { profileId: pid },
-    }));
-    // Also dispatch the generic block event (for Grindr API blocking)
-    window.dispatchEvent(new CustomEvent('__aggregaytor_block_profile', {
-      detail: { profileId: pid },
-    }));
+    // Inject script to dispatch events in MAIN world (ISOLATED world
+    // CustomEvents don't reach MAIN world listeners)
+    const script = document.createElement('script');
+    script.textContent = `
+      window.dispatchEvent(new CustomEvent('__aggregaytor_block_by_map_filter', { detail: { profileId: '${pid}' } }));
+      window.dispatchEvent(new CustomEvent('__aggregaytor_block_profile', { detail: { profileId: '${pid}' } }));
+    `;
+    document.documentElement.appendChild(script);
+    script.remove();
     // Mark as blocked in the aggregator service worker
     chrome.runtime.sendMessage({
       type: 'PROFILE_BLOCKED',
@@ -696,7 +696,12 @@ function showFloatingPanel(contactId: string, platform: string): void {
     c.innerHTML = phrases.map((p: string) => `<button class="fp-phrase-btn" title="${p}">${p.length > 18 ? p.slice(0, 16) + '…' : p}</button>`).join('');
     c.querySelectorAll('.fp-phrase-btn').forEach((btn, i) => {
       btn.addEventListener('click', () => {
-        window.dispatchEvent(new CustomEvent('__aggregaytor_send_message', { detail: { text: phrases[i], contactId: fpContactId } }));
+        // ISOLATED world can't dispatch events to MAIN world directly.
+        // Inject a <script> tag that dispatches the event in the page context.
+        const script = document.createElement('script');
+        script.textContent = `window.dispatchEvent(new CustomEvent('__aggregaytor_send_message', { detail: ${JSON.stringify({ text: phrases[i], contactId: fpContactId })} }));`;
+        document.documentElement.appendChild(script);
+        script.remove();
         (btn as HTMLElement).style.background = 'rgba(34,197,94,0.2)';
         setTimeout(() => { (btn as HTMLElement).style.background = ''; }, 500);
       });
