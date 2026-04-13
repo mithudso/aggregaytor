@@ -62,8 +62,8 @@ function debouncedLoadDrafts() {
 // ── Inbox ───────────────────────────────────────────────────────────────────
 
 async function loadThreads() {
-  const opts = currentPlatform === 'all' ? {} : { platform: currentPlatform };
-  // #10 Show skeleton loader if thread list is empty
+  // Always fetch ALL summaries (no platform filter) so unread badge counts
+  // are correct across all platforms. Filter client-side for display.
   const container = document.getElementById('thread-list');
   if (!container.querySelector('.thread-item') && !container.querySelector('.skeleton-item')) {
     container.innerHTML = Array(5).fill(0).map(() => `
@@ -73,7 +73,7 @@ async function loadThreads() {
   }
   try {
     const [threadRes, metaRes] = await Promise.all([
-      chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts }),
+      chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} }),
       chrome.runtime.sendMessage({ type: 'GET_ALL_THREAD_META' }),
     ]);
     if (metaRes?.ok) {
@@ -82,8 +82,14 @@ async function loadThreads() {
     }
     if (threadRes?.ok) {
       const all = threadRes.summaries;
-      renderThreads(sortThreads(applyFilters(all)));
-      // #15 Per-platform unread badges
+      // Filter by current platform for display, but use ALL for badge counts
+      const filtered = currentPlatform === 'all'
+        ? all
+        : currentPlatform === 'archived'
+          ? all.filter(s => allThreadMeta.get(s.contactId)?.archived)
+          : all.filter(s => s.platform === currentPlatform);
+      renderThreads(sortThreads(applyFilters(filtered)));
+      // #15 Per-platform unread badges — computed from ALL threads, not filtered
       const platformUnread = {};
       for (const s of all) {
         if (s.unreadCount) platformUnread[s.platform] = (platformUnread[s.platform] || 0) + s.unreadCount;
@@ -1840,7 +1846,7 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     // Load tab-specific data
     if (tab.dataset.tab === 'tab-rules') loadBlockRules();
     if (tab.dataset.tab === 'tab-pictures') loadPictures();
-    if (tab.dataset.tab === 'tab-map') loadMapFilterSettings();
+    if (tab.dataset.tab === 'tab-map') { loadMapFilterSettings(); loadGrindrFilterSettings(); }
     if (tab.dataset.tab === 'tab-data') loadTextExpansions();
     if (tab.dataset.tab === 'tab-sync') { loadCalendarStatus(); checkGoogleAuth(); }
     if (tab.dataset.tab === 'tab-personality') loadStyleGuide();
@@ -2336,6 +2342,52 @@ document.getElementById('sp-save-expansions')?.addEventListener('click', () => {
     }
   });
 });
+
+// ── Grindr Filter Settings ───────────────────────────────────────────────────
+
+document.getElementById('sp-grindr-filter-save')?.addEventListener('click', () => {
+  const s = {
+    enabled: document.getElementById('gf-enabled').checked,
+    ethnicityFilter: document.getElementById('gf-ethnicity-mode').value,
+    ethnicityValues: [...document.querySelectorAll('[data-eth]:checked')].map(el => parseInt(el.dataset.eth)),
+    genderFilter: document.getElementById('gf-gender-mode').value,
+    genderValues: [...document.querySelectorAll('[data-gender]:checked')].map(el => parseInt(el.dataset.gender)),
+    neverChattedFilter: document.getElementById('gf-chatted-mode').value,
+    keywordFilter: document.getElementById('gf-keyword-mode').value,
+    keywords: (document.getElementById('gf-keywords').value || '').split('\n').map(l => l.trim()).filter(l => l),
+  };
+  chrome.storage.local.set({ aggregaytor_grindr_filter_settings: s });
+  // Relay to Grindr tabs
+  chrome.tabs.query({}).then(tabs => {
+    for (const tab of tabs) {
+      if (tab.id && tab.url?.includes('web.grindr.com')) {
+        chrome.tabs.sendMessage(tab.id, { type: 'GRINDR_FILTER_SETTINGS', settings: s }).catch(() => {});
+      }
+    }
+  });
+  const status = document.getElementById('sp-grindr-filter-status');
+  if (status) { status.textContent = 'Saved!'; status.style.color = '#22c55e'; }
+});
+
+function loadGrindrFilterSettings() {
+  chrome.storage.local.get('aggregaytor_grindr_filter_settings', (data) => {
+    const s = data.aggregaytor_grindr_filter_settings || {};
+    if (s.enabled) document.getElementById('gf-enabled').checked = true;
+    if (s.ethnicityFilter) document.getElementById('gf-ethnicity-mode').value = s.ethnicityFilter;
+    if (s.genderFilter) document.getElementById('gf-gender-mode').value = s.genderFilter;
+    if (s.neverChattedFilter) document.getElementById('gf-chatted-mode').value = s.neverChattedFilter;
+    if (s.keywordFilter) document.getElementById('gf-keyword-mode').value = s.keywordFilter;
+    if (s.keywords?.length) document.getElementById('gf-keywords').value = s.keywords.join('\n');
+    (s.ethnicityValues || []).forEach(v => {
+      const el = document.querySelector(`[data-eth="${v}"]`);
+      if (el) el.checked = true;
+    });
+    (s.genderValues || []).forEach(v => {
+      const el = document.querySelector(`[data-gender="${v}"]`);
+      if (el) el.checked = true;
+    });
+  });
+}
 
 // ── Map Filter Settings ──────────────────────────────────────────────────────
 

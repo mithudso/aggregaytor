@@ -295,10 +295,71 @@
         </label>
       </div>
       <div class="settings-section">
-        <button class="settings-btn" id="sp-map-save">Save Map Filters</button>
+        <button class="settings-btn" id="sp-map-save">Save Sniffies Filters</button>
         <button class="settings-btn" id="sp-map-undo-hide" style="margin-top:4px">Undo Last Hide</button>
-        <button class="settings-btn" id="sp-map-clear-blocked" style="margin-top:4px;border-color:rgba(239,68,68,0.3);color:#f87171">Clear All Hidden Profiles</button>
+        <button class="settings-btn" id="sp-map-clear-blocked" style="margin-top:4px;border-color:rgba(239,68,68,0.3);color:#f87171">Clear All Hidden</button>
         <div id="sp-map-status" class="settings-status"></div>
+      </div>
+      <div class="settings-divider"></div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Grindr Cascade Filters</h3>
+        <div class="settings-info">Filter profiles in the Grindr grid. Each filter can be Include (show only matching) or Exclude (hide matching).</div>
+        <label class="settings-checkbox-label"><input type="checkbox" id="gf-enabled"> Enable Grindr filters</label>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Ethnicity</h3>
+        <select id="gf-ethnicity-mode" class="settings-select" style="margin-bottom:4px">
+          <option value="off">Off</option>
+          <option value="include">Include only</option>
+          <option value="exclude">Exclude</option>
+        </select>
+        <div class="filter-grid" id="gf-ethnicity-checkboxes">
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="2"> Asian</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="3"> Black</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="4"> Latino</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="5"> Middle Eastern</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="6"> Mixed</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="7"> White</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="9"> South Asian</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="8"> Other</label>
+        </div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Gender</h3>
+        <select id="gf-gender-mode" class="settings-select" style="margin-bottom:4px">
+          <option value="off">Off</option>
+          <option value="include">Include only</option>
+          <option value="exclude">Exclude</option>
+        </select>
+        <div class="filter-grid" id="gf-gender-checkboxes">
+          <label class="settings-checkbox-label"><input type="checkbox" data-gender="1"> Cis Man</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-gender="2"> Cis Woman</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-gender="3"> Trans Man</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-gender="4"> Trans Woman</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-gender="5"> Non-Binary</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-gender="6"> Non-Conforming</label>
+        </div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Chat History</h3>
+        <select id="gf-chatted-mode" class="settings-select">
+          <option value="off">Off</option>
+          <option value="include">Show only never-chatted</option>
+          <option value="exclude">Hide never-chatted</option>
+        </select>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Profile Keyword Filter</h3>
+        <select id="gf-keyword-mode" class="settings-select" style="margin-bottom:4px">
+          <option value="off">Off</option>
+          <option value="include">Include only (show matching)</option>
+          <option value="exclude">Exclude (hide matching)</option>
+        </select>
+        <textarea id="gf-keywords" class="settings-textarea" rows="2" placeholder="Keywords (one per line)"></textarea>
+      </div>
+      <div class="settings-section">
+        <button class="settings-btn" id="sp-grindr-filter-save">Save Grindr Filters</button>
+        <div id="sp-grindr-filter-status" class="settings-status"></div>
       </div>
     </div>
 

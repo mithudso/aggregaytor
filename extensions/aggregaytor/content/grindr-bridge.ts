@@ -40,6 +40,14 @@ try {
       sendResponse({ ok: true });
       return true;
     }
+    if (message.type === 'GRINDR_FILTER_SETTINGS') {
+      window.dispatchEvent(new CustomEvent('__aggregaytor_grindr_filter_settings', {
+        detail: message.settings,
+      }));
+      try { localStorage.setItem('aggregaytor_grindr_filter_settings', JSON.stringify(message.settings)); } catch {}
+      sendResponse({ ok: true });
+      return true;
+    }
     if (message.type === 'TEXT_EXPANDER_SETTINGS') {
       window.dispatchEvent(new CustomEvent('__aggregaytor_text_expander_settings', {
         detail: { substitutions: message.substitutions },

@@ -8,6 +8,7 @@
 import { GrindrAdapter } from '@aggregaytor/adapter-grindr';
 import { getCapturedAuth } from '@aggregaytor/adapter-core';
 import { initTextExpander } from './text-expander.js';
+import { initGrindrFilters, indexGrindrProfile } from './grindr-filters.js';
 
 const LOG = '[Aggregaytor:Grindr]';
 
@@ -122,6 +123,9 @@ adapter.init().then(() => {
 // Text expander — type "hg " to expand to "Hey there. How's it going?"
 initTextExpander();
 
+// Grindr cascade filters — hide/show profiles by ethnicity, gender, keywords
+initGrindrFilters();
+
 // ── Proactive Profile Indexing ──────────────────────────────────────────────
 // Intercept ALL fetch responses on grindr.com to build the photoHash→profileId
 // map. This catches cascade API responses, profile fetches, and any other
@@ -141,6 +145,8 @@ window.fetch = async function(...args: Parameters<typeof fetch>) {
         if (!obj || typeof obj !== 'object' || depth > 5) return;
         if (Array.isArray(obj)) { obj.slice(0, 50).forEach(item => walk(item, depth + 1)); return; }
         indexProfileFromPayload(obj);
+        // Also index for Grindr cascade filters (ethnicity, gender, etc.)
+        indexGrindrProfile(obj);
         for (const v of Object.values(obj)) {
           if (v && typeof v === 'object') walk(v, depth + 1);
         }
