@@ -5,7 +5,8 @@
  * thread (message detail with notes, reminders, suggestions).
  */
 
-let currentPlatform = 'all';
+let currentPlatform = 'all'; // legacy — still used for some checks
+let activePlatforms = new Set<string>(); // multi-select toggle: which platforms are shown
 let currentThread = null;
 let currentMessages = [];
 
@@ -82,12 +83,18 @@ async function loadThreads() {
     }
     if (threadRes?.ok) {
       const all = threadRes.summaries;
-      // Filter by current platform for display, but use ALL for badge counts
-      const filtered = currentPlatform === 'all'
-        ? all
-        : currentPlatform === 'archived'
-          ? all.filter(s => allThreadMeta.get(s.contactId)?.archived)
-          : all.filter(s => s.platform === currentPlatform);
+      // Filter by active platforms for display, but use ALL for badge counts
+      let filtered;
+      if (currentPlatform === 'all' || activePlatforms.size === 0) {
+        filtered = all;
+      } else if (currentPlatform === 'archived') {
+        filtered = all.filter(s => allThreadMeta.get(s.contactId)?.archived);
+      } else if (activePlatforms.size > 0) {
+        // Multi-select: show threads from any active platform
+        filtered = all.filter(s => activePlatforms.has(s.platform));
+      } else {
+        filtered = all;
+      }
       renderThreads(sortThreads(applyFilters(filtered)));
       // #15 Per-platform unread badges — computed from ALL threads, not filtered
       const platformUnread = {};
@@ -1342,9 +1349,42 @@ document.getElementById('back-btn').addEventListener('click', () => {
 });
 document.querySelectorAll('.platform-chip').forEach(chip => {
   chip.addEventListener('click', () => {
-    document.querySelectorAll('.platform-chip').forEach(c => c.classList.remove('active'));
-    chip.classList.add('active');
-    currentPlatform = chip.dataset.platform;
+    const platform = chip.dataset.platform;
+
+    if (platform === 'all') {
+      // "All" clears all individual selections and shows everything
+      activePlatforms.clear();
+      document.querySelectorAll('.platform-chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      currentPlatform = 'all';
+    } else if (platform === 'archived') {
+      // Archive is exclusive (not a toggle with others)
+      activePlatforms.clear();
+      document.querySelectorAll('.platform-chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      currentPlatform = 'archived';
+    } else {
+      // Platform chips are TOGGLES — click to add/remove from the active set
+      // Remove "All" active state when toggling individual platforms
+      document.querySelector('.platform-chip[data-platform="all"]')?.classList.remove('active');
+      document.querySelector('.platform-chip[data-platform="archived"]')?.classList.remove('active');
+
+      if (activePlatforms.has(platform)) {
+        activePlatforms.delete(platform);
+        chip.classList.remove('active');
+      } else {
+        activePlatforms.add(platform);
+        chip.classList.add('active');
+      }
+
+      // If no platforms selected, revert to "All"
+      if (activePlatforms.size === 0) {
+        document.querySelector('.platform-chip[data-platform="all"]')?.classList.add('active');
+        currentPlatform = 'all';
+      } else {
+        currentPlatform = 'multi'; // signal that we're using activePlatforms set
+      }
+    }
     loadThreads();
   });
 });
