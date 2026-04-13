@@ -16,6 +16,7 @@ import {
   analyzeConversationSentiment, formatSentimentSummary,
   createTask, getAllTasks, updateTask, deleteTask, getTasksByContact,
   createGoogleTask, updateGoogleTask, deleteGoogleTask, pullGoogleTasks, syncGoogleTasks, authenticateGoogle, isGoogleAuthenticated,
+  backupToDrive, restoreFromDrive, getDriveBackupStatus,
   getContact, getDB, destroyDB,
   exportAllData, importAllData, exportBlocked, importBlocked,
 } from '@aggregaytor/store';
@@ -660,20 +661,17 @@ async function handleMessage(msg: any): Promise<any> {
     // ── Google Drive Sync ──────────────────────────────────────────────────
     case 'DRIVE_BACKUP': {
       try {
-        const { backupToDrive } = await import('@aggregaytor/store');
         return await backupToDrive();
       } catch (err) { return { ok: false, error: (err as Error).message }; }
     }
     case 'DRIVE_RESTORE': {
       try {
         invalidateThreadCache();
-        const { restoreFromDrive } = await import('@aggregaytor/store');
         return await restoreFromDrive();
       } catch (err) { return { ok: false, error: (err as Error).message }; }
     }
     case 'DRIVE_STATUS': {
       try {
-        const { getDriveBackupStatus } = await import('@aggregaytor/store');
         return { ok: true, ...(await getDriveBackupStatus()) };
       } catch (err) { return { ok: false, error: (err as Error).message }; }
     }
