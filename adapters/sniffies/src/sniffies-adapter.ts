@@ -231,6 +231,33 @@ function extractBody(obj: Record<string, unknown>): string {
 }
 
 /**
+ * Check if extracted text is actually UI metadata rather than a real message.
+ * Sniffies injects relative timestamps ("19 days ago"), chat history headers
+ * ("This is the beginning of your chat history"), and status labels ("Seen")
+ * into the chat payload. These pass isLikelyMessage but are not real messages.
+ */
+function isMetadataText(body: string): boolean {
+  const lower = body.toLowerCase().trim();
+  // Pure relative timestamps: "19 days ago", "2 hours ago", "5 minutes ago"
+  if (/^\d+\s+(second|minute|hour|day|week|month|year)s?\s*ago$/i.test(lower)) return true;
+  // Timestamp with context: "19 days ago Hey there" — rollup of timestamp + message
+  if (/^\d+\s+(second|minute|hour|day|week|month|year)s?\s*ago\s+/i.test(lower) && lower.length > 50) return true;
+  // Chat history header
+  if (lower.includes('this is the beginning of your chat history')) return true;
+  if (lower.includes('beginning of your') && lower.includes('history')) return true;
+  // Status labels
+  if (lower === 'seen' || lower === 'delivered' || lower === 'sent' || lower === 'read') return true;
+  // "Just now", "A moment ago"
+  if (lower === 'just now' || lower === 'a moment ago' || lower === 'now') return true;
+  // Pure date strings: "Mar 25", "Apr 5", "Saturday", "Today", "Yesterday"
+  if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2}$/i.test(lower)) return true;
+  if (/^(monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|yesterday)$/i.test(lower)) return true;
+  // Rollup: concatenation of timestamps + messages (starts with relative time, contains "Seen")
+  if (/^\d+\s+(day|hour|minute)s?\s*ago\s+/.test(lower) && lower.includes('seen')) return true;
+  return false;
+}
+
+/**
  * Determine if a message was sent by us ('out') or received ('in').
  *
  * Checks three signal types in order:
@@ -484,9 +511,9 @@ export class SniffiesAdapter extends BaseAdapter {
 
         const body = extractBody(obj);
         if (!body) return;
-        // Double-check: even after isLikelyMessage passed, reject body text
-        // that exactly matches a known profile attribute value
+        // Double-check: reject profile attributes and UI metadata
         if (PROFILE_ATTRIBUTE_VALUES.has(body.toLowerCase())) return;
+        if (isMetadataText(body)) return;
 
         const ts = extractTimestampFromObj(obj);
         if (!ts || !profileId) {
