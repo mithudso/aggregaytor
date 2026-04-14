@@ -3,6 +3,30 @@ import { resolve } from 'path';
 import { copyFileSync, cpSync, mkdirSync, existsSync, writeFileSync } from 'fs';
 
 /**
+ * Write a fresh random build hash into dist/.build-hash on every bundle.
+ * The service worker polls this file (see startDevAutoReload in service-
+ * worker.ts) and calls chrome.runtime.reload() when the value changes.
+ * This gives automatic extension reload on every `vite build --watch`
+ * iteration so you don't have to click the refresh button by hand.
+ *
+ * Runs on BOTH the main build and the IIFE content-script build so the
+ * marker updates after the full pipeline finishes (the content script
+ * IIFE build is the slowest step, and the SW only needs one fresh write
+ * per rebuild cycle — the last writer wins).
+ */
+function writeBuildHash(): Plugin {
+  return {
+    name: 'write-build-hash',
+    closeBundle() {
+      const dist = resolve(__dirname, 'dist');
+      if (!existsSync(dist)) mkdirSync(dist, { recursive: true });
+      const hash = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      writeFileSync(resolve(dist, '.build-hash'), hash);
+    },
+  };
+}
+
+/**
  * Plugin that:
  * 1. Copies static extension assets into dist/ after build
  * 2. Builds content scripts as separate IIFE bundles (no shared chunks)
@@ -87,7 +111,7 @@ function buildContentScriptsIIFE(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [copyExtensionAssets(), buildContentScriptsIIFE()],
+  plugins: [copyExtensionAssets(), buildContentScriptsIIFE(), writeBuildHash()],
   build: {
     outDir: 'dist',
     emptyOutDir: true,

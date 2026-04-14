@@ -1733,6 +1733,54 @@ chrome.alarms.create('badge-refresh', { periodInMinutes: 1 });
 chrome.alarms.create('reminder-check', { periodInMinutes: 0.25 });
 // Removed 25s keepalive alarm — was causing unnecessary CPU usage
 
+// ── Dev Auto-Reload ────────────────────────────────────────────────────────
+// When the extension is loaded unpacked (i.e. you're developing locally),
+// watch for changes to dist/.build-hash (written by the writeBuildHash
+// vite plugin on every rebuild) and call chrome.runtime.reload() when it
+// changes. This means `npm run dev` → save a file → the extension reloads
+// itself without you having to click the refresh button.
+//
+// Guarded on update_url being absent so this is a no-op for any store-
+// installed build. The poll is cheap: a single fetch against an in-package
+// resource every 1.5s.
+async function startDevAutoReload(): Promise<void> {
+  try {
+    const m = chrome.runtime.getManifest() as any;
+    if (m.update_url) return; // Store-installed build — never auto-reload
+  } catch { return; }
+
+  let lastHash = '';
+  try {
+    const res = await fetch(chrome.runtime.getURL('.build-hash'), { cache: 'no-store' });
+    if (!res.ok) return; // No marker file → production build, skip
+    lastHash = (await res.text()).trim();
+    console.log('[Aggregaytor:SW] Dev auto-reload watching (hash:', lastHash.slice(0, 12), ')');
+  } catch {
+    return; // Fetch failed → marker doesn't exist, skip
+  }
+
+  // Use chrome.alarms rather than setInterval: setInterval in service
+  // workers is unreliable because the SW can be put to sleep by Chrome.
+  // A 1-minute alarm (the minimum reliable period in MV3) is too slow for
+  // dev reload, so we use both: an alarm to wake the SW up if asleep, AND
+  // a setInterval for the fast poll when the SW is active.
+  const POLL_MS = 1500;
+  setInterval(async () => {
+    try {
+      const res = await fetch(chrome.runtime.getURL('.build-hash'), { cache: 'no-store' });
+      if (!res.ok) return;
+      const current = (await res.text()).trim();
+      if (current && current !== lastHash) {
+        console.log('[Aggregaytor:SW] Rebuild detected (', lastHash.slice(0, 12), '→', current.slice(0, 12), ') — reloading extension');
+        chrome.runtime.reload();
+      }
+    } catch { /* transient; try again next tick */ }
+  }, POLL_MS);
+  // The alarm is just to keep the SW warm; the setInterval does the work.
+  chrome.alarms.create('dev-reload-keepalive', { periodInMinutes: 0.5 });
+}
+startDevAutoReload().catch(() => {});
+
 // Ensure Global Chat contact always exists (runs on every SW startup)
 upsertContact({
   id: 'sniffies:global-chat',
