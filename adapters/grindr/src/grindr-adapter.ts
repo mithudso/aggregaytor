@@ -159,6 +159,28 @@ export class GrindrAdapter extends BaseAdapter {
           if (obj.isFavorite === true) md.isFavorite = true;
           if (obj.isBlocked === true || obj.isHidden === true) md.isBlocked = true;
           if (obj.isBoosting === true) md.isBoosting = true;
+          // URL-based tagging — Grindr's block/favorite/taps list endpoints
+          // return profile objects WITHOUT an isFavorite/isBlocked flag on
+          // each row (membership in the list is the signal). Tag by URL so
+          // these contacts can drive auto-training without manual labels.
+          // Source endpoints observed in real traffic:
+          //   /api/v3.1/me/blocks  → blocked profiles (negative signal)
+          //   /api/v5/favorites    → favorited profiles (positive signal)
+          //   /api/v2/taps/received→ incoming taps (weak positive signal)
+          //   /api/v1/hides, /api/me/hides → hidden profiles (negative)
+          const urlLower = String(url).toLowerCase();
+          if (/\/blocks(\b|\?|$)/.test(urlLower) || /\/me\/blocks/.test(urlLower)) {
+            md.isBlocked = true;
+          }
+          if (/\/hides(\b|\?|$)/.test(urlLower) || /\/me\/hides/.test(urlLower)) {
+            md.isBlocked = true; // hides are treated the same as blocks for training
+          }
+          if (/\/favorites(\b|\?|$)/.test(urlLower) || /\/me\/favorites/.test(urlLower)) {
+            md.isFavorite = true;
+          }
+          if (/\/taps\/received/.test(urlLower)) {
+            md.wasTapped = true; // received a tap from this profile
+          }
           contacts.push({
             id: `grindr:${profileId}`,
             platform: 'grindr',

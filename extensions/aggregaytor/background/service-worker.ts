@@ -17,7 +17,7 @@ import {
   createTask, getAllTasks, updateTask, deleteTask, getTasksByContact,
   createGoogleTask, updateGoogleTask, deleteGoogleTask, pullGoogleTasks, syncGoogleTasks, authenticateGoogle, isGoogleAuthenticated,
   backupToDrive, restoreFromDrive, getDriveBackupStatus,
-  getContact, getDB, destroyDB,
+  getContact, getAllContacts, getContactsByPlatform, getDB, destroyDB,
   exportAllData, importAllData, exportBlocked, importBlocked,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
@@ -698,17 +698,58 @@ async function handleMessage(msg: any): Promise<any> {
         const platform = msg.platform as Platform;
 
         if (platform === 'grindr') {
-          // Fetch Grindr's blocked and hidden lists via the platform tab.
-          // We run the fetch inside the tab so credentials (session cookies +
-          // any required Grindr auth headers) come along automatically.
+          // Fetch Grindr's blocked/hidden/favorites lists via the platform tab.
+          // The script runs inside the Grindr tab with credentials: 'include'
+          // BUT Grindr requires an Authorization: Bearer token that's only
+          // accessible in the page's MAIN world (stored in React state, not a
+          // cookie). We read it from window.localStorage — Grindr stores the
+          // session token under a well-known key.
           const tabs = await chrome.tabs.query({});
           const grindrTab = tabs.find((t: any) => t.url?.includes('web.grindr.com'));
           if (grindrTab?.id) {
             const [result] = await chrome.scripting.executeScript({
               target: { tabId: grindrTab.id },
+              world: 'MAIN', // MAIN world so we can read React/Grindr's in-memory auth
               func: async () => {
                 const results: Array<{ profileId: string; liked: boolean; source: string }> = [];
                 const debug: Array<{ url: string; status: number; keys: string[]; count: number; sample: any }> = [];
+
+                // Discover the Grindr Authorization token. Grindr's React app
+                // stores it in localStorage under keys like 'authToken',
+                // 'session', 'grindrSession', or nested inside a JSON blob.
+                const findGrindrAuth = (): string => {
+                  // Check common key names
+                  const keys = ['authToken', 'auth-token', 'grindrAuthToken', 'session', 'grindrSession', 'access_token', 'accessToken', 'token'];
+                  for (const k of keys) {
+                    const v = localStorage.getItem(k);
+                    if (v && v.length > 20 && !v.startsWith('{')) return v;
+                  }
+                  // Scan ALL localStorage keys for JWT-shaped values
+                  for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i) || '';
+                    const v = localStorage.getItem(k) || '';
+                    // JWT: xxx.yyy.zzz with base64url chars
+                    if (/^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$/.test(v)) return v;
+                    // JSON blob with token field
+                    if (v.startsWith('{')) {
+                      try {
+                        const obj = JSON.parse(v);
+                        const t = obj.authToken || obj.accessToken || obj.token || obj.session?.authToken || obj.session?.accessToken;
+                        if (t && String(t).length > 20) return String(t);
+                      } catch {}
+                    }
+                  }
+                  return '';
+                };
+
+                const authToken = findGrindrAuth();
+                const authHeaders: Record<string, string> = {};
+                if (authToken) {
+                  authHeaders['Authorization'] = authToken.startsWith('Grindr3 ') || authToken.startsWith('Bearer ')
+                    ? authToken
+                    : `Grindr3 ${authToken}`;
+                }
+                console.log('[Aggregaytor:GrindrImport] Auth token found:', !!authToken, 'length:', authToken.length);
 
                 // Extract profile IDs from an arbitrary response shape. Grindr
                 // uses various envelope formats across endpoints (profiles[],
@@ -751,7 +792,10 @@ async function handleMessage(msg: any): Promise<any> {
                     const sep = baseUrl.includes('?') ? '&' : '?';
                     const url = `${baseUrl}${sep}page=${page}&pageNumber=${page}&limit=100&pageSize=100`;
                     try {
-                      const res = await fetch(url, { credentials: 'include' });
+                      const res = await fetch(url, {
+                        credentials: 'include',
+                        headers: { 'Accept': 'application/json', ...authHeaders },
+                      });
                       if (!res.ok) {
                         debug.push({ url, status: res.status, keys: [], count: 0, sample: null });
                         break;
@@ -779,21 +823,35 @@ async function handleMessage(msg: any): Promise<any> {
                   }
                 };
 
-                // Try every known endpoint for blocks and hides.
+                // Real endpoints observed in Grindr web client traffic logs:
+                //   /api/v3.1/me/blocks  → blocks (confirmed 480 profiles)
+                //   /api/v5/favorites    → favorites (confirmed 222 profiles)
+                // Keep fallback variants for older accounts / regional differences.
                 const blockEndpoints = [
+                  'https://web.grindr.com/api/v3.1/me/blocks',
+                  'https://web.grindr.com/api/v4/me/blocks',
+                  'https://web.grindr.com/api/v3/me/blocks',
+                  'https://web.grindr.com/api/me/blocks',
                   'https://web.grindr.com/api/v4/blocks',
                   'https://web.grindr.com/api/v3/blocks',
                   'https://web.grindr.com/api/blocks',
-                  'https://web.grindr.com/api/v1/blocks',
                 ];
                 const hideEndpoints = [
+                  'https://web.grindr.com/api/v3.1/me/hides',
+                  'https://web.grindr.com/api/v4/me/hides',
+                  'https://web.grindr.com/api/me/hides',
                   'https://web.grindr.com/api/v4/hides',
-                  'https://web.grindr.com/api/v3/hides',
                   'https://web.grindr.com/api/v1/hides',
-                  'https://web.grindr.com/api/hides',
+                ];
+                const favoriteEndpoints = [
+                  'https://web.grindr.com/api/v5/favorites',
+                  'https://web.grindr.com/api/v4/favorites',
+                  'https://web.grindr.com/api/favorites',
+                  'https://web.grindr.com/api/v3/me/favorites',
                 ];
                 for (const e of blockEndpoints) await paginateEndpoint(e, false, 'block');
                 for (const e of hideEndpoints) await paginateEndpoint(e, false, 'hide');
+                for (const e of favoriteEndpoints) await paginateEndpoint(e, true, 'favorite');
 
                 // Surface full debug in console so the user can see exactly
                 // which endpoints worked and how many they returned.
@@ -820,6 +878,43 @@ async function handleMessage(msg: any): Promise<any> {
               trained++;
             }
             console.log('[Aggregaytor:SW] Grindr import: received', signals.length, 'signals, trained', trained, 'new (skipped already-trained).');
+          }
+          // Fallback/supplement: also scan contacts already in the database
+          // that the ADAPTER flagged from natural page-load traffic (when the
+          // Grindr page fetches /api/v3.1/me/blocks at login, our adapter
+          // captures those profiles and tags them md.isBlocked=true via URL
+          // matching). This works even if the direct fetch above failed (e.g.
+          // auth token wasn't discoverable).
+          try {
+            const grindrContacts = await getContactsByPlatform('grindr');
+            let adapterTagged = 0;
+            for (const c of grindrContacts) {
+              const cid = c._id?.replace('contact:', '') || '';
+              if (!cid || autoTrainedSet.has(cid)) continue;
+              const md = (c.metadata || {}) as any;
+              const liked = md.isFavorite ? true : (md.isBlocked ? false : null);
+              if (liked === null) continue;
+              await recordFeedback(cid, 'grindr', liked, {
+                bodyType: String(md.bodyType || ''),
+                position: String(md.position || ''),
+                age: String(md.age || ''),
+                ethnicity: String(md.ethnicity || ''),
+                height: String(md.height || ''),
+                profileTextLength: String(md.profileText || '').length,
+                profileTextKeywords: [],
+                hasPhoto: c.avatarUrl ? 1 : 0,
+                photoCount: Array.isArray(md.photos) ? md.photos.length : 0,
+                distance: String(md.distance || ''),
+                conversationLength: 0,
+                responseRate: 0,
+              });
+              autoTrainedSet.add(cid);
+              trained++;
+              adapterTagged++;
+            }
+            console.log('[Aggregaytor:SW] Grindr adapter-tagged signals trained:', adapterTagged);
+          } catch (e) {
+            console.warn('[Aggregaytor:SW] Grindr adapter-tag scan failed:', e);
           }
         }
 
