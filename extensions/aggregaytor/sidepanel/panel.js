@@ -2415,6 +2415,22 @@ document.getElementById('sp-train-now')?.addEventListener('click', async () => {
   } catch (err) { status.textContent = 'Error: ' + err.message; status.style.color = '#ef4444'; }
 });
 
+document.getElementById('sp-train-grindr')?.addEventListener('click', async () => {
+  const status = document.getElementById('sp-train-status');
+  status.textContent = 'Importing Grindr blocked/hidden lists...';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'BULK_TRAIN_FROM_PLATFORM', platform: 'grindr' });
+    if (res?.ok) {
+      status.textContent = `Imported and trained on ${res.trained} signals!`;
+      status.style.color = '#22c55e';
+      loadModelStats();
+    } else {
+      status.textContent = res?.error || 'Failed — is Grindr tab open?';
+      status.style.color = '#ef4444';
+    }
+  } catch (err) { status.textContent = 'Error: ' + err.message; status.style.color = '#ef4444'; }
+});
+
 document.getElementById('sp-retrain-model')?.addEventListener('click', async () => {
   const status = document.getElementById('sp-train-status');
   status.textContent = 'Retraining from scratch...';

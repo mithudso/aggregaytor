@@ -691,6 +691,75 @@ async function handleMessage(msg: any): Promise<any> {
       }
       return { ok: true, meta };
     }
+    case 'BULK_TRAIN_FROM_PLATFORM': {
+      // Fetch blocked/hidden/favorites lists from platform APIs and train on them
+      try {
+        let trained = 0;
+        const platform = msg.platform as Platform;
+
+        if (platform === 'grindr') {
+          // Fetch Grindr's blocked and hidden lists via the platform tab
+          const tabs = await chrome.tabs.query({});
+          const grindrTab = tabs.find((t: any) => t.url?.includes('web.grindr.com'));
+          if (grindrTab?.id) {
+            const [result] = await chrome.scripting.executeScript({
+              target: { tabId: grindrTab.id },
+              func: async () => {
+                const results: Array<{ profileId: string; liked: boolean }> = [];
+                try {
+                  // Fetch favorites (liked)
+                  // Note: Grindr doesn't have a simple favorites API list endpoint
+
+                  // Fetch blocks (disliked)
+                  const blocksRes = await fetch('https://web.grindr.com/api/v4/blocks?page=1', { credentials: 'include' });
+                  if (blocksRes.ok) {
+                    const data = await blocksRes.json();
+                    const profiles = data.profiles || data.items || [];
+                    for (const p of profiles) {
+                      const pid = String(p.profileId || p.id || '');
+                      if (pid) results.push({ profileId: pid, liked: false });
+                    }
+                  }
+
+                  // Fetch hides (disliked)
+                  const hidesRes = await fetch('https://web.grindr.com/api/v1/hides', { credentials: 'include' });
+                  if (hidesRes.ok) {
+                    const data = await hidesRes.json();
+                    const profiles = data.profiles || data.items || data || [];
+                    if (Array.isArray(profiles)) {
+                      for (const p of profiles) {
+                        const pid = String(p.profileId || p.id || p || '');
+                        if (pid && /^\d+$/.test(pid)) results.push({ profileId: pid, liked: false });
+                      }
+                    }
+                  }
+                } catch {}
+                return results;
+              },
+            });
+
+            const signals = result?.result || [];
+            for (const { profileId, liked } of signals) {
+              const cid = `grindr:${profileId}`;
+              if (autoTrainedSet.has(cid)) continue;
+              await recordFeedback(cid, 'grindr', liked, {
+                bodyType: '', position: '', age: '', ethnicity: '', height: '',
+                profileTextLength: 0, profileTextKeywords: [], hasPhoto: 0,
+                photoCount: 0, distance: '', conversationLength: 0, responseRate: 0,
+              });
+              autoTrainedSet.add(cid);
+              trained++;
+            }
+          }
+        }
+
+        // Also run the standard signal scan
+        const signalResult = await autoTrainFromSignals();
+        trained += signalResult.trained;
+
+        return { ok: true, trained };
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
     case 'AUTO_TRAIN_NOW': {
       try {
         const result = await autoTrainFromSignals();
@@ -1222,57 +1291,65 @@ async function autoTrainFromSignals(): Promise<{ trained: number }> {
   let trained = 0;
   try {
     const allMeta = await getAllThreadMeta();
-    const { getAllContacts } = await import('@aggregaytor/store');
     const allContacts = await getAllContacts();
-    const contactMap = new Map(allContacts.map((c: any) => [c._id?.replace('contact:', '') || '', c]));
 
-    for (const meta of allMeta) {
-      const contactId = meta._id?.replace('meta:', '') || meta.contactId || '';
+    // Build lookup maps
+    const metaMap = new Map<string, any>();
+    for (const m of allMeta) {
+      const cid = m._id?.replace('meta:', '') || m.contactId || '';
+      if (cid) metaMap.set(cid, m);
+    }
+
+    // Process ALL contacts — the signals are on contact metadata AND thread meta
+    for (const contact of allContacts) {
+      const contactId = contact._id?.replace('contact:', '') || '';
       if (!contactId || autoTrainedSet.has(contactId)) continue;
       if (contactId.endsWith(':global-chat')) continue;
 
-      // Determine signal
+      const md = contact.metadata || {};
+      const meta = metaMap.get(contactId) || {};
+      const platform = (contact.platform || contactId.split(':')[0] || 'sniffies') as Platform;
+
+      // Collect ALL signals from both contact metadata AND thread meta
       let liked: boolean | null = null;
-      if (meta.bookmarked || meta.favorited) liked = true;
-      if (meta.rating && meta.rating >= 4) liked = true;
-      if (meta.rating && meta.rating <= 2) liked = false;
-      if (meta.blockedByThem || meta.archived) liked = false; // they blocked us or we archived
 
-      if (liked === null) continue; // no signal for this contact
+      // ── Positive signals ──
+      if (md.isPinned) liked = true;           // Sniffies pinned conversation
+      if (md.isFavorite) liked = true;         // Grindr favorited profile
+      if (meta.bookmarked) liked = true;       // Aggregaytor bookmarked
+      if (meta.favorited) liked = true;        // Aggregaytor favorited
+      if (meta.rating && meta.rating >= 4) liked = true;  // High star rating
 
-      // Get contact data for features
-      const contact = contactMap.get(contactId);
-      const md = contact?.metadata || {};
-      const platform = (meta.platform || contactId.split(':')[0] || 'sniffies') as Platform;
+      // ── Negative signals ──
+      if (md.isBlocked) liked = false;         // Grindr blocked/hidden
+      if (meta.blockedByThem) liked = false;   // Platform blocked
+      if (meta.rating && meta.rating <= 2) liked = false;  // Low star rating
+      // Don't count archived as negative — user may archive for other reasons
+
+      if (liked === null) continue; // no signal
 
       const features: ProfileFeatures = {
-        bodyType: String(md.bodyType || md.body || ''),
-        position: String(md.position || md.attitude || ''),
+        bodyType: String(md.bodyType || md.body || md.build || ''),
+        position: String(md.position || md.attitude || md.sexualPosition || ''),
         age: String(md.age || ''),
         ethnicity: String(md.ethnicity || ''),
         height: String(md.height || ''),
-        profileTextLength: String(md.profileText || '').length,
+        profileTextLength: String(md.profileText || md.aboutMe || md.bio || '').length,
         profileTextKeywords: [],
-        hasPhoto: contact?.avatarUrl ? 1 : 0,
-        photoCount: 0,
+        hasPhoto: contact.avatarUrl ? 1 : 0,
+        photoCount: Array.isArray(md.photos) ? md.photos.length : 0,
         distance: String(md.distance || ''),
         conversationLength: 0,
         responseRate: 0,
       };
 
-      // Check for Sniffies-specific signals
-      if (md.isPinned) liked = true;
-      // Check for Grindr-specific signals
-      if (md.isFavorite) liked = true;
-      if (md.isBlocked) liked = false;
-
-      await recordFeedback(contactId, platform, liked!, features);
+      await recordFeedback(contactId, platform, liked, features);
       autoTrainedSet.add(contactId);
       trained++;
     }
 
     if (trained > 0) {
-      console.log(`${LOG} Auto-trained preference model with ${trained} new signals`);
+      console.log(`${LOG} Auto-trained preference model with ${trained} new signals from ${allContacts.length} contacts`);
     }
   } catch (err) {
     console.warn(`${LOG} Auto-train error:`, err);

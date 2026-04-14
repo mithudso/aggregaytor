@@ -199,7 +199,8 @@
           <input type="checkbox" id="sp-auto-train" checked> Auto-train from platform signals
         </label>
         <div class="settings-row" style="margin-top:4px">
-          <button class="settings-btn" id="sp-train-now" title="Scan all contacts and train the preference model from current signals">Train Now</button>
+          <button class="settings-btn" id="sp-train-now" title="Scan all contacts for pins, favorites, blocks, and ratings — train the model on those signals">Train Now</button>
+          <button class="settings-btn" id="sp-train-grindr" title="Import Grindr's blocked/hidden list as negative training data (fetches from Grindr API)">Import Grindr Lists</button>
           <button class="settings-btn" id="sp-retrain-model" title="Retrain the entire model from scratch using all recorded feedback">Full Retrain</button>
         </div>
         <div id="sp-train-status" class="settings-info" style="margin-top:4px"></div>
