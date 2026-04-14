@@ -1695,6 +1695,85 @@ async function handleMessage(msg: any): Promise<any> {
         return { ok: true, ...summary };
       } catch (err) { return { ok: false, error: (err as Error).message }; }
     }
+    // ── Unhide-all-on-platform handlers ────────────────────────────────────
+    // Clear our local hide filter for a platform without touching the
+    // platform's real block state. Used by Settings → Data → Blocklists.
+    case 'UNHIDE_ALL_PLATFORM': {
+      try {
+        const platform = String(msg.platform || '');
+        let affectedContacts = 0;
+        let tabsNotified = 0;
+
+        if (platform === 'sniffies') {
+          // Strip isBlocked from contacts in our DB (affects the thread
+          // list but not platform-side block state) and relay a clear to
+          // any open Sniffies tab so live map markers un-hide.
+          const contacts = await getContactsByPlatform('sniffies');
+          for (const c of contacts) {
+            const md = (c.metadata || {}) as any;
+            if (!md.isBlocked) continue;
+            const fresh = { ...md };
+            delete fresh.isBlocked;
+            await upsertContact({
+              id: c._id?.replace('contact:', '') || '', platform: 'sniffies',
+              platformUserId: c.platformUserId,
+              displayName: c.displayName || '',
+              profileUrl: c.profileUrl || '',
+              avatarUrl: c.avatarUrl || '',
+              lastSeen: c.lastSeen || new Date().toISOString(),
+              metadata: fresh,
+            });
+            affectedContacts++;
+          }
+          // Clear the Sniffies tab's localStorage blocklist via bridge
+          const tabs = await chrome.tabs.query({});
+          for (const tab of tabs) {
+            if (tab.id && tab.url?.includes('sniffies.com')) {
+              await chrome.tabs.sendMessage(tab.id, { type: 'MAP_FILTER_SETTINGS', settings: { blockedIds: [] } }).catch(() => {});
+              tabsNotified++;
+            }
+          }
+        } else if (platform === 'adam4adam') {
+          const tabs = await chrome.tabs.query({});
+          for (const tab of tabs) {
+            if (tab.id && tab.url?.includes('adam4adam.com')) {
+              await chrome.tabs.sendMessage(tab.id, { type: 'A4A_UNHIDE_ALL' }).catch(() => {});
+              tabsNotified++;
+            }
+          }
+        } else if (platform === 'grindr') {
+          // Grindr middle-click actually calls the platform's hide API, so
+          // the profile stays blocked on Grindr's side. This just strips
+          // our local md.isBlocked flag so the contact reappears in
+          // Aggregaytor's thread list. The Grindr cascade won't show them
+          // either way — they're really blocked.
+          const contacts = await getContactsByPlatform('grindr');
+          for (const c of contacts) {
+            const md = (c.metadata || {}) as any;
+            if (!md.isBlocked) continue;
+            const fresh = { ...md };
+            delete fresh.isBlocked;
+            await upsertContact({
+              id: c._id?.replace('contact:', '') || '', platform: 'grindr',
+              platformUserId: c.platformUserId,
+              displayName: c.displayName || '',
+              profileUrl: c.profileUrl || '',
+              avatarUrl: c.avatarUrl || '',
+              lastSeen: c.lastSeen || new Date().toISOString(),
+              metadata: fresh,
+            });
+            affectedContacts++;
+          }
+        } else {
+          return { ok: false, error: `Unknown platform: ${platform}` };
+        }
+        invalidateThreadCache();
+        return { ok: true, affectedContacts, tabsNotified };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+
     case 'CAPTURE_QUICK_PHRASE': {
       // Save captured text as a quick phrase in chrome.storage
       const data = await chrome.storage.local.get('aggregaytor_quick_phrases');

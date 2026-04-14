@@ -2297,6 +2297,39 @@ document.getElementById('sp-toggle-devlog').addEventListener('click', () => {
   if (devLogVisible) renderDevLog();
 });
 
+// ── Blocklists — unhide all per platform ───────────────────────────────────
+async function unhidePlatform(platform, label) {
+  const status = document.getElementById('sp-unhide-status');
+  if (!confirm(`Clear the local ${label} blocklist? ` +
+    `This removes the extension's visual filter only — it does NOT contact ${label} ` +
+    `to unblock anyone on the platform itself.`)) return;
+  status.textContent = `Clearing ${label} blocklist…`;
+  status.style.color = '';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'UNHIDE_ALL_PLATFORM', platform });
+    if (!res?.ok) {
+      status.textContent = 'Error: ' + (res?.error || 'unknown');
+      status.style.color = '#f87171';
+      return;
+    }
+    const parts = [];
+    if (res.affectedContacts) parts.push(`${res.affectedContacts} contact(s) un-flagged`);
+    if (res.tabsNotified) parts.push(`${res.tabsNotified} open ${label} tab(s) refreshed`);
+    status.textContent = parts.length
+      ? `✓ ${label} unhidden — ${parts.join(', ')}.`
+      : `${label} blocklist was already empty.`;
+    status.style.color = '#22c55e';
+    // Kick the thread list so the un-flagged contacts reappear
+    if (typeof loadThreads === 'function') loadThreads().catch(() => {});
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+    status.style.color = '#f87171';
+  }
+}
+document.getElementById('sp-unhide-sniffies')?.addEventListener('click', () => unhidePlatform('sniffies', 'Sniffies'));
+document.getElementById('sp-unhide-a4a')?.addEventListener('click', () => unhidePlatform('adam4adam', 'Adam4Adam'));
+document.getElementById('sp-unhide-grindr')?.addEventListener('click', () => unhidePlatform('grindr', 'Grindr'));
+
 // ── Export / Import ──────────────────────────────────────────────────────────
 document.getElementById('sp-export-encrypt')?.addEventListener('change', (e) => {
   document.getElementById('sp-export-passphrase').style.display = e.target.checked ? '' : 'none';

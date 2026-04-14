@@ -490,6 +490,20 @@
         </label>
       </div>
       <div class="settings-section">
+        <h3 class="settings-heading">Blocklists</h3>
+        <div class="settings-info">
+          Clear local hide filters per platform. Does NOT touch the platform's
+          real block (e.g. if you blocked someone on Grindr, they stay blocked
+          on Grindr — this only removes our visual filter in the extension).
+        </div>
+        <div class="settings-row" style="margin-top:6px">
+          <button class="settings-btn" id="sp-unhide-sniffies" title="Clear the Sniffies map-hide list. All middle-clicked/shift-clicked profiles become visible again on the map.">Unhide Sniffies</button>
+          <button class="settings-btn" id="sp-unhide-a4a" title="Clear the Adam4Adam blocklist. All middle-clicked cards reappear.">Unhide A4A</button>
+          <button class="settings-btn" id="sp-unhide-grindr" title="Clear our local md.isBlocked flag on Grindr contacts so they appear in Aggregaytor's thread list again. (Grindr still has them platform-blocked; this only affects what the extension hides from you.)">Unhide Grindr (local)</button>
+        </div>
+        <div id="sp-unhide-status" class="settings-info" style="margin-top:4px"></div>
+      </div>
+      <div class="settings-section">
         <h3 class="settings-heading">Log Level</h3>
         <select id="sp-log-level" class="settings-select">
           <option value="debug">Debug</option><option value="info" selected>Info</option>

@@ -254,20 +254,43 @@ window.addEventListener('__aggregaytor_a4a_blocked_update', ((event: CustomEvent
   applyHideFilter();
 }) as EventListener);
 
-// Self-heal: if any element on the page currently has HIDE_CLASS AND contains
-// multiple profile links, it was hidden by the buggy previous version (a
-// containers-too-greedy selector). Un-hide it — applyHideFilter will then
-// re-apply proper per-card hides. Runs once on page load.
-setTimeout(() => {
+// Self-heal: if any element on the page is currently hidden (HIDE_CLASS OR
+// inline opacity:0 left over from hideCard's fade-out animation) AND contains
+// multiple profile links, it was hidden by the buggy v0.57.13 container
+// selector. Un-hide it. applyHideFilter will then re-apply proper per-card
+// hides using the corrected findCardContainer walk-up.
+function selfHeal(): void {
+  let unhidden = 0;
+  // 1. Elements with our HIDE_CLASS that contain multiple profile links
   document.querySelectorAll<HTMLElement>(`.${HIDE_CLASS}`).forEach(el => {
     if (el.querySelectorAll('a[href*="/profile/"]').length > 1) {
-      console.log(`${LOG} Self-heal: un-hiding container with multiple profile links (left over from the v0.57.13 over-greedy hide).`);
       el.classList.remove(HIDE_CLASS);
       el.style.opacity = '';
+      el.style.display = '';
+      el.style.visibility = '';
+      unhidden++;
     }
   });
-  applyHideFilter();
-}, 1000);
+  // 2. Elements with inline opacity:0 that contain multiple profile links
+  //    (hideCard set opacity=0 BEFORE adding HIDE_CLASS via setTimeout —
+  //    if the page was captured mid-animation, the inline style lingered)
+  document.querySelectorAll<HTMLElement>('[style*="opacity"]').forEach(el => {
+    if (el.style.opacity === '0' && el.querySelectorAll('a[href*="/profile/"]').length > 1) {
+      el.style.opacity = '';
+      el.style.transition = '';
+      unhidden++;
+    }
+  });
+  // 3. Also unhide any element we hid that's now matching the old greedy
+  //    container selector (ancestors with class*=user, card, tile, etc)
+  //    — only if they contain >1 profile link.
+  if (unhidden > 0) {
+    console.log(`${LOG} Self-heal: un-hid ${unhidden} container(s) left over from the v0.57.13 over-greedy hide.`);
+  }
+}
+setTimeout(() => { selfHeal(); applyHideFilter(); }, 1000);
+// Repeat after 3s in case A4A finishes rendering late
+setTimeout(() => { selfHeal(); applyHideFilter(); }, 3000);
 
 // ── Emergency Recovery Helpers (DevTools console) ──────────────────────────
 // __aggregaytor_a4a_reset()       — clear blocklist, un-hide everything
@@ -275,13 +298,7 @@ setTimeout(() => {
 //                                    the blocklist (hide re-applies on scroll)
 // __aggregaytor_a4a_list_blocked()— print the stored blocklist
 (window as any).__aggregaytor_a4a_reset = function(): void {
-  console.log(`${LOG} Reset: clearing ${blockedUsernames.size} blocked username(s) and unhiding.`);
-  blockedUsernames.clear();
-  saveBlockedList();
-  document.querySelectorAll<HTMLElement>(`.${HIDE_CLASS}`).forEach(el => {
-    el.classList.remove(HIDE_CLASS);
-    el.style.opacity = '';
-  });
+  clearA4ABlocklist();
 };
 (window as any).__aggregaytor_a4a_unhide_all = function(): void {
   document.querySelectorAll<HTMLElement>(`.${HIDE_CLASS}`).forEach(el => {
@@ -305,8 +322,34 @@ window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
   catch { contextValid = false; }
 }) as EventListener);
 
+/** Clear our local A4A blocklist AND remove any hide styling from the DOM.
+ *  Does NOT contact A4A's servers — this is purely resetting our own filter. */
+function clearA4ABlocklist(): void {
+  const n = blockedUsernames.size;
+  blockedUsernames.clear();
+  saveBlockedList();
+  // Remove every visual hide we've applied in any form: the class, inline
+  // opacity fade-out, and inline display:none belt-and-suspenders.
+  document.querySelectorAll<HTMLElement>(`.${HIDE_CLASS}, [style*="opacity"], [style*="display: none"]`).forEach(el => {
+    el.classList.remove(HIDE_CLASS);
+    if (el.style.opacity === '0') el.style.opacity = '';
+    if (el.style.display === 'none' && el.querySelectorAll('a[href*="/profile/"]').length > 0) {
+      el.style.display = '';
+    }
+    el.style.transition = '';
+    el.style.visibility = '';
+  });
+  console.log(`${LOG} Cleared ${n} blocked username(s); removed hide styling from the DOM.`);
+}
+
 try {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    // Clear local A4A blocklist (from Settings → Data → Unhide A4A)
+    if (message.type === 'A4A_UNHIDE_ALL') {
+      clearA4ABlocklist();
+      sendResponse({ ok: true });
+      return true;
+    }
     // Auto-send response (from auto-respond or quick phrases)
     if (message.type === 'SEND_AUTO_RESPONSE') {
       window.dispatchEvent(new CustomEvent('__aggregaytor_send_message', {
