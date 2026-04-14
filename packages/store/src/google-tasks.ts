@@ -22,25 +22,59 @@ const TASKS_API = 'https://tasks.googleapis.com/tasks/v1';
 const TASKLIST_KEY = 'aggregaytor_google_tasklist_id';
 
 // ── Auth Helper ──────────────────────────────────────────────────────────────
+//
+// In-memory cache for the OAuth token. `chrome.identity.getAuthToken` itself
+// caches under the hood, but the extension call still costs ~10–20ms of
+// message-passing latency, and we hit it from: task sync (every 5 min),
+// GOOGLE_TASKS_CREATE / UPDATE / DELETE, SYNC_TASK_TO_CALENDAR, Drive
+// backup, and `isGoogleAuthenticated()` polls from the settings UI. Caching
+// the resolved token in-process cuts this to ~0ms for the warm path.
+//
+// Google access tokens are valid for 60 minutes. We cache for 50 to leave
+// a 10-min safety margin in case our local clock drifts, and we invalidate
+// explicitly on 401 (via `invalidateGoogleAuthCache()` — called from the
+// 401 retry path inside tasksApiFetch).
+interface AuthCacheEntry { token: string; expiresAt: number; }
+let _authCache: AuthCacheEntry | null = null;
+const AUTH_CACHE_TTL_MS = 50 * 60_000; // 50 min — under the 60-min token lifetime
+
+function invalidateGoogleAuthCache(): void {
+  _authCache = null;
+}
 
 /**
  * Get a valid OAuth access token via chrome.identity.
  * Uses the scopes defined in manifest.json's oauth2 section.
  * Returns null if auth fails or is denied by the user.
+ *
+ * Warm path: in-process cache hit, no chrome.identity round-trip.
  */
 async function getAuthToken(interactive = false): Promise<string | null> {
+  // Serve from cache only when the caller didn't explicitly ask for an
+  // interactive auth (clicking "Connect Google"). Interactive requests
+  // must always hit chrome.identity so the user actually sees the consent
+  // flow.
+  if (!interactive && _authCache && _authCache.expiresAt > Date.now()) {
+    return _authCache.token;
+  }
   try {
     if (typeof chrome === 'undefined' || !chrome?.identity?.getAuthToken) return null;
-    return new Promise((resolve) => {
-      chrome.identity.getAuthToken({ interactive }, (token: string) => {
+    const token = await new Promise<string | null>((resolve) => {
+      chrome.identity.getAuthToken({ interactive }, (tok: string) => {
         if (chrome.runtime.lastError) {
           console.warn('[GoogleTasks] Auth failed:', chrome.runtime.lastError.message);
           resolve(null);
         } else {
-          resolve(token || null);
+          resolve(tok || null);
         }
       });
     });
+    if (token) {
+      _authCache = { token, expiresAt: Date.now() + AUTH_CACHE_TTL_MS };
+    } else {
+      _authCache = null;
+    }
+    return token;
   } catch {
     return null;
   }
@@ -68,10 +102,12 @@ async function tasksApiFetch(
   });
 
   if (res.status === 401 && retry) {
-    // Token expired — revoke and get a fresh one
+    // Token expired — revoke from chrome.identity AND invalidate our
+    // in-process cache so the next getAuthToken() fetches a fresh one.
     await new Promise<void>((resolve) => {
       chrome.identity.removeCachedAuthToken({ token }, () => resolve());
     });
+    invalidateGoogleAuthCache();
     return tasksApiFetch(path, opts, false);
   }
 

@@ -446,7 +446,7 @@ async function handleMessage(msg: any): Promise<any> {
     case 'DELETE_REMINDER': { await deleteReminder(msg.id); return { ok: true }; }
 
     // LLM
-    case 'GENERATE_SUGGESTIONS': return { ok: true, ...(await generateSuggestions(msg.messages, msg.contactName, msg.platform)) };
+    case 'GENERATE_SUGGESTIONS': return { ok: true, ...(await generateSuggestions(msg.messages, msg.contactName, msg.platform, msg.contactId)) };
     case 'GET_LLM_CONFIG': return { ok: true, config: await getLLMConfig() };
     case 'SAVE_LLM_CONFIG': { await saveLLMConfig(msg.config); return { ok: true }; }
     case 'SET_LOG_LEVEL': {
@@ -881,42 +881,52 @@ async function handleMessage(msg: any): Promise<any> {
                 const results: Array<{ profileId: string; liked: boolean; source: string }> = [];
                 const debug: Array<{ url: string; status: number; keys: string[]; count: number; sample: any }> = [];
 
-                // Discover the Grindr Authorization token. Grindr's React app
-                // stores it in localStorage under keys like 'authToken',
-                // 'session', 'grindrSession', or nested inside a JSON blob.
-                const findGrindrAuth = (): string => {
-                  // Check common key names
-                  const keys = ['authToken', 'auth-token', 'grindrAuthToken', 'session', 'grindrSession', 'access_token', 'accessToken', 'token'];
-                  for (const k of keys) {
-                    const v = localStorage.getItem(k);
-                    if (v && v.length > 20 && !v.startsWith('{')) return v;
-                  }
-                  // Scan ALL localStorage keys for JWT-shaped values
-                  for (let i = 0; i < localStorage.length; i++) {
-                    const k = localStorage.key(i) || '';
-                    const v = localStorage.getItem(k) || '';
-                    // JWT: xxx.yyy.zzz with base64url chars
-                    if (/^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$/.test(v)) return v;
-                    // JSON blob with token field
-                    if (v.startsWith('{')) {
-                      try {
-                        const obj = JSON.parse(v);
-                        const t = obj.authToken || obj.accessToken || obj.token || obj.session?.authToken || obj.session?.accessToken;
-                        if (t && String(t).length > 20) return String(t);
-                      } catch {}
-                    }
-                  }
-                  return '';
-                };
-
-                const authToken = findGrindrAuth();
+                // PRIMARY auth source: the grindr.ts adapter captures live
+                // Authorization headers from Grindr's own network traffic
+                // and exposes them via window.__aggregaytor_get_grindr_auth().
+                // Using the adapter's cache means we always send the exact same
+                // header Grindr's own React app is sending right now — most
+                // reliable and avoids the "is localStorage stale?" problem.
+                //
+                // Fallback: scan localStorage for JWT-shaped values and common
+                // token keys. Used when the bulk import runs BEFORE the
+                // adapter has seen any authenticated traffic (rare — cascade
+                // loads fire auth calls on page open).
                 const authHeaders: Record<string, string> = {};
-                if (authToken) {
-                  authHeaders['Authorization'] = authToken.startsWith('Grindr3 ') || authToken.startsWith('Bearer ')
-                    ? authToken
-                    : `Grindr3 ${authToken}`;
+                let authSource = 'none';
+                const captured = (window as any).__aggregaytor_get_grindr_auth?.();
+                if (captured && Object.keys(captured).length) {
+                  Object.assign(authHeaders, captured);
+                  authSource = 'adapter';
+                } else {
+                  const findTokenFromStorage = (): string => {
+                    const keys = ['authToken', 'auth-token', 'grindrAuthToken', 'session', 'grindrSession', 'access_token', 'accessToken', 'token'];
+                    for (const k of keys) {
+                      const v = localStorage.getItem(k);
+                      if (v && v.length > 20 && !v.startsWith('{')) return v;
+                    }
+                    for (let i = 0; i < localStorage.length; i++) {
+                      const k = localStorage.key(i) || '';
+                      const v = localStorage.getItem(k) || '';
+                      if (/^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$/.test(v)) return v;
+                      if (v.startsWith('{')) {
+                        try {
+                          const obj = JSON.parse(v);
+                          const t = obj.authToken || obj.accessToken || obj.token || obj.session?.authToken || obj.session?.accessToken;
+                          if (t && String(t).length > 20) return String(t);
+                        } catch {}
+                      }
+                    }
+                    return '';
+                  };
+                  const token = findTokenFromStorage();
+                  if (token) {
+                    authHeaders['Authorization'] = token.startsWith('Grindr3 ') || token.startsWith('Bearer ')
+                      ? token : `Grindr3 ${token}`;
+                    authSource = 'localStorage';
+                  }
                 }
-                console.log('[Aggregaytor:GrindrImport] Auth token found:', !!authToken, 'length:', authToken.length);
+                console.log('[Aggregaytor:GrindrImport] Auth source:', authSource, 'headers:', Object.keys(authHeaders).join(','));
 
                 // Extract profile IDs from an arbitrary response shape. Grindr
                 // uses various envelope formats across endpoints (profiles[],
@@ -1858,7 +1868,7 @@ async function processAutoResponds(): Promise<void> {
 
       const result = await generateAutoResponse(
         messages.map(m => ({ direction: m.direction, body: m.body, timestamp: m.timestamp })),
-        contactName, entry.platform, settings,
+        contactName, entry.platform, settings, entry.contactId,
       );
 
       if (result.tier === 'low') {
@@ -2285,11 +2295,30 @@ function markAutoTrained(contactId: string): void {
   }
 }
 
-async function autoTrainFromSignals(): Promise<{ trained: number }> {
-  const enabledData = await chrome.storage.local.get('aggregaytor_auto_train_preferences');
-  if (enabledData.aggregaytor_auto_train_preferences === false) return { trained: 0 };
+// ── Incremental auto-training via the signal index ──────────────────────────
+//
+// The trainer used to rescan every contact on every pass (every 30 min). On
+// a heavy account with thousands of contacts that's tens of thousands of
+// doc iterations per hour even when nothing has changed since the last run.
+//
+// `upsertThreadMeta` now bumps `signalsUpdatedAt` only when a preference
+// signal field actually changes. We persist "when did we last successfully
+// train?" in chrome.storage and use it as a high-water mark: any thread-meta
+// with `signalsUpdatedAt > lastRunAt` is in the delta. Contacts not covered
+// by the delta are skipped entirely.
+//
+// The `autoTrainedSet` still guards against duplicate training within a
+// single SW lifetime — the signal index is the *cross-lifetime* dedupe.
+const LAST_TRAIN_TS_KEY = 'aggregaytor_last_auto_train_ts';
+
+async function autoTrainFromSignals(): Promise<{ trained: number; scanned: number; skipped: number }> {
+  const enabledData = await chrome.storage.local.get(['aggregaytor_auto_train_preferences', LAST_TRAIN_TS_KEY]);
+  if (enabledData.aggregaytor_auto_train_preferences === false) return { trained: 0, scanned: 0, skipped: 0 };
+  const lastRunAt: string = enabledData[LAST_TRAIN_TS_KEY] || '';
 
   let trained = 0;
+  let scanned = 0;
+  let skipped = 0;
   try {
     const allMeta = await getAllThreadMeta();
     const allContacts = await getAllContacts();
@@ -2301,13 +2330,38 @@ async function autoTrainFromSignals(): Promise<{ trained: number }> {
       if (cid) metaMap.set(cid, m);
     }
 
+    // Build the "signal-dirty" set: contacts whose thread-meta signals
+    // bumped after the last training run. On the very first run (empty
+    // lastRunAt) this returns everything so we catch pre-upgrade state.
+    let dirtyContactIds: Set<string> | null = null;
+    if (lastRunAt) {
+      dirtyContactIds = new Set();
+      for (const m of allMeta) {
+        const ts = (m as any).signalsUpdatedAt || '';
+        if (!ts || ts > lastRunAt) {
+          const cid = m._id?.replace('meta:', '') || m.contactId || '';
+          if (cid) dirtyContactIds.add(cid);
+        }
+      }
+    }
+
     // Process ALL contacts — the signals are on contact metadata AND thread meta
     for (const contact of allContacts) {
       const contactId = contact._id?.replace('contact:', '') || '';
-      if (!contactId || autoTrainedSet.has(contactId)) continue;
+      if (!contactId || autoTrainedSet.has(contactId)) { skipped++; continue; }
       if (contactId.endsWith(':global-chat')) continue;
 
       const md = contact.metadata || {};
+
+      // Skip contacts that weren't touched since the last run UNLESS they
+      // have a platform-level signal (md.isPinned/isFavorite/isBlocked) —
+      // those can change without going through upsertThreadMeta.
+      if (dirtyContactIds && !dirtyContactIds.has(contactId)) {
+        const hasPlatformSignal = md.isPinned || md.isFavorite || md.isBlocked;
+        if (!hasPlatformSignal) { skipped++; continue; }
+      }
+      scanned++;
+
       const meta = metaMap.get(contactId) || {};
       const platform = (contact.platform || contactId.split(':')[0] || 'sniffies') as Platform;
 
@@ -2350,12 +2404,16 @@ async function autoTrainFromSignals(): Promise<{ trained: number }> {
     }
 
     if (trained > 0) {
-      console.log(`${LOG} Auto-trained preference model with ${trained} new signals from ${allContacts.length} contacts`);
+      console.log(`${LOG} Auto-trained preference model with ${trained} new signals (scanned ${scanned}, skipped ${skipped} of ${allContacts.length} contacts via signal index)`);
     }
+    // Persist the high-water mark even when no new signals trained — an
+    // empty successful run still advances the cursor so the next pass only
+    // considers newer changes.
+    await chrome.storage.local.set({ [LAST_TRAIN_TS_KEY]: new Date().toISOString() }).catch(() => {});
   } catch (err) {
     console.warn(`${LOG} Auto-train error:`, err);
   }
-  return { trained };
+  return { trained, scanned, skipped };
 }
 
 // Run auto-training every 30 minutes

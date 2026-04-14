@@ -44,6 +44,19 @@ export async function getThreadMeta(
   }
 }
 
+/**
+ * Fields on ThreadMetaDoc that, when changed, are preference-model training
+ * signals. Writes that touch any of these bump `signalsUpdatedAt` so the
+ * incremental auto-trainer knows which threads to re-scan.
+ *
+ * Non-signal fields (notes, tags, alias, distance) are excluded so cosmetic
+ * edits don't fan out into unnecessary model retraining work.
+ */
+const SIGNAL_FIELDS = new Set<keyof ThreadMetaDoc>([
+  'bookmarked', 'favorited', 'rating' as any,
+  'blockedByThem', 'archived', 'hidden',
+]);
+
 export async function upsertThreadMeta(
   contactId: string,
   platform: Platform,
@@ -61,6 +74,27 @@ export async function upsertThreadMeta(
     if (err.status !== 404) throw err;
   }
 
+  // Detect whether this write changes a preference signal. Compares each
+  // signal field's proposed value to the existing value; if any differ, we
+  // bump signalsUpdatedAt so the incremental trainer picks this thread up
+  // on its next pass. This keeps the training scan O(Δ) instead of O(N).
+  let signalChanged = !existing; // new docs always count as a signal change if they carry any signal
+  if (existing) {
+    for (const field of SIGNAL_FIELDS) {
+      if (field in updates) {
+        const next = (updates as any)[field];
+        const prev = (existing as any)[field];
+        if (next !== prev) { signalChanged = true; break; }
+      }
+    }
+  } else {
+    // New doc — count as a signal change only if any signal field is set
+    signalChanged = false;
+    for (const field of SIGNAL_FIELDS) {
+      if (field in updates && (updates as any)[field]) { signalChanged = true; break; }
+    }
+  }
+
   const doc: ThreadMetaDoc = {
     ...DEFAULTS,
     ...existing,
@@ -72,6 +106,9 @@ export async function upsertThreadMeta(
     createdAt: existing?.createdAt || now,
     updatedAt: now,
   };
+  if (signalChanged) {
+    (doc as any).signalsUpdatedAt = now;
+  }
   if (existing?._rev) doc._rev = existing._rev;
 
   await store.put(doc);

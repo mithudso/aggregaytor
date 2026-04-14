@@ -1,11 +1,40 @@
 /**
  * dossier.ts — Contact dossier (intelligence file) CRUD.
+ *
+ * ## Categories (v0.57.8)
+ *
+ * Dossier fields are organised into topical categories so LLM tasks can
+ * request only the slice they need rather than receiving the whole document.
+ * This mirrors the modular-prompt strategy in llm.ts — nickname generation
+ * needs demographics, auto-respond needs logistics, summary needs meeting
+ * history, etc. Feeding smaller payloads to the LLM:
+ *   - cuts tokens (and therefore cost + latency + rate-limit pressure)
+ *   - keeps the provider-side prompt cache prefix stable for longer
+ *   - reduces prompt-injection surface area (fewer user-supplied strings
+ *     in the system prompt)
+ *
+ * `getDossier()` still returns the full document for back-compat. Use
+ * `getDossierSlice(contactId, categories)` for category-scoped reads.
  */
 
 import type { Platform } from '@aggregaytor/adapter-core';
 import type { ContactDossierDoc } from './types.js';
 import { DEFAULT_DOSSIER } from './types.js';
 import { getDB } from './db.js';
+
+/** Category → field-name list. Categories match the TypeScript doc's
+ *  section headers so the data model is self-documenting. */
+export const DOSSIER_CATEGORIES = {
+  identity:       ['realName', 'birthYear', 'phone', 'address', 'hometown', 'employer', 'schedule'],
+  relationship:   ['relationshipStatus', 'partnerNames', 'partnerLinks'],
+  crossPlatform:  ['otherProfileLinks'],
+  meetings:       ['metInPerson', 'meetingDates', 'meetingNotes', 'wouldMeetAgain', 'wouldDate'],
+  logistics:      ['hasTransportation', 'hasDog', 'isInHotel', 'sentAddressToThem', 'owesMeMoney', 'paidForAnything'],
+  profile:        ['position', 'kinks', 'bodyType'],
+  trust:          ['isRealOrBot', 'ghostCount', 'deletedChatCount'],
+} as const;
+
+export type DossierCategory = keyof typeof DOSSIER_CATEGORIES;
 
 function dossierId(contactId: string): string {
   return `dossier:${contactId}`;
@@ -74,6 +103,61 @@ export async function upsertDossier(
 
   await store.put(doc);
   return doc;
+}
+
+/**
+ * Return only the dossier fields that belong to the requested categories.
+ *
+ * Used by LLM task builders that need a narrow slice of dossier context
+ * (nickname: identity only; auto-respond: logistics + relationship; etc.)
+ * rather than dumping the whole intel file into the prompt.
+ *
+ * Empty-valued fields are omitted from the result so the caller can trust
+ * that every key in the returned object represents a fact we actually know.
+ */
+export async function getDossierSlice(
+  contactId: string,
+  categories: DossierCategory[],
+  db?: PouchDB.Database,
+): Promise<Partial<ContactDossierDoc>> {
+  const full = await getDossier(contactId, db);
+  if (!full) return {};
+  const allowed = new Set<string>();
+  for (const cat of categories) {
+    for (const f of DOSSIER_CATEGORIES[cat] || []) allowed.add(f);
+  }
+  const out: Record<string, unknown> = {};
+  for (const key of allowed) {
+    const v = (full as any)[key];
+    // Skip defaults / empties so the caller doesn't see stale noise
+    if (v == null) continue;
+    if (typeof v === 'string' && !v) continue;
+    if (Array.isArray(v) && v.length === 0) continue;
+    if (typeof v === 'number' && v === 0 && (key === 'owesMeMoney' || key === 'ghostCount' || key === 'deletedChatCount')) continue;
+    out[key] = v;
+  }
+  return out as Partial<ContactDossierDoc>;
+}
+
+/**
+ * Format a dossier slice as a compact bullet-list suitable for dropping
+ * into an LLM system prompt. Returns empty string when there's nothing
+ * to say (so callers can `if (ctx)` and skip the section entirely).
+ */
+export function formatDossierContext(slice: Partial<ContactDossierDoc>): string {
+  const lines: string[] = [];
+  for (const [k, v] of Object.entries(slice)) {
+    if (v == null) continue;
+    if (Array.isArray(v)) {
+      if (!v.length) continue;
+      lines.push(`- ${k}: ${v.join(', ')}`);
+    } else if (typeof v === 'object') {
+      continue; // skip autoExtracted blob
+    } else {
+      lines.push(`- ${k}: ${v}`);
+    }
+  }
+  return lines.join('\n');
 }
 
 /**

@@ -206,6 +206,19 @@ export interface ThreadMetaDoc {
   createdAt: string;
   /** ISO 8601 -- last update */
   updatedAt: string;
+  /**
+   * ISO 8601 — last time a preference-model **signal** field changed
+   * (bookmarked/favorited/rating/blockedByThem/archived/hidden).
+   *
+   * Distinct from `updatedAt`, which bumps on *any* write. The incremental
+   * auto-trainer uses this field to skip threads whose signals haven't
+   * changed since the previous run — dropping training scans from O(N
+   * contacts) to O(Δ signals).
+   *
+   * Absent on docs written before v0.57.8 (treat undefined as "unknown",
+   * i.e. always eligible for re-training on the first post-upgrade pass).
+   */
+  signalsUpdatedAt?: string;
 }
 
 /**

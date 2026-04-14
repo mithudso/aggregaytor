@@ -1,11 +1,29 @@
 /**
  * block-rules.ts — Auto-block rule CRUD and evaluation.
+ *
+ * ## Cache
+ *
+ * `getAllBlockRules()` is on the hot path — the service worker calls it for
+ * every incoming message batch (`runBlockRules()`) and every 5 minutes via
+ * the periodic alarm. Rules change only on explicit user CRUD.
+ *
+ * We maintain a `_rulesCache` (full list) populated on first read and
+ * invalidated by every write (`create`, `update`, `delete`). No TTL — the
+ * cache is event-driven. The only caller who bypasses the cache is the test
+ * suite (via the `db` parameter, since test DBs are isolated).
  */
 
 import type { BlockRuleDoc, BlockRuleCondition, ThreadMetaDoc, MessageDoc } from './types.js';
 import type { Platform } from '@aggregaytor/adapter-core';
 import { getDB } from './db.js';
 import { upsertThreadMeta } from './thread-meta.js';
+
+let _rulesCache: BlockRuleDoc[] | null = null;
+
+/** Invalidate the cache — called by every write path in this module. */
+export function invalidateBlockRulesCache(): void {
+  _rulesCache = null;
+}
 
 export async function createBlockRule(
   input: { name: string; condition: BlockRuleCondition; action: 'block' | 'archive' | 'hide' },
@@ -24,15 +42,23 @@ export async function createBlockRule(
     createdAt: new Date().toISOString(),
   };
   await store.put(doc);
+  if (!db) invalidateBlockRulesCache();
   return doc;
 }
 
 export async function getAllBlockRules(
   db?: PouchDB.Database,
 ): Promise<BlockRuleDoc[]> {
-  const store = db || await getDB();
+  // Tests inject their own DB and must not share the module-level cache
+  if (db) {
+    const result = await db.find({ selector: { docType: 'block_rule' } });
+    return result.docs as BlockRuleDoc[];
+  }
+  if (_rulesCache) return _rulesCache;
+  const store = await getDB();
   const result = await store.find({ selector: { docType: 'block_rule' } });
-  return result.docs as BlockRuleDoc[];
+  _rulesCache = result.docs as BlockRuleDoc[];
+  return _rulesCache;
 }
 
 export async function updateBlockRule(
@@ -44,6 +70,7 @@ export async function updateBlockRule(
   const doc = await store.get(id) as BlockRuleDoc;
   Object.assign(doc, updates);
   await store.put(doc);
+  if (!db) invalidateBlockRulesCache();
 }
 
 export async function deleteBlockRule(
@@ -53,6 +80,7 @@ export async function deleteBlockRule(
   const store = db || await getDB();
   const doc = await store.get(id);
   await store.remove(doc);
+  if (!db) invalidateBlockRulesCache();
 }
 
 /**
@@ -137,10 +165,13 @@ export async function executeAction(
       break;
   }
 
-  // Increment rule execution count
+  // Increment rule execution count. Invalidate the cache so the bumped
+  // count is visible to the next getAllBlockRules() caller (the settings
+  // UI shows per-rule trigger counts).
   try {
     const rule = await store.get(ruleId) as BlockRuleDoc;
     rule.executedCount = (rule.executedCount || 0) + 1;
     await store.put(rule);
+    if (!db) invalidateBlockRulesCache();
   } catch { /* ignore */ }
 }

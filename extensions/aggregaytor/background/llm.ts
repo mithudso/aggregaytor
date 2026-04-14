@@ -8,6 +8,9 @@
  *   4. Local pattern matching fallback (no API key needed)
  */
 
+import { getDossier, getDossierSlice, formatDossierContext } from '@aggregaytor/store';
+import type { DossierCategory } from '@aggregaytor/store';
+
 const LOG = '[Aggregaytor:LLM]';
 
 export type LLMProvider = 'gemini' | 'openai' | 'anthropic' | 'groq' | 'perplexity' | 'mistral' | 'copilot' | 'local';
@@ -32,6 +35,64 @@ interface SuggestionResult {
 
 const SETTINGS_KEY = 'aggregaytor_llm_settings';
 const RATE_SETTINGS_KEY = 'aggregaytor_llm_rate_settings';
+const PROVIDER_KEYS_KEY = 'aggregaytor_all_llm_keys';
+
+// ── Settings Cache ──────────────────────────────────────────────────────────
+//
+// Every LLM call previously fanned out to 3–4 `chrome.storage.local.get()`
+// round-trips: rate settings, provider keys, user-facing config,
+// personality. Each read is 1–5ms but the cumulative cost on a hot burst
+// of auto-respond / suggestions requests was visible in the SW perf stats.
+//
+// Settings are event-driven — they only change when the user clicks Save in
+// the settings UI. `chrome.storage.onChanged` fires synchronously for any
+// change, so we can cache eagerly and invalidate reactively with zero TTL.
+//
+// This module exports `getCachedStorage(key)` which returns the current
+// cached value or fetches it lazily on first read. `chrome.storage.onChanged`
+// invalidates entries on write.
+const _storageCache = new Map<string, unknown>();
+const _storagePending = new Map<string, Promise<unknown>>();
+let _storageListenerInstalled = false;
+
+function installStorageListener(): void {
+  if (_storageListenerInstalled) return;
+  _storageListenerInstalled = true;
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local') return;
+      for (const key of Object.keys(changes)) {
+        _storageCache.delete(key);
+      }
+    });
+  } catch {
+    // chrome.storage unavailable (tests) — fall through to live reads
+  }
+}
+
+async function getCachedStorage<T>(key: string): Promise<T | undefined> {
+  installStorageListener();
+  if (_storageCache.has(key)) return _storageCache.get(key) as T;
+  const pending = _storagePending.get(key);
+  if (pending) return pending as Promise<T>;
+  const p = chrome.storage.local.get(key).then((data: any) => {
+    _storageCache.set(key, data[key]);
+    _storagePending.delete(key);
+    return data[key] as T;
+  }).catch(err => {
+    _storagePending.delete(key);
+    throw err;
+  });
+  _storagePending.set(key, p);
+  return p as Promise<T>;
+}
+
+/** Explicit invalidation — used by save functions so the next read after a
+ *  write doesn't race the onChanged listener. */
+function invalidateStorageCache(key: string): void {
+  _storageCache.delete(key);
+  _storagePending.delete(key);
+}
 
 const DEFAULT_MODELS: Record<LLMProvider, string> = {
   gemini: 'gemini-2.5-flash-lite',
@@ -147,13 +208,15 @@ const DEFAULT_RATE_SETTINGS: LLMRateSettings = {
 };
 
 export async function getLLMRateSettings(): Promise<LLMRateSettings> {
-  const data = await chrome.storage.local.get(RATE_SETTINGS_KEY);
-  return { ...DEFAULT_RATE_SETTINGS, ...(data[RATE_SETTINGS_KEY] || {}) };
+  const stored = await getCachedStorage<Partial<LLMRateSettings>>(RATE_SETTINGS_KEY);
+  return { ...DEFAULT_RATE_SETTINGS, ...(stored || {}) };
 }
 
 export async function saveLLMRateSettings(settings: Partial<LLMRateSettings>): Promise<void> {
   const existing = await getLLMRateSettings();
-  await chrome.storage.local.set({ [RATE_SETTINGS_KEY]: { ...existing, ...settings } });
+  const merged = { ...existing, ...settings };
+  await chrome.storage.local.set({ [RATE_SETTINGS_KEY]: merged });
+  invalidateStorageCache(RATE_SETTINGS_KEY);
 }
 
 // Request queue with exponential backoff
@@ -336,8 +399,7 @@ async function queuedFetch(url: string, init: RequestInit, feature: string): Pro
 }
 
 export async function getLLMConfig(): Promise<LLMConfig> {
-  const data = await chrome.storage.local.get(SETTINGS_KEY);
-  const settings = data[SETTINGS_KEY] || {};
+  const settings = await getCachedStorage<Partial<LLMConfig>>(SETTINGS_KEY) || {};
   return {
     provider: settings.provider || 'local',
     apiKey: settings.apiKey || '',
@@ -349,14 +411,15 @@ export async function getLLMConfig(): Promise<LLMConfig> {
  * Get all configured API keys for failover.
  */
 async function getAllProviderKeys(): Promise<Record<string, string>> {
-  const data = await chrome.storage.local.get('aggregaytor_all_llm_keys');
-  return data.aggregaytor_all_llm_keys || {};
+  const keys = await getCachedStorage<Record<string, string>>(PROVIDER_KEYS_KEY);
+  return keys || {};
 }
 
 export async function saveProviderKey(provider: string, apiKey: string): Promise<void> {
   const keys = await getAllProviderKeys();
-  keys[provider] = apiKey;
-  await chrome.storage.local.set({ aggregaytor_all_llm_keys: keys });
+  const next = { ...keys, [provider]: apiKey };
+  await chrome.storage.local.set({ [PROVIDER_KEYS_KEY]: next });
+  invalidateStorageCache(PROVIDER_KEYS_KEY);
 }
 
 /**
@@ -404,6 +467,7 @@ export async function saveLLMConfig(config: Partial<LLMConfig>): Promise<void> {
   await chrome.storage.local.set({
     [SETTINGS_KEY]: { ...existing, ...config },
   });
+  invalidateStorageCache(SETTINGS_KEY);
   // Also save key to failover store
   if (config.provider && config.apiKey) {
     await saveProviderKey(config.provider, config.apiKey);
@@ -502,13 +566,14 @@ export const PERSONALITY_PRESETS: Record<string, { label: string; description: s
 };
 
 export async function getPersonalitySettings(): Promise<PersonalitySettings> {
-  const data = await chrome.storage.local.get(PERSONALITY_SETTINGS_KEY);
-  return { ...DEFAULT_PERSONALITY, ...(data[PERSONALITY_SETTINGS_KEY] || {}) };
+  const stored = await getCachedStorage<Partial<PersonalitySettings>>(PERSONALITY_SETTINGS_KEY);
+  return { ...DEFAULT_PERSONALITY, ...(stored || {}) };
 }
 
 export async function savePersonalitySettings(settings: Partial<PersonalitySettings>): Promise<void> {
   const existing = await getPersonalitySettings();
   await chrome.storage.local.set({ [PERSONALITY_SETTINGS_KEY]: { ...existing, ...settings } });
+  invalidateStorageCache(PERSONALITY_SETTINGS_KEY);
 }
 
 /**
@@ -556,32 +621,37 @@ export async function deriveStyleGuide(sentMessages: Message[]): Promise<string>
 }
 
 async function buildSystemPrompt(contactName: string, platform: string): Promise<string> {
-  const personality = await getPersonalitySettings();
-  const presetPrompt = PERSONALITY_PRESETS[personality.preset]?.prompt || PERSONALITY_PRESETS.direct.prompt;
+  return buildSystemPromptWithContext(contactName, platform);
+}
 
-  let prompt = `You are composing responses for a dating/hookup chat on ${platform}. The user is chatting with "${contactName}".
-
-PERSONALITY: ${presetPrompt}
-
-Your job: suggest 3-4 short, natural response options matching this personality.`;
-
-  if (personality.customInstructions) {
-    prompt += `\n\nUSER'S CUSTOM INSTRUCTIONS (follow these strictly):\n${personality.customInstructions}`;
-  }
-
-  if (personality.styleGuide) {
-    prompt += `\n\nSTYLE GUIDE (match the user's writing style):\n${personality.styleGuide}`;
-  }
-
-  prompt += `\n\nRules:
-- Keep responses short (1-2 sentences max)
-- Match the conversation tone and flow
-- If they asked a question, at least one suggestion should answer it
-- Return ONLY a JSON array of strings, no other text
-
-Example output: ["Hey, sounds good! When works for you?", "I'm free tonight", "What area are you in?"]`;
-
-  return prompt;
+/**
+ * Compose the suggestions system prompt from modular fragments, optionally
+ * including a per-contact dossier slice. `contactId` is optional — when the
+ * UI doesn't have one handy (or we're in a test) we fall back to the
+ * no-context composition, which is still modular and benefits from the
+ * persona/style caches.
+ */
+async function buildSystemPromptWithContext(
+  contactName: string,
+  platform: string,
+  contactId?: string,
+): Promise<string> {
+  const [persona, style, contactCtx] = await Promise.all([
+    personaModule(),
+    writingStyleModule(),
+    contactId
+      ? contactContextModule(contactId, FEATURE_DOSSIER_CATEGORIES['suggestions'])
+      : Promise.resolve(''),
+  ]);
+  const sections: string[] = [
+    `You are composing responses for a dating/hookup chat on ${platform}. The user is chatting with "${contactName}".`,
+    persona,
+    `Your job: suggest 3-4 short, natural response options matching this personality.`,
+  ];
+  if (style) sections.push(style);
+  if (contactCtx) sections.push(contactCtx);
+  sections.push(SUGGESTIONS_FORMAT_MODULE);
+  return sections.join('\n\n');
 }
 
 // ── Optimization layer ──────────────────────────────────────────────────────
@@ -621,22 +691,25 @@ function setCachedResponse(key: string, response: string, estimatedTokens: numbe
   responseCache.set(key, { response, timestamp: Date.now(), tokens: estimatedTokens });
 }
 
-// 2. System prompt cache — don't rebuild when personality hasn't changed
+// 2. System prompt composition — now driven by the modular cache above.
+//    The old implementation cached a whole prompt string and did a regex
+//    swap on the contact name (which silently broke when the contact name
+//    contained regex special chars). Now each module is cached independently
+//    and composed cheaply on every call. The per-module caches mean the
+//    heavy parts (persona, style guide) are reused across features, while
+//    contact name is interpolated fresh and always correct.
+//
+//    These symbols are preserved for back-compat with clearLLMCaches(). They
+//    no longer hold real data but we leave the references so older build
+//    artifacts don't crash when paired with new code during in-place reload.
 let cachedSystemPrompt = '';
 let systemPromptHash = '';
 
 async function getCachedSystemPrompt(contactName: string, platform: string): Promise<string> {
-  const personality = await getPersonalitySettings();
-  const hash = `${personality.preset}:${personality.customInstructions?.slice(0, 50)}:${personality.styleGuide?.slice(0, 50)}`;
-  if (hash !== systemPromptHash) {
-    cachedSystemPrompt = '';
-    systemPromptHash = hash;
-  }
-  if (!cachedSystemPrompt) {
-    cachedSystemPrompt = await buildSystemPrompt(contactName, platform);
-  }
-  // Replace contact name (the only variable part)
-  return cachedSystemPrompt.replace(/chatting with "[^"]*"/, `chatting with "${contactName}"`);
+  // No need to memoize the outer prompt — buildSystemPrompt now calls the
+  // module cache which returns pre-computed fragments. String.join() on a
+  // handful of fragments is ~0.01ms, below measurement noise.
+  return buildSystemPrompt(contactName, platform);
 }
 
 // 3. Conversation windowing — use fewer messages for simpler tasks
@@ -649,15 +722,47 @@ const CONTEXT_WINDOWS: Record<string, number> = {
   greeting: 0,          // no context needed
 };
 
+// Memoize the serialized conversation context. For an active thread the
+// SW often fires 3–5 LLM calls back-to-back (suggestions, auto-respond,
+// dossier, summary) — all of them with the same or overlapping recent
+// messages. The serialization is a tight loop but it re-runs even for
+// identical inputs. Cache by `(contactName, windowSize, lastTimestamp,
+// messageCount)` — if those match, the last-N-message window is identical
+// byte-for-byte.
+//
+// TTL is 30s so mid-conversation the cache stays warm but newly-arriving
+// messages are picked up promptly.
+const _contextBuilderCache = new Map<string, { value: string; time: number }>();
+const CONTEXT_BUILDER_TTL_MS = 30_000;
+const CONTEXT_BUILDER_CAP = 200;
+
 function buildConversationContext(messages: Message[], contactName: string, feature = 'suggestions'): string {
   const windowSize = CONTEXT_WINDOWS[feature] || 15;
   const recent = messages.slice(-windowSize);
 
+  // Cache key — the tuple (contact name, count, last-msg-ts) is enough to
+  // disambiguate recent windows without hashing the bodies. Contact names
+  // are bounded and messages are appended, not edited, so this is tight.
+  const last = recent[recent.length - 1];
+  const cacheKey = `${contactName}|${feature}|${recent.length}|${last?.timestamp || ''}`;
+  const cached = _contextBuilderCache.get(cacheKey);
+  if (cached && Date.now() - cached.time < CONTEXT_BUILDER_TTL_MS) {
+    return cached.value;
+  }
+
   // Context compaction: for long messages, truncate to first 100 chars
-  return recent.map(m => {
+  const value = recent.map(m => {
     const body = m.body.length > 100 ? m.body.slice(0, 100) + '...' : m.body;
     return `${m.direction === 'out' ? 'You' : contactName}: ${body}`;
   }).join('\n');
+
+  _contextBuilderCache.set(cacheKey, { value, time: Date.now() });
+  if (_contextBuilderCache.size > CONTEXT_BUILDER_CAP) {
+    const iter = _contextBuilderCache.keys();
+    const next = iter.next();
+    if (!next.done) _contextBuilderCache.delete(next.value);
+  }
+  return value;
 }
 
 // 4. Incremental dossier extraction — only process new messages.
@@ -792,15 +897,19 @@ export function clearLLMCaches(): { cleared: Record<string, number> } {
     dossierTimestamps: lastDossierExtractTimestamp.size,
     providerRequestCounts: providerRequestCounts.size,
     inflightRequests: inflightRequests.size,
+    promptModules: _promptModuleCache.size,
+    storageCache: _storageCache.size,
+    contextBuilderCache: _contextBuilderCache.size,
   };
   responseCache.clear();
   conversationSummaryCache.clear();
   lastDossierExtractTimestamp.clear();
   providerRequestCounts.clear();
+  clearPromptModules();
+  _storageCache.clear();
+  _contextBuilderCache.clear();
   // Don't clear requestTimestamps or backoffUntil — those affect live rate
   // limiting. And `inflightRequests` clears naturally when promises resolve.
-  // We reset cachedSystemPrompt so the next call rebuilds from current
-  // personality settings (useful after a style guide refresh).
   cachedSystemPrompt = '';
   systemPromptHash = '';
   return { cleared };
@@ -1171,9 +1280,10 @@ export async function generateSuggestions(
   messages: Message[],
   contactName: string,
   platform: string,
+  contactId?: string,
 ): Promise<SuggestionResult> {
   const config = await getBestProvider();
-  const systemPrompt = await getCachedSystemPrompt(contactName, platform);
+  const systemPrompt = await buildSystemPromptWithContext(contactName, platform, contactId);
   const conversation = buildConversationContext(messages, contactName, "suggestions");
 
   console.log(`${LOG} Generating suggestions via ${config.provider} (${messages.length} msgs, ~${estimateTokens(systemPrompt + conversation)} tokens)`);
@@ -1220,30 +1330,42 @@ const AGGRESSIVENESS_PROMPTS: Record<string, string> = {
   eager: 'Be enthusiastic and proactive. If the conversation is flowing well, suggest meeting up. Propose times and show clear interest.',
 };
 
-async function buildAutoRespondPrompt(contactName: string, platform: string, settings?: AutoRespondSettings): Promise<string> {
-  const personality = await getPersonalitySettings();
-  const presetPrompt = PERSONALITY_PRESETS[personality.preset]?.prompt || PERSONALITY_PRESETS.direct.prompt;
-  const agg = AGGRESSIVENESS_PROMPTS[settings?.aggressiveness || 'normal'];
-  const timeStr = settings?.preferredTime ? `\nUser's preferred time: "${settings.preferredTime}" (flexibility: ${settings?.timeFlexibility || 'flexible'})` : '';
-  const placeStr = settings?.preferredPlace ? `\nUser's preferred place: "${settings.preferredPlace}" (flexibility: ${settings?.placeFlexibility || 'flexible'})` : '';
-  const picStr = settings?.allowPictures ? `\nUser allows sending pictures tagged: ${(settings.pictureTagsAllowed || []).join(', ') || 'any'}. If appropriate, include "sendPicture" in your response.` : '';
+// ── Modular prompt composition ──────────────────────────────────────────────
+//
+// Prompts are built from independent, individually-cached string modules.
+// Each module is:
+//   - byte-stable across thousands of requests when inputs haven't changed,
+//     which maximises provider-side prompt-cache hit rates (Anthropic
+//     ephemeral, OpenAI automatic, Gemini context caching)
+//   - cheap to recompute when inputs DO change, since only the affected
+//     module is regenerated
+//   - composed à la carte per feature — a nickname task pulls only
+//     `persona`, while an auto-respond pulls persona + style + tier rules
+//     + logistics + task format.
+//
+// Previously `buildAutoRespondPrompt` emitted one monolithic string mixing
+// all of these; any settings change invalidated the whole prefix and forced
+// the provider to re-process every token. See the commentary on modular
+// prompts in the caching audit for full rationale.
 
-  let prompt = `You are composing a response in a dating/hookup chat on ${platform}. You ARE the user — write a single response, not options.
+/** Cache of computed module strings keyed by a stable hash of their inputs. */
+const _promptModuleCache = new Map<string, string>();
+const PROMPT_MODULE_CACHE_CAP = 100;
 
-PERSONALITY: ${presetPrompt}
-TONE: ${agg}
-${timeStr}${placeStr}${picStr}`;
-
-  if (personality.customInstructions) {
-    prompt += `\n\nCUSTOM INSTRUCTIONS (follow strictly):\n${personality.customInstructions}`;
+function cachePromptModule(key: string, value: string): string {
+  _promptModuleCache.set(key, value);
+  if (_promptModuleCache.size > PROMPT_MODULE_CACHE_CAP) {
+    const iter = _promptModuleCache.keys();
+    const next = iter.next();
+    if (!next.done) _promptModuleCache.delete(next.value);
   }
-  if (personality.styleGuide) {
-    prompt += `\n\nWRITING STYLE:\n${personality.styleGuide}`;
-  }
+  return value;
+}
 
-  prompt += `\n\nKeep it short (1-2 sentences). Be direct and confident.
-
-CRITICAL: You MUST return a JSON object with these fields:
+/** Tier classification rules — fully static, cached forever (until
+ *  extension reload). Kept as a separate module so provider-side caches
+ *  retain the biggest prefix chunk across every auto-respond call. */
+const TIER_RULES_MODULE = `CRITICAL: You MUST return a JSON object with these fields:
 {
   "response": "your message text here",
   "tier": "low" | "medium" | "high",
@@ -1259,6 +1381,151 @@ TIER CLASSIFICATION:
 When in doubt, classify as "medium". Any response involving time, place, or meeting plans is AT LEAST "medium".
 
 Return ONLY the JSON object, nothing else.`;
+
+/** Suggestions JSON-schema reminder — also fully static. */
+const SUGGESTIONS_FORMAT_MODULE = `Rules:
+- Keep responses short (1-2 sentences max)
+- Match the conversation tone and flow
+- If they asked a question, at least one suggestion should answer it
+- Return ONLY a JSON array of strings, no other text
+
+Example output: ["Hey, sounds good! When works for you?", "I'm free tonight", "What area are you in?"]`;
+
+/** Persona module: preset + custom instructions. Cached by a hash of the
+ *  personality settings since those only change when the user hits Save. */
+async function personaModule(): Promise<string> {
+  const personality = await getPersonalitySettings();
+  const presetPrompt = PERSONALITY_PRESETS[personality.preset]?.prompt || PERSONALITY_PRESETS.direct.prompt;
+  const customHash = personality.customInstructions
+    ? `c${personality.customInstructions.length}:${personality.customInstructions.slice(0, 30)}`
+    : 'c0';
+  const key = `persona:${personality.preset}:${customHash}`;
+  const hit = _promptModuleCache.get(key);
+  if (hit) return hit;
+  let out = `PERSONALITY: ${presetPrompt}`;
+  if (personality.customInstructions) {
+    out += `\n\nCUSTOM INSTRUCTIONS (follow strictly):\n${personality.customInstructions}`;
+  }
+  return cachePromptModule(key, out);
+}
+
+/** Writing-style module: derived style guide. Cached on the guide's
+ *  updated-at timestamp so DERIVE_STYLE_GUIDE refreshes it exactly once. */
+async function writingStyleModule(): Promise<string> {
+  const personality = await getPersonalitySettings();
+  if (!personality.styleGuide) return '';
+  const key = `style:${personality.styleGuideUpdatedAt || 'initial'}:${personality.styleGuide.length}`;
+  const hit = _promptModuleCache.get(key);
+  if (hit) return hit;
+  return cachePromptModule(key, `WRITING STYLE:\n${personality.styleGuide}`);
+}
+
+/** Contact context module — per-contact dossier slice. Only includes the
+ *  categories the task needs (see `FEATURE_DOSSIER_CATEGORIES`). Cached by
+ *  contactId+category-hash+dossier-updatedAt so auto-extracted fields flow
+ *  through on the next call after extraction. */
+async function contactContextModule(
+  contactId: string,
+  categories: DossierCategory[],
+): Promise<string> {
+  if (!contactId || !categories.length) return '';
+  const catKey = categories.slice().sort().join(',');
+  // Cheap freshness check — if the dossier doc's updatedAt hasn't advanced
+  // we can skip the slice + format work entirely.
+  try {
+    const doc = await getDossier(contactId);
+    if (!doc) return '';
+    const cacheKey = `ctx:${contactId}:${catKey}:${doc.updatedAt || ''}`;
+    const hit = _promptModuleCache.get(cacheKey);
+    if (hit !== undefined) return hit;
+    const slice = await getDossierSlice(contactId, categories);
+    const body = formatDossierContext(slice);
+    if (!body) return cachePromptModule(cacheKey, '');
+    return cachePromptModule(cacheKey, `WHAT WE KNOW ABOUT THEM:\n${body}`);
+  } catch {
+    return '';
+  }
+}
+
+/** Per-feature dossier category routing — mirrors FEATURE_MODULES in spirit.
+ *  Kept narrow: tasks that don't need a field simply don't get it. */
+const FEATURE_DOSSIER_CATEGORIES: Record<string, DossierCategory[]> = {
+  suggestions:    ['identity', 'profile', 'logistics'],
+  'auto-respond': ['identity', 'profile', 'logistics', 'meetings', 'trust'],
+  summary:        ['identity', 'meetings', 'relationship', 'trust'],
+  nickname:       ['profile'],
+  dossier:        [],  // dossier extraction builds the dossier — no recursion
+  greeting:       [],  // platform-agnostic greeting; no per-contact context
+};
+
+/** Aggressiveness module — 3 static variants. Cache-key is just the variant
+ *  name since the body is a constant. */
+function aggressivenessModule(aggressiveness?: string): string {
+  const key = `agg:${aggressiveness || 'normal'}`;
+  const hit = _promptModuleCache.get(key);
+  if (hit) return hit;
+  const body = AGGRESSIVENESS_PROMPTS[aggressiveness || 'normal'] || AGGRESSIVENESS_PROMPTS.normal;
+  return cachePromptModule(key, `TONE: ${body}`);
+}
+
+/** Logistics module — optional time/place/picture prefs. */
+function logisticsModule(settings?: AutoRespondSettings): string {
+  if (!settings) return '';
+  const parts: string[] = [];
+  if (settings.preferredTime) parts.push(`User's preferred time: "${settings.preferredTime}" (flexibility: ${settings.timeFlexibility || 'flexible'})`);
+  if (settings.preferredPlace) parts.push(`User's preferred place: "${settings.preferredPlace}" (flexibility: ${settings.placeFlexibility || 'flexible'})`);
+  if (settings.allowPictures) {
+    parts.push(`User allows sending pictures tagged: ${(settings.pictureTagsAllowed || []).join(', ') || 'any'}. If appropriate, include "sendPicture" in your response.`);
+  }
+  if (!parts.length) return '';
+  // Cache-key: stringified settings slice — cheap, bounded input
+  const key = `logistics:${settings.preferredTime || ''}|${settings.timeFlexibility || ''}|${settings.preferredPlace || ''}|${settings.placeFlexibility || ''}|${settings.allowPictures ? '1' : '0'}|${(settings.pictureTagsAllowed || []).join(',')}`;
+  const hit = _promptModuleCache.get(key);
+  if (hit) return hit;
+  return cachePromptModule(key, parts.join('\n'));
+}
+
+/** Clear all prompt-module caches — called from clearLLMCaches(). */
+function clearPromptModules(): void {
+  _promptModuleCache.clear();
+}
+
+/**
+ * Compose the auto-respond system prompt from independently-cached modules.
+ *
+ * The assembly order is deliberate: static prefix modules first (so
+ * provider-side prompt caching gets maximum reuse), variable per-request
+ * modules last.
+ */
+async function buildAutoRespondPrompt(
+  contactName: string,
+  platform: string,
+  settings?: AutoRespondSettings,
+  contactId?: string,
+): Promise<string> {
+  const [persona, style, contactCtx] = await Promise.all([
+    personaModule(),
+    writingStyleModule(),
+    contactId
+      ? contactContextModule(contactId, FEATURE_DOSSIER_CATEGORIES['auto-respond'])
+      : Promise.resolve(''),
+  ]);
+  const agg = aggressivenessModule(settings?.aggressiveness);
+  const logistics = logisticsModule(settings);
+
+  const sections: string[] = [
+    // Static-ish prefix — great for prompt caching
+    `You are composing a response in a dating/hookup chat on ${platform}. You ARE the user — write a single response, not options.`,
+    persona,
+    agg,
+  ];
+  if (logistics) sections.push(logistics);
+  if (style) sections.push(style);
+  if (contactCtx) sections.push(contactCtx);
+  sections.push(`Keep it short (1-2 sentences). Be direct and confident.`);
+  sections.push(TIER_RULES_MODULE);
+
+  return sections.join('\n\n');
 }
 
 function buildGreetingPrompt(platform: string): string {
@@ -1283,9 +1550,10 @@ export async function generateAutoResponse(
   contactName: string,
   platform: string,
   settings?: AutoRespondSettings,
+  contactId?: string,
 ): Promise<AutoRespondResult> {
   const config = await getBestProvider();
-  const systemPrompt = await buildAutoRespondPrompt(contactName, platform, settings);
+  const systemPrompt = await buildAutoRespondPrompt(contactName, platform, settings, contactId);
   const conversation = buildConversationContext(messages, contactName, "auto-respond");
   const userPrompt = `Here is the conversation:\n\n${conversation}\n\nGenerate your JSON response:`;
 

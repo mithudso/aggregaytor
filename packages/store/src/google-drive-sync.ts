@@ -28,24 +28,46 @@ const FOLDER_ID_KEY = 'aggregaytor_drive_folder_id';
 
 // ── Auth Helper ──────────────────────────────────────────────────────────────
 
+// In-memory token cache — see google-tasks.ts for the full rationale.
+// Each module keeps its own cache (they don't share state) but both use
+// the same 50-min TTL and invalidate on 401. Kept as a module-local cache
+// rather than hoisted to a shared module to avoid cross-package circular
+// imports (google-drive-sync.ts and google-tasks.ts are siblings).
+interface DriveAuthCacheEntry { token: string; expiresAt: number; }
+let _driveAuthCache: DriveAuthCacheEntry | null = null;
+const DRIVE_AUTH_CACHE_TTL_MS = 50 * 60_000;
+
+function invalidateDriveAuthCache(): void {
+  _driveAuthCache = null;
+}
+
 /**
  * Get a valid OAuth access token via chrome.identity.
  * Uses the scopes defined in manifest.json's oauth2 section.
  * Returns null if auth fails or is denied by the user.
  */
 async function getAuthToken(interactive = false): Promise<string | null> {
+  if (!interactive && _driveAuthCache && _driveAuthCache.expiresAt > Date.now()) {
+    return _driveAuthCache.token;
+  }
   try {
     if (typeof chrome === 'undefined' || !chrome?.identity?.getAuthToken) return null;
-    return new Promise((resolve) => {
-      chrome.identity.getAuthToken({ interactive }, (token: string) => {
+    const token = await new Promise<string | null>((resolve) => {
+      chrome.identity.getAuthToken({ interactive }, (tok: string) => {
         if (chrome.runtime.lastError) {
           console.warn('[GoogleDrive] Auth failed:', chrome.runtime.lastError.message);
           resolve(null);
         } else {
-          resolve(token || null);
+          resolve(tok || null);
         }
       });
     });
+    if (token) {
+      _driveAuthCache = { token, expiresAt: Date.now() + DRIVE_AUTH_CACHE_TTL_MS };
+    } else {
+      _driveAuthCache = null;
+    }
+    return token;
   } catch {
     return null;
   }
@@ -74,10 +96,11 @@ async function driveFetch(
   });
 
   if (res.status === 401 && retry) {
-    // Token expired — revoke and get a fresh one
+    // Token expired — revoke from chrome.identity AND our in-process cache.
     await new Promise<void>((resolve) => {
       chrome.identity.removeCachedAuthToken({ token }, () => resolve());
     });
+    invalidateDriveAuthCache();
     return driveFetch(url, opts, false);
   }
 

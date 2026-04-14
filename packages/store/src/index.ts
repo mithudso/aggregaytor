@@ -18,12 +18,13 @@ export { getThreadMeta, upsertThreadMeta, getAllThreadMeta, getBookmarkedThreads
 export { createReminder, getReminders, markReminderNotified, deleteReminder } from './reminders.js';
 export { queueAutoRespond, getPendingAutoResponds, getDraftAutoResponds, getApprovedAutoResponds, updateAutoRespondStatus, randomDelay } from './auto-respond.js';
 export { addPicture, getAllPictures, getPicture, getPictureByTag, incrementPictureStat, deletePicture } from './pictures.js';
-export { createBlockRule, getAllBlockRules, updateBlockRule, deleteBlockRule, evaluateRules, executeAction } from './block-rules.js';
+export { createBlockRule, getAllBlockRules, updateBlockRule, deleteBlockRule, evaluateRules, executeAction, invalidateBlockRulesCache } from './block-rules.js';
 export { getCalendarSettings, saveCalendarSettings, getCalendarToken, saveCalendarToken, getAvailableSlots, createCalendarEvent, authenticateCalendar } from './calendar.js';
 export type { CalendarSettings, CalendarToken } from './calendar.js';
 export { recordFeedback, predictPreference, getModelStats, getAllFeedback, retrainModel, extractFeatures } from './preference-ml.js';
 export { analyzeConversationSentiment, formatSentimentSummary } from './sentiment.js';
-export { getDossier, upsertDossier, setAutoExtractedField } from './dossier.js';
+export { getDossier, upsertDossier, setAutoExtractedField, getDossierSlice, formatDossierContext, DOSSIER_CATEGORIES } from './dossier.js';
+export type { DossierCategory } from './dossier.js';
 export type { ContactDossierDoc, TaskDoc } from './types.js';
 export { DEFAULT_DOSSIER } from './types.js';
 export { createTask, getAllTasks, updateTask, deleteTask, getTasksByContact } from './tasks.js';
