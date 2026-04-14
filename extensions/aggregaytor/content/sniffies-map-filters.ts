@@ -703,9 +703,15 @@ function loadSettings(): void {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
+      // Strip blockedIds from filter settings on read — BLOCKED_KEY is the
+      // canonical source. If an older build left blockedIds in STORAGE_KEY,
+      // ignore it here and drop it from the stored doc so it can never
+      // come back through the filter panel round-trip again.
+      const hadPollution = Array.isArray(parsed.blockedIds);
+      delete parsed.blockedIds;
       Object.assign(settings, parsed);
-      if (Array.isArray(parsed.blockedIds)) {
-        settings.blockedIds = new Set(parsed.blockedIds);
+      if (hadPollution) {
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed)); } catch {}
       }
     }
     const blocked = localStorage.getItem(BLOCKED_KEY);
@@ -728,15 +734,22 @@ window.addEventListener('__aggregaytor_map_filter_settings', ((event: CustomEven
     includeEnabled: update.includeEnabled,
     excludeTerms: update.excludeTerms?.length,
     includeTerms: update.includeTerms?.length,
+    hasBlockedIdsInUpdate: Array.isArray(update.blockedIds),
     hiddenCount: settings.blockedIds.size,
   });
-  Object.assign(settings, update);
-  if (Array.isArray(update.blockedIds)) {
-    settings.blockedIds = new Set(update.blockedIds);
-  }
-  // Persist
+  // ⚠ Never let the filter-panel update (which comes from the floating
+  // filter UI) TOUCH blockedIds. That UI doesn't edit the blocked list —
+  // but it was inadvertently echoing a stale copy read from STORAGE_KEY,
+  // which then replaced the live in-memory set. Symptom: middle-clicked
+  // hides reappear a few seconds later when the filter panel re-renders.
+  // BLOCKED_KEY remains the single source of truth for blocked profiles.
+  const { blockedIds: _ignored, ...filterOnly } = update;
+  Object.assign(settings, filterOnly);
+  // Persist WITHOUT blockedIds so STORAGE_KEY can never contaminate
+  // the blocked set on re-read.
   try {
-    const toSave = { ...settings, blockedIds: [...settings.blockedIds] };
+    const toSave = { ...settings } as any;
+    delete toSave.blockedIds;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
   } catch {}
   // Apply immediately

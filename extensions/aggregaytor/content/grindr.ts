@@ -270,76 +270,343 @@ window.addEventListener('__aggregaytor_block_by_fiber', ((event: CustomEvent) =>
   }));
 }) as EventListener);
 
-// ── Block/Hide Profile Handler ──────────────────────────────────────────────
-// Middle-click on a profile triggers this via the bridge. Uses the captured
-// Grindr auth token (from intercepted API calls) to call the block API,
-// falling back to the hide API if blocking fails.
+// ── Rate-Limited Block/Hide Queue ──────────────────────────────────────────
+// Grindr rate-limits block/hide calls. If you burst too many in a short
+// window, Grindr invalidates your session and forces a re-login. We avoid
+// that by:
+//   1. Queueing all block requests and releasing one every MIN_INTERVAL_MS
+//   2. Backing off exponentially on 429 / 401 / 403 responses
+//   3. Pausing the queue entirely when we detect a dead session, and
+//      resuming once a fresh API call succeeds (session recovered) or the
+//      user re-logs in manually.
+//
+// For users who just want to hide profiles locally without ever calling the
+// Grindr API (zero rate-limit risk), the localOnlyHide mode routes all
+// block actions to the PROFILE_BLOCKED storage path only — nothing goes
+// over the wire to Grindr.
+
+const BLOCK_QUEUE_KEY = 'aggregaytor_grindr_block_settings';
+interface BlockSettings {
+  localOnlyHide: boolean;      // never call Grindr API, just store locally
+  minIntervalMs: number;       // gap between successful calls
+  maxPerHour: number;          // hard cap per rolling hour
+}
+const defaultBlockSettings: BlockSettings = {
+  localOnlyHide: false,
+  minIntervalMs: 4000,         // 4s between calls is safely under Grindr's limit
+  maxPerHour: 200,             // hard cap; real limit is unknown, this is conservative
+};
+
+let blockSettings: BlockSettings = { ...defaultBlockSettings };
+try {
+  const raw = localStorage.getItem(BLOCK_QUEUE_KEY);
+  if (raw) blockSettings = { ...blockSettings, ...JSON.parse(raw) };
+} catch {}
+
+const blockQueue: string[] = [];
+const recentBlockTimestamps: number[] = []; // rolling hour window
+let blockSessionDead = false;
+let blockBackoffUntil = 0;
+let queueProcessing = false;
+
+function showGrindrToast(text: string, kind: 'ok' | 'warn' | 'err' = 'warn'): void {
+  try {
+    const ID = 'aggregaytor-grindr-toast';
+    document.getElementById(ID)?.remove();
+    const toast = document.createElement('div');
+    toast.id = ID;
+    const bg = kind === 'ok' ? 'rgba(34,197,94,0.95)'
+      : kind === 'err' ? 'rgba(220,38,38,0.95)'
+      : 'rgba(234,179,8,0.95)';
+    toast.style.cssText =
+      `position:fixed;bottom:20px;right:20px;z-index:999999;max-width:340px;` +
+      `background:${bg};color:#fff;padding:10px 14px;border-radius:8px;` +
+      `font-family:system-ui,sans-serif;font-size:12px;line-height:1.4;` +
+      `box-shadow:0 4px 12px rgba(0,0,0,0.4);transition:opacity 0.3s`;
+    toast.textContent = text;
+    document.body.appendChild(toast);
+    setTimeout(() => { toast.style.opacity = '0'; }, 4500);
+    setTimeout(() => toast.remove(), 5000);
+  } catch {}
+}
+
+function removeBlockedCardFromDom(profileId: string): void {
+  setTimeout(() => {
+    const targetHashes: string[] = [];
+    for (const [hash, pid] of photoHashToProfileId.entries()) {
+      if (pid === profileId) targetHashes.push(hash);
+    }
+    if (!targetHashes.length) return;
+    let found = false;
+    for (const hash of targetHashes) {
+      document.querySelectorAll(`img[src*="${hash}"]`).forEach(img => {
+        const card = (img as HTMLElement).closest(
+          '[data-testid="cascadeCellContainer"], [class*="cascade-cell"], [class*="profile-card"]'
+        );
+        if (card && !found) {
+          found = true;
+          (card as HTMLElement).style.transition = 'opacity 0.3s';
+          (card as HTMLElement).style.opacity = '0';
+          setTimeout(() => { (card as HTMLElement).style.display = 'none'; }, 300);
+        }
+      });
+      if (found) break;
+    }
+  }, 300);
+}
+
+/** Attempt a single block/hide call. Returns {ok, status, sessionDead}. */
+async function attemptBlock(profileId: string, auth: Record<string, string>): Promise<{ ok: boolean; status: number; sessionDead: boolean }> {
+  try {
+    const res = await fetch(`https://web.grindr.com/api/v1/me/hides/${profileId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...auth },
+    });
+    if (res.ok) return { ok: true, status: res.status, sessionDead: false };
+    if (res.status === 401 || res.status === 403) return { ok: false, status: res.status, sessionDead: true };
+    if (res.status === 429) return { ok: false, status: res.status, sessionDead: false };
+    // Fallback to block API
+    const b = await fetch(`https://web.grindr.com/api/v3/me/blocks/${profileId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...auth },
+    });
+    if (b.ok) return { ok: true, status: b.status, sessionDead: false };
+    if (b.status === 401 || b.status === 403) return { ok: false, status: b.status, sessionDead: true };
+    return { ok: false, status: b.status, sessionDead: false };
+  } catch (err) {
+    console.warn(`${LOG} Block network error:`, err);
+    return { ok: false, status: 0, sessionDead: false };
+  }
+}
+
+async function processBlockQueue(): Promise<void> {
+  if (queueProcessing) return;
+  queueProcessing = true;
+  try {
+    while (blockQueue.length) {
+      // Respect backoff window
+      const waitMs = Math.max(0, blockBackoffUntil - Date.now());
+      if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs));
+
+      // Session dead? stop until it's revived
+      if (blockSessionDead) {
+        console.warn(`${LOG} Block queue paused — session dead. ${blockQueue.length} queued.`);
+        break;
+      }
+
+      // Rolling-hour cap
+      const hourAgo = Date.now() - 3600_000;
+      while (recentBlockTimestamps.length && recentBlockTimestamps[0] < hourAgo) {
+        recentBlockTimestamps.shift();
+      }
+      if (recentBlockTimestamps.length >= blockSettings.maxPerHour) {
+        const waitUntil = recentBlockTimestamps[0] + 3600_000;
+        const w = waitUntil - Date.now();
+        console.warn(`${LOG} Hourly block cap (${blockSettings.maxPerHour}) hit, waiting ${Math.round(w / 60000)}m`);
+        showGrindrToast(`Grindr block cap reached. Pausing ${Math.round(w / 60000)} min to avoid forced logout.`, 'warn');
+        await new Promise(r => setTimeout(r, Math.min(w, 60_000))); // re-check every minute
+        continue;
+      }
+
+      const profileId = blockQueue.shift()!;
+      const auth = getCapturedAuth('grindr.com');
+      if (!auth) {
+        console.warn(`${LOG} No captured auth — waiting for page to issue an API call first`);
+        showGrindrToast('Grindr auth not yet captured. Browse a bit then try again.', 'warn');
+        break;
+      }
+
+      const result = await attemptBlock(profileId, auth);
+      recentBlockTimestamps.push(Date.now());
+
+      if (result.ok) {
+        console.log(`${LOG} Hide/block ok for ${profileId}`);
+        sendToBridge({ type: 'PROFILE_BLOCKED', contactId: `grindr:${profileId}`, platform: 'grindr' });
+        removeBlockedCardFromDom(profileId);
+      } else if (result.sessionDead) {
+        blockSessionDead = true;
+        // Put this profileId back on the queue so we retry after session recovery
+        blockQueue.unshift(profileId);
+        console.warn(`${LOG} Session dead (${result.status}). ${blockQueue.length} pending.`);
+        showGrindrToast(
+          `Grindr forced a re-login (${result.status}). ${blockQueue.length} block(s) paused until you're logged back in.`,
+          'err',
+        );
+        watchForLoginForm(); // starts watching for re-login UI
+        break;
+      } else if (result.status === 429) {
+        // Rate limited — exponential backoff, keep item on queue
+        blockQueue.unshift(profileId);
+        blockBackoffUntil = Date.now() + 30_000;
+        console.warn(`${LOG} 429 rate limited — backing off 30s`);
+        showGrindrToast('Grindr rate-limited. Backing off 30s…', 'warn');
+      } else {
+        console.warn(`${LOG} Block failed (${result.status}) for ${profileId} — dropping`);
+      }
+
+      // Gap between successful calls — slow and steady
+      if (result.ok) {
+        await new Promise(r => setTimeout(r, blockSettings.minIntervalMs));
+      }
+    }
+  } finally {
+    queueProcessing = false;
+  }
+}
+
+function enqueueBlock(profileId: string): void {
+  if (blockQueue.includes(profileId)) return; // dedupe
+  blockQueue.push(profileId);
+  processBlockQueue();
+}
+
 window.addEventListener('__aggregaytor_block_profile', ((event: CustomEvent) => {
   const { profileId } = event.detail || {};
   if (!profileId) return;
-  console.log(`${LOG} Blocking profile: ${profileId}`);
 
-  const auth = getCapturedAuth('grindr.com');
-  if (!auth) {
-    console.warn(`${LOG} No captured auth for Grindr — browse a bit first to capture the JWT`);
+  // Local-only mode: never touch Grindr's API. Just mark the profile blocked
+  // in our storage and hide the card visually. Zero rate-limit risk.
+  if (blockSettings.localOnlyHide) {
+    console.log(`${LOG} Local-only hide for ${profileId}`);
+    sendToBridge({ type: 'PROFILE_BLOCKED', contactId: `grindr:${profileId}`, platform: 'grindr' });
+    removeBlockedCardFromDom(profileId);
     return;
   }
 
-  // Hide API: POST /api/v1/me/hides/{profileId} (confirmed from HAR capture)
-  // No request body needed. Falls back to block API if hide fails.
-  fetch(`https://web.grindr.com/api/v1/me/hides/${profileId}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...auth },
-  }).then(async (res) => {
-    let success = false;
-    if (res.ok) {
-      console.log(`${LOG} Hide success for ${profileId}`);
-      success = true;
-    } else {
-      console.warn(`${LOG} Hide failed (${res.status}), trying block API...`);
-      const blockRes = await fetch(`https://web.grindr.com/api/v3/me/blocks/${profileId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...auth },
-      });
-      if (blockRes.ok) {
-        console.log(`${LOG} Block success for ${profileId}`);
-        success = true;
-      } else {
-        console.warn(`${LOG} Block also failed (${blockRes.status})`);
-      }
-    }
-    if (success) {
-      sendToBridge({ type: 'PROFILE_BLOCKED', contactId: `grindr:${profileId}`, platform: 'grindr' });
-      // Remove ONLY the blocked profile's card from the DOM.
-      // Find the card by matching photo hashes associated with this profileId.
-      setTimeout(() => {
-        // Collect all hashes that map to this profileId
-        const targetHashes: string[] = [];
-        for (const [hash, pid] of photoHashToProfileId.entries()) {
-          if (pid === profileId) targetHashes.push(hash);
-        }
-        if (!targetHashes.length) return;
-
-        // Find images matching any of the target hashes and fade their card
-        let found = false;
-        for (const hash of targetHashes) {
-          document.querySelectorAll(`img[src*="${hash}"]`).forEach(img => {
-            const card = (img as HTMLElement).closest(
-              '[data-testid="cascadeCellContainer"], [class*="cascade-cell"], [class*="profile-card"]'
-            );
-            if (card && !found) {
-              found = true;
-              (card as HTMLElement).style.transition = 'opacity 0.3s';
-              (card as HTMLElement).style.opacity = '0';
-              setTimeout(() => { (card as HTMLElement).style.display = 'none'; }, 300);
-            }
-          });
-          if (found) break;
-        }
-      }, 300);
-    }
-  }).catch(err => console.warn(`${LOG} Block/hide error:`, err));
+  enqueueBlock(profileId);
 }) as EventListener);
+
+// Expose a settings-update hook so the side panel / settings UI can flip
+// localOnlyHide and the rate-limit parameters at runtime.
+window.addEventListener('__aggregaytor_grindr_block_settings', ((event: CustomEvent) => {
+  const update = event.detail || {};
+  blockSettings = { ...blockSettings, ...update };
+  try { localStorage.setItem(BLOCK_QUEUE_KEY, JSON.stringify(blockSettings)); } catch {}
+  console.log(`${LOG} Block settings updated:`, blockSettings);
+}) as EventListener);
+
+// ── Grindr Login Form Detection + Auto-Fill ────────────────────────────────
+// When Grindr forces a re-login (either from inactivity or from too many
+// block calls), we want to help the user get back in without them having
+// to remember to re-type creds. This watcher looks for the login form
+// markers, and if the user has opted in to auto-login (via settings), fills
+// in the fields from stored credentials and clicks submit.
+//
+// Credentials are stored by the side panel in chrome.storage.local under
+// aggregaytor_grindr_credentials, encrypted with the user's passphrase.
+// We ask the service worker to decrypt them on demand — raw creds never
+// live in content-script memory except during the brief fill operation.
+
+let loginWatchObserver: MutationObserver | null = null;
+let loginFillInFlight = false;
+
+function isLoginScreen(): boolean {
+  // Grindr's login page varies. Check several markers.
+  if (/\/login|\/signin|\/auth/i.test(location.pathname)) return true;
+  const emailEl = document.querySelector(
+    'input[type="email"], input[name="email"], input[id*="email" i], ' +
+    'input[autocomplete="email"], input[autocomplete="username"], ' +
+    'input[placeholder*="email" i], input[name="username"], input[id*="username" i]',
+  );
+  const pwEl = document.querySelector('input[type="password"]');
+  return !!(emailEl && pwEl && document.body.contains(emailEl) && document.body.contains(pwEl));
+}
+
+async function attemptAutoFill(): Promise<void> {
+  if (loginFillInFlight) return;
+  loginFillInFlight = true;
+  try {
+    // Ask the service worker for decrypted credentials (returns null if
+    // user hasn't enabled auto-login or if decryption fails).
+    const response: any = await new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage({ type: 'GET_GRINDR_CREDENTIALS' }, (r: any) => resolve(r || null));
+      } catch { resolve(null); }
+    });
+    const creds = response?.credentials;
+    if (!creds?.username || !creds?.password) {
+      console.log(`${LOG} Auto-login: no stored credentials`);
+      showGrindrToast('Grindr logged you out. Save credentials in Settings → Sync to auto-login next time.', 'warn');
+      return;
+    }
+
+    // Find the fields
+    const emailEl = document.querySelector<HTMLInputElement>(
+      'input[type="email"], input[name="email"], input[id*="email" i], ' +
+      'input[autocomplete="email"], input[autocomplete="username"], ' +
+      'input[name="username"]',
+    );
+    const pwEl = document.querySelector<HTMLInputElement>('input[type="password"]');
+    if (!emailEl || !pwEl) return;
+
+    // Fill using native value setters (React compatibility)
+    const setVal = (el: HTMLInputElement, v: string) => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      nativeSetter?.call(el, v);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new Event('blur', { bubbles: true }));
+    };
+    emailEl.focus(); setVal(emailEl, creds.username);
+    pwEl.focus(); setVal(pwEl, creds.password);
+    console.log(`${LOG} Auto-login fields filled`);
+    showGrindrToast('Auto-filled Grindr login — submitting…', 'ok');
+
+    // Find and click submit
+    await new Promise(r => setTimeout(r, 400));
+    const submit = pwEl.closest('form')?.querySelector<HTMLButtonElement>('button[type="submit"], button')
+      || document.querySelector<HTMLButtonElement>('button[type="submit"]')
+      || Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+        .find(b => /sign ?in|log ?in|continue/i.test(b.textContent || ''))
+      || null;
+    if (submit && !submit.disabled) {
+      submit.click();
+      console.log(`${LOG} Auto-login submitted`);
+    } else {
+      // Fallback: Enter key on password field
+      pwEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    }
+
+    // After a successful login, the session is revived. Clear the dead flag
+    // so queued blocks resume. We optimistically clear after 8s; if auth is
+    // still missing then, the next block call will detect it.
+    setTimeout(() => {
+      if (!isLoginScreen()) {
+        console.log(`${LOG} Login appears successful — resuming block queue`);
+        blockSessionDead = false;
+        blockBackoffUntil = 0;
+        processBlockQueue();
+      }
+    }, 8000);
+  } catch (err) {
+    console.warn(`${LOG} Auto-login error:`, err);
+  } finally {
+    loginFillInFlight = false;
+  }
+}
+
+function watchForLoginForm(): void {
+  // Debounce via existing observer
+  if (loginWatchObserver) return;
+  // Immediate check
+  if (isLoginScreen()) { attemptAutoFill(); }
+  // DOM mutation watcher for SPA transitions back to the login screen
+  loginWatchObserver = new MutationObserver(() => {
+    if (isLoginScreen()) {
+      // Disconnect the observer while we fill to avoid re-trigger loops
+      loginWatchObserver?.disconnect();
+      loginWatchObserver = null;
+      attemptAutoFill();
+      // After a minute, re-enable watching in case we need another attempt
+      setTimeout(() => watchForLoginForm(), 60_000);
+    }
+  });
+  loginWatchObserver.observe(document.body, { childList: true, subtree: true });
+}
+
+// Start watching immediately on page load — covers the case where the user
+// arrives at grindr.com already logged out.
+watchForLoginForm();
 
 // Auto-send handler
 window.addEventListener('__aggregaytor_send_message', ((event: CustomEvent) => {

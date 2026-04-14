@@ -908,7 +908,12 @@ function showMapFilterPanel(): void {
     // Merge with existing settings in localStorage so we don't clobber
     // anything that the side panel wrote but this panel doesn't expose.
     const prev = JSON.parse(localStorage.getItem('aggregaytor_map_filter_settings') || '{}');
+    // Never carry blockedIds through the filter-panel path. BLOCKED_KEY is
+    // the single source of truth for hides — letting a stale array leak
+    // through here caused freshly-hidden profiles to reappear seconds later.
+    delete (prev as any).blockedIds;
     const merged = { ...prev, ...update };
+    delete (merged as any).blockedIds;
     localStorage.setItem('aggregaytor_map_filter_settings', JSON.stringify(merged));
 
     // Cross the ISOLATED→MAIN world boundary via postMessage.

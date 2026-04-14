@@ -54,6 +54,40 @@ function swPerfTrack(name: string): () => void {
 let threadSummaryCache: { data: any; time: number; key: string } | null = null;
 const THREAD_CACHE_TTL = 5000; // 5 seconds
 
+// Device-local AES-GCM key used to encrypt platform credentials stored in
+// chrome.storage.local. Derived from the extension install ID so the key is
+// stable across restarts but differs per install. Cached in memory after
+// first use. This is intentionally a device-scoped secret, not user-scoped:
+// the goal is zero-friction credential recovery after Grindr forces a
+// logout, same security model as the browser's own password manager.
+let _deviceCredentialKey: CryptoKey | null = null;
+async function getDeviceCredentialKey(): Promise<CryptoKey> {
+  if (_deviceCredentialKey) return _deviceCredentialKey;
+  let installId: string;
+  try {
+    const stored = await chrome.storage.local.get('aggregaytor_device_salt');
+    installId = stored.aggregaytor_device_salt;
+    if (!installId) {
+      const rand = crypto.getRandomValues(new Uint8Array(32));
+      installId = Array.from(rand).map(b => b.toString(16).padStart(2, '0')).join('');
+      await chrome.storage.local.set({ aggregaytor_device_salt: installId });
+    }
+  } catch {
+    installId = chrome.runtime.id || 'aggregaytor-default';
+  }
+  const material = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(installId), 'PBKDF2', false, ['deriveKey'],
+  );
+  _deviceCredentialKey = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: new TextEncoder().encode('aggregaytor-cred-v1'), iterations: 100_000, hash: 'SHA-256' },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  );
+  return _deviceCredentialKey;
+}
+
 function invalidateThreadCache(): void {
   threadSummaryCache = null;
 }
@@ -940,6 +974,64 @@ async function handleMessage(msg: any): Promise<any> {
         await chrome.storage.local.set({ aggregaytor_quick_phrases: phrases });
       }
       return { ok: true, count: phrases.length };
+    }
+
+    // ── Platform Credentials (encrypted) ──────────────────────────────────
+    // Username + password for platforms that need auto-login recovery after
+    // a forced logout (e.g. Grindr's block rate-limit kicks you out). Stored
+    // in chrome.storage.local as AES-GCM ciphertext, keyed by a device-local
+    // salt derived from the extension install ID. We intentionally DO NOT
+    // ask the user for a passphrase: the goal is zero-friction auto-fill
+    // after a forced logout. Anyone with filesystem access to the Chrome
+    // profile can read these, same as any browser password manager.
+    case 'SET_GRINDR_CREDENTIALS': {
+      try {
+        const { username, password, autoLogin } = msg;
+        if (!username || !password) {
+          await chrome.storage.local.remove(['aggregaytor_grindr_credentials']);
+          return { ok: true, cleared: true };
+        }
+        const key = await getDeviceCredentialKey();
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const plaintext = new TextEncoder().encode(JSON.stringify({ username, password }));
+        const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext);
+        await chrome.storage.local.set({
+          aggregaytor_grindr_credentials: {
+            iv: Array.from(iv),
+            ct: Array.from(new Uint8Array(ct)),
+            autoLogin: autoLogin !== false,
+            savedAt: Date.now(),
+          },
+        });
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+    case 'GET_GRINDR_CREDENTIALS': {
+      try {
+        const data = await chrome.storage.local.get('aggregaytor_grindr_credentials');
+        const stored = data.aggregaytor_grindr_credentials;
+        if (!stored || stored.autoLogin === false) return { ok: true, credentials: null };
+        const key = await getDeviceCredentialKey();
+        const iv = new Uint8Array(stored.iv);
+        const ct = new Uint8Array(stored.ct);
+        const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+        const parsed = JSON.parse(new TextDecoder().decode(pt));
+        return { ok: true, credentials: parsed };
+      } catch {
+        return { ok: true, credentials: null };
+      }
+    }
+    case 'GET_GRINDR_CREDENTIAL_STATUS': {
+      const data = await chrome.storage.local.get('aggregaytor_grindr_credentials');
+      const stored = data.aggregaytor_grindr_credentials;
+      return {
+        ok: true,
+        saved: !!stored,
+        autoLogin: !!stored?.autoLogin,
+        savedAt: stored?.savedAt || 0,
+      };
     }
 
     // ── Google Drive Sync ──────────────────────────────────────────────────
