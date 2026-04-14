@@ -287,18 +287,42 @@ async function handleMessage(msg: any): Promise<any> {
       console.log(`${LOG} Block detected: ${msg.contactId}`);
       await upsertThreadMeta(msg.contactId, msg.platform, { blockedByThem: true, archived: true });
       chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform: msg.platform, count: 0 }).catch(() => {})
-      // Immediate preference training — blocking is a strong negative signal
+      // Immediate preference training — blocking is a strong negative signal.
+      // We also mirror the flag onto the contact record's metadata so future
+      // autoTrainFromSignals scans see it via the md.isBlocked path even if
+      // threadMeta indexing doesn't line up for some reason.
       try {
         const contact = await getContact(`contact:${msg.contactId}`);
         const md = contact?.metadata || {};
-        await recordFeedback(msg.contactId, msg.platform as Platform, false, {
-          bodyType: String(md.bodyType || ''), position: String(md.position || ''),
-          age: String(md.age || ''), ethnicity: String(md.ethnicity || ''),
-          height: String(md.height || ''), profileTextLength: 0, profileTextKeywords: [],
-          hasPhoto: contact?.avatarUrl ? 1 : 0, photoCount: 0,
-          distance: String(md.distance || ''), conversationLength: 0, responseRate: 0,
-        });
-        autoTrainedSet.add(msg.contactId);
+        const hasFeatures = !!(md.bodyType || md.position || md.age || md.ethnicity ||
+          md.height || md.profileText || md.aboutMe || contact?.avatarUrl);
+        if (hasFeatures) {
+          await recordFeedback(msg.contactId, msg.platform as Platform, false, {
+            bodyType: String(md.bodyType || ''), position: String(md.position || ''),
+            age: String(md.age || ''), ethnicity: String(md.ethnicity || ''),
+            height: String(md.height || ''),
+            profileTextLength: String(md.profileText || md.aboutMe || md.bio || '').length,
+            profileTextKeywords: [],
+            hasPhoto: contact?.avatarUrl ? 1 : 0,
+            photoCount: Array.isArray(md.photos) ? md.photos.length : 0,
+            distance: String(md.distance || ''), conversationLength: 0, responseRate: 0,
+          });
+          autoTrainedSet.add(msg.contactId);
+        } else {
+          console.log(`${LOG} Block signal recorded but features empty for ${msg.contactId}; deferring training`);
+        }
+        // Persist the flag on the contact record regardless of features.
+        if (contact) {
+          await upsertContact({
+            id: msg.contactId, platform: msg.platform as Platform,
+            platformUserId: msg.contactId.replace(/^[a-z]+:/, ''),
+            displayName: contact.displayName || '',
+            profileUrl: contact.profileUrl || '',
+            avatarUrl: contact.avatarUrl || '',
+            lastSeen: contact.lastSeen || new Date().toISOString(),
+            metadata: { ...(contact.metadata || {}), isBlocked: true },
+          });
+        }
       } catch {}
       return { ok: true };
     }
@@ -990,6 +1014,157 @@ async function handleMessage(msg: any): Promise<any> {
           } catch (e) {
             console.warn('[Aggregaytor:SW] Grindr adapter-tag scan failed:', e);
           }
+        }
+
+        if (platform === 'sniffies') {
+          // Sniffies has no public blocked/hidden list API — blocks are a
+          // platform-internal action performed in the chat UI. Our primary
+          // source of truth is already our PouchDB: every middle-click dispatches
+          // PROFILE_BLOCKED which writes threadMeta.blockedByThem=true, and
+          // autoTrainFromSignals() picks those up (along with md.isPinned for
+          // positives). That call runs below as the standard signal scan.
+          //
+          // The code below is an additional BACKFILL pass that reads the
+          // Sniffies tab's aggregaytor_map_blocked localStorage directly.
+          // That catches two edge cases not covered by the DB scan alone:
+          //   • Historical blocks from earlier versions that existed before
+          //     PROFILE_BLOCKED was dispatched to the service worker.
+          //   • Anonymous profiles the user middle-clicked on the map without
+          //     ever opening — for these there's no contact doc at all, so
+          //     autoTrainFromSignals (which iterates getAllContacts) won't
+          //     see them. We'll still skip training on them here until their
+          //     profile data lands (enrichment gate), but having them listed
+          //     means they'll auto-train the moment we see features for them.
+          let tabBlockedIds: string[] = [];
+          try {
+            const tabs = await chrome.tabs.query({});
+            const sniffiesTab = tabs.find((t: any) => t.url?.includes('sniffies.com'));
+            if (sniffiesTab?.id) {
+              const [result] = await chrome.scripting.executeScript({
+                target: { tabId: sniffiesTab.id },
+                world: 'MAIN',
+                func: () => {
+                  const out: string[] = [];
+                  try {
+                    // Our extension's middle-click / panel-block storage
+                    const raw = localStorage.getItem('aggregaytor_map_blocked');
+                    if (raw) {
+                      const arr = JSON.parse(raw);
+                      if (Array.isArray(arr)) for (const id of arr) {
+                        if (typeof id === 'string' && /^[0-9a-f]{6,}$/i.test(id)) out.push(id.toLowerCase());
+                      }
+                    }
+                    // Sniffies' own blocked-users list (if their app stores it
+                    // anywhere we can read — we scan localStorage for any key
+                    // matching a blocked-profiles shape)
+                    for (let i = 0; i < localStorage.length; i++) {
+                      const k = localStorage.key(i) || '';
+                      if (!/block|hide|hidden/i.test(k)) continue;
+                      const v = localStorage.getItem(k) || '';
+                      if (!v.startsWith('[') && !v.startsWith('{')) continue;
+                      try {
+                        const parsed = JSON.parse(v);
+                        const walk = (x: any): void => {
+                          if (!x) return;
+                          if (Array.isArray(x)) { for (const it of x) walk(it); return; }
+                          if (typeof x === 'string' && /^[0-9a-f]{24,}$/i.test(x)) { out.push(x.toLowerCase()); return; }
+                          if (typeof x === 'object') for (const val of Object.values(x)) walk(val);
+                        };
+                        walk(parsed);
+                      } catch {}
+                    }
+                  } catch {}
+                  return [...new Set(out)];
+                },
+              });
+              tabBlockedIds = (result?.result as string[]) || [];
+            }
+          } catch (e) {
+            console.warn(`${LOG} Sniffies tab script failed:`, e);
+          }
+
+          // Feed each blocked id through the same enrichment gate as Grindr:
+          // only train on samples that have observable features.
+          let trainedBlocks = 0;
+          let skippedEmpty = 0;
+          for (const pid of tabBlockedIds) {
+            const cid = `sniffies:${pid}`;
+            if (autoTrainedSet.has(cid)) continue;
+            try {
+              const contact = await getContact(`contact:sniffies:${pid}`);
+              const md = (contact?.metadata || {}) as any;
+              const hasAnyFeature =
+                md.bodyType || md.position || md.age || md.ethnicity ||
+                md.height || md.profileText || md.aboutMe || md.distance || contact?.avatarUrl;
+              if (!hasAnyFeature) { skippedEmpty++; continue; }
+              await recordFeedback(cid, 'sniffies', false, {
+                bodyType: String(md.bodyType || ''),
+                position: String(md.position || ''),
+                age: String(md.age || ''),
+                ethnicity: String(md.ethnicity || ''),
+                height: String(md.height || ''),
+                profileTextLength: String(md.profileText || md.aboutMe || md.bio || '').length,
+                profileTextKeywords: [],
+                hasPhoto: contact?.avatarUrl ? 1 : 0,
+                photoCount: Array.isArray(md.photos) ? md.photos.length : 0,
+                distance: String(md.distance || ''),
+                conversationLength: 0,
+                responseRate: 0,
+              });
+              // Also backfill the contact record so future auto-train picks
+              // this up via the md.isBlocked signal without re-running import.
+              if (contact) {
+                const updatedMd = { ...(contact.metadata || {}), isBlocked: true };
+                await upsertContact({
+                  id: `sniffies:${pid}`, platform: 'sniffies', platformUserId: pid,
+                  displayName: contact.displayName || '', profileUrl: contact.profileUrl || '',
+                  avatarUrl: contact.avatarUrl || '', lastSeen: contact.lastSeen || new Date().toISOString(),
+                  metadata: updatedMd,
+                });
+              }
+              autoTrainedSet.add(cid);
+              trained++;
+              trainedBlocks++;
+            } catch { skippedEmpty++; }
+          }
+          console.log(
+            `[Aggregaytor:SW] Sniffies import: ${tabBlockedIds.length} blocked ids from tab, ` +
+            `${trainedBlocks} trained with real features, ${skippedEmpty} skipped (empty shells).`,
+          );
+
+          // Positive signals: pinned contacts from our DB (chat-panel scraper
+          // sets md.isPinned when the Sniffies Recents row has a thumbtack).
+          let trainedPins = 0;
+          try {
+            const sniffiesContacts = await getContactsByPlatform('sniffies');
+            for (const c of sniffiesContacts) {
+              const cid = c._id?.replace('contact:', '') || '';
+              if (!cid || autoTrainedSet.has(cid)) continue;
+              const md = (c.metadata || {}) as any;
+              if (!md.isPinned) continue;
+              const hasAnyFeature = md.bodyType || md.position || md.age || md.ethnicity ||
+                md.height || md.profileText || md.aboutMe || c.avatarUrl;
+              if (!hasAnyFeature) continue;
+              await recordFeedback(cid, 'sniffies', true, {
+                bodyType: String(md.bodyType || ''),
+                position: String(md.position || ''),
+                age: String(md.age || ''),
+                ethnicity: String(md.ethnicity || ''),
+                height: String(md.height || ''),
+                profileTextLength: String(md.profileText || md.aboutMe || md.bio || '').length,
+                profileTextKeywords: [],
+                hasPhoto: c.avatarUrl ? 1 : 0,
+                photoCount: Array.isArray(md.photos) ? md.photos.length : 0,
+                distance: String(md.distance || ''),
+                conversationLength: 0,
+                responseRate: 0,
+              });
+              autoTrainedSet.add(cid);
+              trained++;
+              trainedPins++;
+            }
+          } catch {}
+          console.log(`[Aggregaytor:SW] Sniffies import: ${trainedPins} pinned contacts trained as positive.`);
         }
 
         // Also run the standard signal scan

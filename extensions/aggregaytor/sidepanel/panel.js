@@ -2453,6 +2453,26 @@ document.getElementById('sp-train-grindr')?.addEventListener('click', async () =
   } catch (err) { status.textContent = 'Error: ' + err.message; status.style.color = '#ef4444'; }
 });
 
+document.getElementById('sp-train-sniffies')?.addEventListener('click', async () => {
+  const status = document.getElementById('sp-train-status');
+  status.textContent = 'Importing Sniffies signals…';
+  status.style.color = '';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'BULK_TRAIN_FROM_PLATFORM', platform: 'sniffies' });
+    if (res?.ok) {
+      status.textContent = `Imported and trained on ${res.trained} signals!`;
+      status.style.color = '#22c55e';
+      loadModelStats();
+    } else {
+      status.textContent = 'Error: ' + (res?.error || 'unknown');
+      status.style.color = '#f87171';
+    }
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+    status.style.color = '#f87171';
+  }
+});
+
 document.getElementById('sp-retrain-model')?.addEventListener('click', async () => {
   const status = document.getElementById('sp-train-status');
   status.textContent = 'Retraining from scratch...';

@@ -215,7 +215,8 @@
         </label>
         <div class="settings-row" style="margin-top:4px">
           <button class="settings-btn" id="sp-train-now" title="Scan all contacts for pins, favorites, blocks, and ratings — train the model on those signals">Train Now</button>
-          <button class="settings-btn" id="sp-train-grindr" title="Import Grindr's blocked/hidden list as negative training data (fetches from Grindr API)">Import Grindr Lists</button>
+          <button class="settings-btn" id="sp-train-grindr" title="Import Grindr's blocked/hidden list as negative training data (fetches from Grindr API + stored contact metadata)">Import Grindr Lists</button>
+          <button class="settings-btn" id="sp-train-sniffies" title="Import Sniffies blocked (from middle-clicks) and pinned contacts as training signals">Import Sniffies Lists</button>
           <button class="settings-btn" id="sp-retrain-model" title="Retrain the entire model from scratch using all recorded feedback">Full Retrain</button>
           <button class="settings-btn" id="sp-diagnose-training" title="Audit training data quality — shows how many samples have real profile attributes (body type, position, age, etc.) vs. empty shells that taught the model nothing">Diagnose Data</button>
         </div>
