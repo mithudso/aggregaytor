@@ -194,7 +194,22 @@
       </div>
       <div class="settings-section">
         <h3 class="settings-heading">Preference Learning</h3>
-        <div class="settings-info">Auto-train from pins, favorites, blocks, and ratings. The model learns your type over time.</div>
+        <div class="settings-info">The ML model learns your type from how you interact with profiles. It uses logistic regression trained on body type, position, age, ethnicity, and other features.</div>
+        <details class="settings-details">
+          <summary style="cursor:pointer;color:#93c5fd;font-size:11px;margin:4px 0">How to train the model ▸</summary>
+          <ol style="font-size:10px;color:#9ca3af;margin:4px 0 8px 16px;line-height:1.6">
+            <li>Open Grindr in a tab (for block/hidden list import)</li>
+            <li>Click <b>Import Grindr Lists</b> — imports all blocked/hidden profiles as negative signals</li>
+            <li>Click <b>Train Now</b> — scans all contacts for pins, favorites, blocks, ratings, and bookmarks</li>
+            <li>Use 👍/👎 buttons on profiles and ⭐ star ratings for ongoing training</li>
+            <li>Click <b>Full Retrain</b> to rebuild the model from scratch with all data</li>
+          </ol>
+          <div style="font-size:10px;color:#6b7280;margin-bottom:6px">
+            <b>Positive signals:</b> Sniffies pins 📌, Grindr favorites ⭐, bookmarks, ratings ≥4<br>
+            <b>Negative signals:</b> blocks, hides, ratings ≤2<br>
+            <b>Features learned:</b> body type, position, age, ethnicity, height, photo presence, profile text keywords
+          </div>
+        </details>
         <label class="settings-checkbox-label">
           <input type="checkbox" id="sp-auto-train" checked> Auto-train from platform signals
         </label>
