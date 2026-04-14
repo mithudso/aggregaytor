@@ -18,12 +18,25 @@ import { getDB } from './db.js';
  * PouchDB writes can transiently fail under concurrent access (e.g. two
  * adapters syncing at the same time). A single retry with a short backoff
  * handles the vast majority of these cases without adding complexity.
+ *
+ * The previous implementation discarded the original error — if the retry
+ * also failed we only saw the retry's message. v0.57.7 chains the errors so
+ * repeated failures surface the original cause in the console.
  */
 async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
   try { return await fn(); }
   catch (err) {
     await new Promise(r => setTimeout(r, 1000));
-    return fn();
+    try { return await fn(); }
+    catch (retryErr) {
+      // Attach the original error so downstream logs aren't blind to the
+      // first failure mode (e.g. an initial conflict followed by a network
+      // error on retry would otherwise hide the conflict).
+      try {
+        (retryErr as any).originalError = err;
+      } catch { /* frozen/non-extensible error — ignore */ }
+      throw retryErr;
+    }
   }
 }
 
@@ -178,6 +191,10 @@ export async function upsertMessages(
   // Write all docs in a single bulk operation
   if (toWrite.length) {
     await withRetry(() => store.bulkDocs(toWrite));
+    // New/updated messages may change the unread count, so clear the
+    // 2s memoization. The cache auto-refills on the next caller (usually
+    // the badge refresh alarm or the panel open).
+    invalidateUnreadCountCache();
   }
   return { created, updated };
 }
@@ -291,6 +308,7 @@ export async function markThreadRead(
     doc.updatedAt = new Date().toISOString();
   }
   await store.bulkDocs(docs);
+  invalidateUnreadCountCache();
   return docs.length;
 }
 
@@ -301,13 +319,52 @@ export async function markThreadRead(
  * sent by the user are always considered "read". Uses `fields: ['_id']` to
  * minimize data transfer -- we only need the count, not the full docs.
  *
+ * ## Performance
+ *
+ * PouchDB has no native count operator: any "how many?" query has to
+ * enumerate at least the _id column of the matching docs. To keep this
+ * call cheap for the two main callers:
+ *
+ *   - **Badge update** (the hot path — fires every minute + on every
+ *     message write). It only needs "0 / 1..99 / 99+" resolution since the
+ *     extension action badge is 3 characters wide. We cap the scan at
+ *     `MAX_BADGE_SCAN` so a user with tens of thousands of unreads doesn't
+ *     walk the whole corpus every minute.
+ *   - **Programmatic exact counts** (unusual). Pass `{ exact: true }` to
+ *     bypass the cap and get the true total.
+ *
+ * Additionally, results are memoized for 2 seconds so rapid back-to-back
+ * callers (e.g. multiple message-write paths + badge refresh firing in the
+ * same tick) share a single PouchDB round-trip.
+ *
  * @param platform  If provided, only count unreads on this platform.
- * @returns         Total number of unread inbound messages.
+ * @param opts.exact  If true, return exact count (no cap). Default false.
+ * @param opts.limit  Override the default cap. Ignored if exact=true.
+ * @returns           Count of unread inbound messages, capped unless exact.
  */
+const MAX_BADGE_SCAN = 999; // badge renders "999+" after this
+const UNREAD_CACHE_TTL_MS = 2000;
+const unreadCountCache = new Map<string, { count: number; time: number; capped: boolean }>();
+
 export async function getUnreadCount(
   platform?: Platform,
+  opts?: { exact?: boolean; limit?: number },
   db?: PouchDB.Database,
 ): Promise<number> {
+  // Back-compat: older call sites pass the DB as the second positional arg.
+  if (opts && typeof (opts as any).get === 'function' && !db) {
+    db = opts as unknown as PouchDB.Database;
+    opts = undefined;
+  }
+  const exact = !!opts?.exact;
+  const limit = exact ? 0 : Math.max(opts?.limit ?? MAX_BADGE_SCAN, 1);
+
+  const cacheKey = `${platform || '*'}:${exact ? 'exact' : String(limit)}`;
+  const cached = unreadCountCache.get(cacheKey);
+  if (cached && Date.now() - cached.time < UNREAD_CACHE_TTL_MS) {
+    return cached.count;
+  }
+
   const store = db || await getDB();
   const selector: Record<string, unknown> = {
     docType: 'message',
@@ -315,6 +372,30 @@ export async function getUnreadCount(
     direction: 'in',
   };
   if (platform) selector.platform = platform;
-  const result = await store.find({ selector, fields: ['_id'] });
-  return result.docs.length;
+
+  // Capped scan: pass limit + 1 so we can detect overflow and return
+  // "limit" (with the +1 hidden) when the true count exceeds the cap.
+  const queryLimit = exact ? Number.MAX_SAFE_INTEGER : limit + 1;
+  const result = await store.find({ selector, fields: ['_id'], limit: queryLimit });
+  const raw = result.docs.length;
+  const count = exact ? raw : Math.min(raw, limit);
+  const capped = !exact && raw > limit;
+
+  unreadCountCache.set(cacheKey, { count, time: Date.now(), capped });
+  // Keep the cache small — at most one entry per platform × exact/limit
+  // variant. Bounded by the fixed set of call sites, but trim defensively.
+  if (unreadCountCache.size > 32) {
+    const iter = unreadCountCache.keys();
+    unreadCountCache.delete(iter.next().value as string);
+  }
+
+  return count;
+}
+
+/**
+ * Invalidate the unread count cache. Call after any write that may change
+ * the unread state (new message ingested, mark-read, bulk clear).
+ */
+export function invalidateUnreadCountCache(): void {
+  unreadCountCache.clear();
 }

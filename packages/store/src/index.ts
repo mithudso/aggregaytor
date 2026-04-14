@@ -11,7 +11,7 @@ export type {
 } from './types.js';
 export { DEFAULT_AUTO_RESPOND_SETTINGS } from './types.js';
 export { getDB, closeDB, destroyDB, createDB } from './db.js';
-export { upsertMessage, upsertMessages, getMessagesByThread, getMessagesByContact, getRecentMessages, markThreadRead, getUnreadCount } from './messages.js';
+export { upsertMessage, upsertMessages, getMessagesByThread, getMessagesByContact, getRecentMessages, markThreadRead, getUnreadCount, invalidateUnreadCountCache } from './messages.js';
 export { upsertContact, upsertContacts, getContact, getContactsByPlatform, getAllContacts } from './contacts.js';
 export { getThreadSummaries, getThreadUnreadCounts } from './threads.js';
 export { getThreadMeta, upsertThreadMeta, getAllThreadMeta, getBookmarkedThreads, getArchivedThreads } from './thread-meta.js';

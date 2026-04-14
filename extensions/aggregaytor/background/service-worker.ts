@@ -21,7 +21,7 @@ import {
   exportAllData, importAllData, exportBlocked, importBlocked,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
-import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS } from './llm.js';
+import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS, clearLLMCaches } from './llm.js';
 import { getDossier, upsertDossier, setAutoExtractedField } from '@aggregaytor/store';
 import { handleDebugCommand } from './debug-bridge.js';
 
@@ -48,11 +48,16 @@ function swPerfTrack(name: string): () => void {
 // ── Thread Summary Cache ──────────────────────────────────────────────────
 // getThreadSummaries is the most expensive operation (81ms avg, 14x/min).
 // It queries 5000 messages from PouchDB + N contact lookups on every call.
-// Cache the result for 3 seconds to avoid redundant PouchDB round-trips
+// Cache the result for 5 seconds to avoid redundant PouchDB round-trips
 // when multiple triggers fire in rapid succession (CONTACTS_UPDATED,
-// NEW_MESSAGES, panel opening, etc.)
+// NEW_MESSAGES, panel opening, etc.).
+//
+// The cache is invalidated by invalidateThreadCache() on writes that affect
+// the thread list (new messages, imports, destroyDB) but NOT on pure-metadata
+// updates (avatar, dossier) since those don't change thread ordering or
+// unread counts. See the ADAPTER_CONTACTS handler for the reasoning.
 let threadSummaryCache: { data: any; time: number; key: string } | null = null;
-const THREAD_CACHE_TTL = 5000; // 5 seconds
+const THREAD_CACHE_TTL = 5000; // 5 seconds — matches the value in code, was previously mis-documented as 3s
 
 // Device-local AES-GCM key used to encrypt platform credentials stored in
 // chrome.storage.local. Derived from the extension install ID so the key is
@@ -118,7 +123,21 @@ const PLATFORM_URLS: Record<string, (contactId: string) => string> = {
 };
 
 chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
-  handleMessage(msg).then(sendResponse).catch(err => sendResponse({ ok: false, error: (err as Error).message }));
+  // Wrap in try/catch so a synchronous throw in handleMessage's dispatch
+  // (e.g. a malformed msg object hitting a switch branch) cannot take down
+  // the service worker. Any error — sync or async — turns into a structured
+  // `{ ok: false, error }` response so the UI can surface it.
+  try {
+    handleMessage(msg)
+      .then(sendResponse)
+      .catch(err => {
+        console.warn(`${LOG} Message handler failed for type=${msg?.type}:`, err);
+        sendResponse({ ok: false, error: (err as Error).message || String(err) });
+      });
+  } catch (err) {
+    console.error(`${LOG} Sync error in message dispatch for type=${msg?.type}:`, err);
+    sendResponse({ ok: false, error: (err as Error).message || String(err) });
+  }
   return true;
 });
 
@@ -136,7 +155,17 @@ async function handleMessage(msg: any): Promise<any> {
           callsPerMin: Math.round((v.calls / uptimeMin) * 10) / 10,
         };
       }
-      return { ok: true, stats, uptimeMin: Math.round(uptimeMin * 10) / 10 };
+      // Surface the bounded in-memory set/map sizes so the settings UI can
+      // show memory pressure at a glance. These are all capped, but seeing
+      // them filled to the cap indicates an exceptionally heavy user.
+      const memoryStats = {
+        autoTrainedSet: autoTrainedSet.size,
+        recentContactUpserts: recentContactUpserts.size,
+        threadCacheHasData: !!threadSummaryCache,
+        threadCacheAgeMs: threadSummaryCache ? Date.now() - threadSummaryCache.time : 0,
+        dossierQueueSize: dossierExtractionQueue.size,
+      };
+      return { ok: true, stats, uptimeMin: Math.round(uptimeMin * 10) / 10, memory: memoryStats };
     }
     case 'ADAPTER_MESSAGES': {
       invalidateThreadCache();
@@ -157,7 +186,16 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_CONTACT': {
       // Direct single-contact lookup — O(1) PouchDB get instead of the
       // full thread summaries query. Use this when you only need one contact.
-      const contact = await getContact(msg.contactId);
+      //
+      // Accepts both forms of contact id:
+      //   - raw:       "grindr:12345"
+      //   - prefixed:  "contact:grindr:12345"
+      // getContact() expects the full PouchDB _id (prefixed), so we normalise
+      // here — this used to silently return null for ~half the callers.
+      const lookupId = String(msg.contactId || '').startsWith('contact:')
+        ? msg.contactId
+        : `contact:${msg.contactId}`;
+      const contact = await getContact(lookupId);
       return { ok: true, contact };
     }
     case 'GET_THREAD_SUMMARIES': {
@@ -197,16 +235,58 @@ async function handleMessage(msg: any): Promise<any> {
 
       return { ok: true, messages: msgs };
     }
-    case 'MARK_THREAD_READ': { const c = await markThreadRead(msg.threadId); await updateBadgeCount(); return { ok: true, count: c }; }
-    case 'SEARCH_MESSAGES': {
+    case 'MARK_THREAD_READ': { const c = await markThreadRead(msg.threadId); invalidateThreadCache(); await updateBadgeCount(); return { ok: true, count: c }; }
+    case 'MARK_ALL_READ': {
+      // New in v0.57.7 — mark every unread inbound message as read in a single
+      // bulkDocs call. Useful for the sidepanel's "clear badge" action and
+      // for users returning from vacation with hundreds of unreads.
       const db = await getDB();
-      const result = await db.find({ selector: { docType: 'message' }, limit: 5000 });
-      const q = String(msg.query || '').toLowerCase();
-      const matches = (result.docs as any[])
-        .filter((d: any) => d.body && d.body.toLowerCase().includes(q))
-        .sort((a: any, b: any) => (b.timestamp || '').localeCompare(a.timestamp || ''))
-        .slice(0, msg.limit || 50);
-      return { ok: true, messages: matches };
+      const result = await db.find({ selector: { docType: 'message', read: false, direction: 'in' }, limit: 10_000 });
+      const docs = result.docs as any[];
+      if (!docs.length) {
+        await updateBadgeCount();
+        return { ok: true, count: 0 };
+      }
+      const now = new Date().toISOString();
+      for (const d of docs) { d.read = true; d.updatedAt = now; }
+      await db.bulkDocs(docs);
+      invalidateThreadCache();
+      await updateBadgeCount();
+      console.log(`${LOG} Marked all ${docs.length} inbound messages as read`);
+      return { ok: true, count: docs.length };
+    }
+    case 'SEARCH_MESSAGES': {
+      // Full-text search over the local message corpus. PouchDB doesn't have
+      // a real FTS index so we substring-match in JS. To keep this responsive
+      // on large databases we:
+      //   - Bail early on empty queries (just return the most recent messages)
+      //   - Cap the scan window to a sensible multiple of the desired limit
+      //   - Stream-filter inside the scan instead of materializing all 5000
+      //     docs and THEN filtering (old behaviour — ~50MB of JSON for heavy users)
+      const db = await getDB();
+      const q = String(msg.query || '').toLowerCase().trim();
+      const limit = Math.min(Math.max(msg.limit || 50, 1), 500);
+      // Scan up to 20x the requested limit so that sparse-matching queries
+      // still find enough hits. Capped at 5000 to bound worst-case memory.
+      const scanCap = Math.min(Math.max(limit * 20, 500), 5000);
+
+      const result = await db.find({ selector: { docType: 'message' }, limit: scanCap });
+      const docs = result.docs as any[];
+
+      let matches: any[];
+      if (!q) {
+        // Empty query — just return the most recent N messages
+        matches = docs;
+      } else {
+        matches = [];
+        for (const d of docs) {
+          if (d.body && typeof d.body === 'string' && d.body.toLowerCase().includes(q)) {
+            matches.push(d);
+          }
+        }
+      }
+      matches.sort((a: any, b: any) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+      return { ok: true, messages: matches.slice(0, limit), scanned: docs.length };
     }
     case 'CLEAR_ALL_DATA': {
       // Destroy and recreate the entire database
@@ -277,10 +357,17 @@ async function handleMessage(msg: any): Promise<any> {
       return { ok: true, count: scraped };
     }
     case 'CLEAR_THREAD_MESSAGES': {
+      // Delete every message for a contact in a single bulkDocs round-trip
+      // instead of N sequential db.remove() calls. For threads with hundreds
+      // of messages this drops deletion time from O(N) per-round-trip to O(1).
+      invalidateThreadCache();
       const db = await getDB();
       const result = await db.find({ selector: { docType: 'message', contactId: msg.contactId } });
-      for (const doc of result.docs) { await db.remove(doc); }
-      console.log(`${LOG} Cleared ${result.docs.length} messages for ${msg.contactId}`);
+      if (!result.docs.length) return { ok: true, count: 0 };
+      const tombstones = result.docs.map((d: any) => ({ _id: d._id, _rev: d._rev, _deleted: true }));
+      await db.bulkDocs(tombstones);
+      await updateBadgeCount().catch(() => {});
+      console.log(`${LOG} Cleared ${result.docs.length} messages for ${msg.contactId} (bulk delete)`);
       return { ok: true, count: result.docs.length };
     }
     case 'PROFILE_BLOCKED': {
@@ -307,7 +394,7 @@ async function handleMessage(msg: any): Promise<any> {
             photoCount: Array.isArray(md.photos) ? md.photos.length : 0,
             distance: String(md.distance || ''), conversationLength: 0, responseRate: 0,
           });
-          autoTrainedSet.add(msg.contactId);
+          markAutoTrained(msg.contactId);
         } else {
           console.log(`${LOG} Block signal recorded but features empty for ${msg.contactId}; deferring training`);
         }
@@ -386,6 +473,15 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_LLM_RATE_SETTINGS': return { ok: true, settings: await getLLMRateSettings() };
     case 'SAVE_LLM_RATE_SETTINGS': { await saveLLMRateSettings(msg.settings); return { ok: true }; }
     case 'GET_LLM_QUEUE_STATUS': return { ok: true, status: getLLMQueueStatus(), optimization: getLLMOptimizationStats() };
+    case 'CLEAR_LLM_CACHE': {
+      // Drop every in-memory LLM cache (response cache, rolling summaries,
+      // dossier extraction cursors, per-provider rate trackers). Useful when
+      // switching personality / style guide / provider keys and you want the
+      // next request to start clean.
+      const result = clearLLMCaches();
+      console.log(`${LOG} LLM caches cleared:`, result.cleared);
+      return { ok: true, ...result };
+    }
 
     // Session summary
     case 'GENERATE_SESSION_SUMMARY': {
@@ -454,7 +550,12 @@ async function handleMessage(msg: any): Promise<any> {
 
     // ML Preference + Sentiment
     case 'RECORD_PREFERENCE': {
-      const contact = await getContact(msg.contactId);
+      // getContact expects the full PouchDB _id (contact:{platform}:{userId}).
+      // Normalise raw contact ids so the preference model trains on real
+      // metadata-derived features instead of always-empty shells.
+      const lookupId = String(msg.contactId || '').startsWith('contact:')
+        ? msg.contactId : `contact:${msg.contactId}`;
+      const contact = await getContact(lookupId);
       const features: ProfileFeatures = {
         bodyType: String(contact?.metadata?.bodyType || contact?.metadata?.body || ''),
         position: String(contact?.metadata?.attitude || contact?.metadata?.position || ''),
@@ -480,7 +581,10 @@ async function handleMessage(msg: any): Promise<any> {
     // Thread analysis (sentiment + preference + summary)
     case 'ANALYZE_THREAD': {
       const sentiment = analyzeConversationSentiment(msg.messages);
-      const contact = await getContact(msg.contactId);
+      // See RECORD_PREFERENCE — same prefix-normalisation rationale.
+      const lookupId = String(msg.contactId || '').startsWith('contact:')
+        ? msg.contactId : `contact:${msg.contactId}`;
+      const contact = await getContact(lookupId);
       const features: ProfileFeatures = {
         bodyType: String(contact?.metadata?.bodyType || ''),
         position: String(contact?.metadata?.position || ''),
@@ -673,6 +777,7 @@ async function handleMessage(msg: any): Promise<any> {
     }
     case 'IMPORT_BLOCKED': {
       try {
+        invalidateThreadCache();
         const result = await importBlocked(msg.data);
         return { ok: true, ...result };
       } catch (err) { return { ok: false, error: (err as Error).message }; }
@@ -680,7 +785,11 @@ async function handleMessage(msg: any): Promise<any> {
 
     // ── Broadcast Message ──────────────────────────────────────────────────
     case 'BROADCAST_TO_FAVORITES': {
-      // Send a message to all favorited contacts on a specific platform
+      // Send a message to all favorited contacts on a specific platform.
+      // Walks the platform tabs for each contact and posts a SEND_AUTO_RESPONSE
+      // followed by SPA_NAVIGATE. Pacing defaults to 3s to stay under platform
+      // rate limits. Errors on individual recipients are logged (previously
+      // silently swallowed) so the caller can see partial failures.
       try {
         const allMeta = await getAllThreadMeta();
         const favorites = allMeta.filter(m =>
@@ -744,7 +853,7 @@ async function handleMessage(msg: any): Promise<any> {
             hasPhoto: contact?.avatarUrl ? 1 : 0, photoCount: 0,
             distance: String(md.distance || ''), conversationLength: 0, responseRate: 0,
           });
-          autoTrainedSet.add(msg.contactId);
+          markAutoTrained(msg.contactId);
         } catch {}
       }
       return { ok: true, meta };
@@ -970,7 +1079,7 @@ async function handleMessage(msg: any): Promise<any> {
                 continue;
               }
               await recordFeedback(cid, 'grindr', liked, features);
-              autoTrainedSet.add(cid);
+              markAutoTrained(cid);
               trained++;
             }
             console.log(
@@ -1006,7 +1115,7 @@ async function handleMessage(msg: any): Promise<any> {
                 conversationLength: 0,
                 responseRate: 0,
               });
-              autoTrainedSet.add(cid);
+              markAutoTrained(cid);
               trained++;
               adapterTagged++;
             }
@@ -1122,7 +1231,7 @@ async function handleMessage(msg: any): Promise<any> {
                   metadata: updatedMd,
                 });
               }
-              autoTrainedSet.add(cid);
+              markAutoTrained(cid);
               trained++;
               trainedBlocks++;
             } catch { skippedEmpty++; }
@@ -1159,7 +1268,7 @@ async function handleMessage(msg: any): Promise<any> {
                 conversationLength: 0,
                 responseRate: 0,
               });
-              autoTrainedSet.add(cid);
+              markAutoTrained(cid);
               trained++;
               trainedPins++;
             }
@@ -1595,11 +1704,17 @@ async function processDossierExtractions(): Promise<void> {
   dossierProcessing = true;
 
   try {
-    // Process one contact at a time (serial, not parallel)
+    // Process one contact at a time (serial, not parallel). The queue can
+    // mutate while we await — between iterations other requests may add or
+    // remove items — so we re-check size every loop and guard against the
+    // narrow race where another caller drained the queue before us.
     while (dossierExtractionQueue.size > 0) {
       const entry = dossierExtractionQueue.values().next().value;
+      if (!entry) break; // queue was drained by a concurrent caller
       dossierExtractionQueue.delete(entry);
-    const [contactId, platform] = [entry.substring(0, entry.lastIndexOf(':')), entry.substring(entry.lastIndexOf(':') + 1)];
+      const colonIdx = entry.lastIndexOf(':');
+      if (colonIdx < 0) continue; // malformed queue entry
+      const [contactId, platform] = [entry.substring(0, colonIdx), entry.substring(colonIdx + 1)];
     try {
       const allMessages = await getMessagesByContact(contactId, { limit: 50 });
       if (allMessages.length < 3) continue;
@@ -1858,52 +1973,116 @@ async function sendMessageToTab(platform: string, contactId: string, text: strin
   const tabs = await chrome.tabs.query({});
   const host = new URL(url).hostname;
   const tab = tabs.find(t => { try { return t.url && new URL(t.url).hostname === host; } catch { return false; } });
-  const targetId = tab?.id ? (await chrome.tabs.update(tab.id, { url, active: true }), tab.id) : (await chrome.tabs.create({ url })).id;
+
+  // If an existing tab is already at the target URL, do NOT reload it —
+  // unconditionally calling tabs.update({url}) caused a full page refresh
+  // on every auto-respond even when the tab was already on the right thread,
+  // wiping out in-flight message composer state. Only navigate when needed.
+  let targetId: number | undefined;
+  let hadToNavigate = false;
+  if (tab?.id) {
+    targetId = tab.id;
+    const alreadyThere = tab.url === url;
+    if (!alreadyThere) {
+      try {
+        // Prefer SPA-style navigation to avoid a full reload; fall back to
+        // a real chrome.tabs.update if the content script isn't listening.
+        const path = new URL(url).pathname + new URL(url).search;
+        const res = await chrome.tabs.sendMessage(tab.id, { type: 'SPA_NAVIGATE', url, path }).catch(() => null);
+        if (!res) {
+          await chrome.tabs.update(tab.id, { url });
+          hadToNavigate = true;
+        }
+      } catch {
+        await chrome.tabs.update(tab.id, { url });
+        hadToNavigate = true;
+      }
+    }
+    await chrome.tabs.update(tab.id, { active: true });
+  } else {
+    const created = await chrome.tabs.create({ url });
+    targetId = created.id;
+    hadToNavigate = true;
+  }
+
   if (targetId) {
+    // Give the page time to settle: shorter delay if we're already on the
+    // right URL, longer if we had to load a fresh tab.
+    const settleMs = hadToNavigate ? (tab?.id ? 3000 : 5000) : 500;
     setTimeout(() => {
-      chrome.tabs.sendMessage(targetId, { type: 'SEND_AUTO_RESPONSE', text, contactId }).catch(() => {});
-    }, tab?.id ? 3000 : 5000);
+      chrome.tabs.sendMessage(targetId!, { type: 'SEND_AUTO_RESPONSE', text, contactId }).catch(() => {});
+    }, settleMs);
   }
 }
 
 // ── Alarms + reminders ──────────────────────────────────────────────────────
 
+/**
+ * Single consolidated alarm listener. Prior to v0.57.7 there were TWO
+ * `chrome.alarms.onAlarm.addListener` registrations — one for the main
+ * periodic jobs and one just for `grindr-login-check`. In MV3 service workers
+ * every alarm fires BOTH listeners, which (a) wasted CPU scanning irrelevant
+ * alarms and (b) made the wakeup/sleep behaviour harder to reason about.
+ * Everything now lives in one listener with a `switch` dispatcher.
+ */
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  // keepalive removed — was causing CPU overhead
-  if (alarm.name === 'badge-refresh') await updateBadgeCount().catch(() => {});
-  if (alarm.name === 'auto-respond-check') await processAutoResponds().catch(e => console.error(`${LOG} AR error:`, e));
-  if (alarm.name === 'reminder-check') await processReminders().catch(e => console.error(`${LOG} Reminder error:`, e));
-  if (alarm.name === 'preference-auto-train') await autoTrainFromSignals().catch(e => console.warn(`${LOG} Auto-train error:`, e));
-  if (alarm.name === 'task-sync') {
-    // Auto-sync tasks with Google Tasks every 5 minutes (only if authenticated)
-    try {
-      const authed = await isGoogleAuthenticated();
-      if (authed) {
-        const result = await syncGoogleTasks();
-        if (result.pulled + result.pushed + result.deleted > 0) {
-          console.log(`${LOG} Task sync: pulled=${result.pulled} pushed=${result.pushed} deleted=${result.deleted}`);
+  try {
+    switch (alarm.name) {
+      case 'badge-refresh':
+        await updateBadgeCount().catch(() => {});
+        break;
+      case 'auto-respond-check':
+        await processAutoResponds().catch(e => console.error(`${LOG} AR error:`, e));
+        break;
+      case 'reminder-check':
+        await processReminders().catch(e => console.error(`${LOG} Reminder error:`, e));
+        break;
+      case 'preference-auto-train':
+        await autoTrainFromSignals().catch(e => console.warn(`${LOG} Auto-train error:`, e));
+        break;
+      case 'task-sync': {
+        // Auto-sync tasks with Google Tasks every 5 minutes (only if authenticated)
+        const authed = await isGoogleAuthenticated().catch(() => false);
+        if (authed) {
+          const result = await syncGoogleTasks();
+          if (result.pulled + result.pushed + result.deleted > 0) {
+            console.log(`${LOG} Task sync: pulled=${result.pulled} pushed=${result.pushed} deleted=${result.deleted}`);
+          }
         }
+        break;
       }
-    } catch (e) { console.warn(`${LOG} Task sync error:`, e); }
-  }
-  if (alarm.name === 'block-rule-check') {
-    // Periodic block rule evaluation across all active threads
-    try {
-      const rules = await getAllBlockRules();
-      if (!rules.length) return;
-      const summaries = await getThreadSummaries({});
-      for (const s of summaries) {
-        const messages = await getMessagesByContact(s.contactId, { limit: 50 });
-        const meta = await getThreadMeta(s.contactId);
-        const actions = evaluateRules(rules, messages, meta);
-        for (const { rule, action } of actions) {
-          console.log(`${LOG} Periodic block rule "${rule.name}" → ${action} on ${s.contactId}`);
-          await executeAction(s.contactId, s.platform, action, rule._id);
-        }
-      }
-    } catch {}
+      case 'block-rule-check':
+        await runPeriodicBlockRules().catch(e => console.warn(`${LOG} Block rule error:`, e));
+        break;
+      case 'grindr-login-check':
+        await runGrindrLoginCheck().catch(() => { /* tab often inaccessible */ });
+        break;
+      // keepalive removed — was causing CPU overhead; dev-reload-keepalive is
+      // intentionally a no-op here (the actual work is a setInterval poll).
+      case 'dev-reload-keepalive':
+        break;
+    }
+  } catch (err) {
+    console.warn(`${LOG} alarm ${alarm.name} failed:`, err);
   }
 });
+
+/** Evaluate every block rule across every active thread. Extracted from the
+ *  alarm handler so it can be tested / invoked on-demand. */
+async function runPeriodicBlockRules(): Promise<void> {
+  const rules = await getAllBlockRules();
+  if (!rules.length) return;
+  const summaries = await getThreadSummaries({});
+  for (const s of summaries) {
+    const messages = await getMessagesByContact(s.contactId, { limit: 50 });
+    const meta = await getThreadMeta(s.contactId);
+    const actions = evaluateRules(rules, messages, meta);
+    for (const { rule, action } of actions) {
+      console.log(`${LOG} Periodic block rule "${rule.name}" → ${action} on ${s.contactId}`);
+      await executeAction(s.contactId, s.platform, action, rule._id);
+    }
+  }
+}
 
 async function processReminders(): Promise<void> {
   const reminders = await getReminders({ upcoming: true });
@@ -1982,17 +2161,30 @@ async function startDevAutoReload(): Promise<void> {
 }
 startDevAutoReload().catch(() => {});
 
-// Ensure Global Chat contact always exists (runs on every SW startup)
-upsertContact({
-  id: 'sniffies:global-chat',
-  platform: 'sniffies',
-  platformUserId: 'global-chat',
-  displayName: '🌐 Global Chat',
-  profileUrl: 'https://sniffies.com/global-chat',
-  avatarUrl: '',
-  lastSeen: new Date().toISOString(),
-  metadata: { isGlobalChat: true },
-}).catch(() => {});
+// Ensure Global Chat contact always exists. Runs on every SW wakeup but
+// is guarded by a getContact() check so we skip the PouchDB write when it's
+// already there (which is the common case after first install). Previously
+// this ran unconditionally on every wakeup, hitting both the disk and the
+// upsertContacts fast-path. One extra O(1) read in exchange for skipping
+// an O(1) write — net-positive because the write triggers a rev bump.
+(async () => {
+  try {
+    const existing = await getContact('contact:sniffies:global-chat');
+    if (existing) return;
+    await upsertContact({
+      id: 'sniffies:global-chat',
+      platform: 'sniffies',
+      platformUserId: 'global-chat',
+      displayName: '🌐 Global Chat',
+      profileUrl: 'https://sniffies.com/global-chat',
+      avatarUrl: '',
+      lastSeen: new Date().toISOString(),
+      metadata: { isGlobalChat: true },
+    });
+  } catch {
+    /* swallowed — the seed is a best-effort convenience, not critical */
+  }
+})();
 
 // Open side panel when extension icon is clicked
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -2067,8 +2259,31 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
 // ── Auto-Train Preference Model from Platform Signals ──────────────────────
 // Scans thread metadata for signals (pins, favorites, blocks, ratings) and
 // feeds them to the ML preference model as training data.
-
+//
+// `autoTrainedSet` tracks which contacts have already been trained during the
+// current service-worker lifetime so a periodic scan doesn't feed the model
+// the same sample repeatedly. It is capped so long-running SWs (days) on
+// heavy accounts don't accumulate tens of thousands of entries in RAM.
+const AUTO_TRAIN_SET_CAP = 10_000;
 const autoTrainedSet = new Set<string>(); // contacts already auto-trained this session
+
+/**
+ * Add a contact to `autoTrainedSet` with bounded memory growth.
+ * When the set exceeds AUTO_TRAIN_SET_CAP, drop the oldest 20% of entries
+ * (JS Set preserves insertion order, so `values()` gives us FIFO eviction).
+ */
+function markAutoTrained(contactId: string): void {
+  autoTrainedSet.add(contactId);
+  if (autoTrainedSet.size > AUTO_TRAIN_SET_CAP) {
+    const toDrop = Math.floor(AUTO_TRAIN_SET_CAP * 0.2);
+    const iter = autoTrainedSet.values();
+    for (let i = 0; i < toDrop; i++) {
+      const next = iter.next();
+      if (next.done) break;
+      autoTrainedSet.delete(next.value);
+    }
+  }
+}
 
 async function autoTrainFromSignals(): Promise<{ trained: number }> {
   const enabledData = await chrome.storage.local.get('aggregaytor_auto_train_preferences');
@@ -2130,7 +2345,7 @@ async function autoTrainFromSignals(): Promise<{ trained: number }> {
       };
 
       await recordFeedback(contactId, platform, liked, features);
-      autoTrainedSet.add(contactId);
+      markAutoTrained(contactId);
       trained++;
     }
 
@@ -2171,72 +2386,70 @@ async function openAllSites(): Promise<void> {
 }
 
 // ── Grindr auto-relogin check ───────────────────────────────────────────────
+//
+// Grindr's aggressive rate limiting can silently log the user out after
+// heavy cascade browsing / block-list imports. We poll once a minute and,
+// if we detect the login screen, fire a notification and try clicking the
+// SSO button so the session recovers without the user noticing.
 
-chrome.alarms.create('grindr-login-check', { periodInMinutes: 1 }); // check every minute
+chrome.alarms.create('grindr-login-check', { periodInMinutes: 1 });
 
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name !== 'grindr-login-check') return;
-  try {
-    const tabs = await chrome.tabs.query({});
-    const grindrTab = tabs.find(t => t.url?.includes('web.grindr.com'));
-    if (!grindrTab?.id) return;
+/** Detect the Grindr login page and attempt a zero-interaction relogin.
+ *  Safe to call any time — returns quickly if no Grindr tab is open. */
+async function runGrindrLoginCheck(): Promise<void> {
+  const tabs = await chrome.tabs.query({});
+  const grindrTab = tabs.find(t => t.url?.includes('web.grindr.com'));
+  if (!grindrTab?.id) return;
 
-    // Check if Grindr is showing login page
-    const [result] = await chrome.scripting.executeScript({
-      target: { tabId: grindrTab.id },
-      func: () => {
-        // Grindr shows a login page with specific elements when logged out
-        const isLoginPage = !!document.querySelector('[data-testid="login-button"], .login-page, button[aria-label="Sign in"], [class*="login"]')
-          || document.title.toLowerCase().includes('login')
-          || document.title.toLowerCase().includes('sign in');
-        return { isLoginPage, url: location.href };
-      },
-    });
+  // Detect Grindr's login screen by DOM + title heuristics
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId: grindrTab.id },
+    func: () => {
+      const isLoginPage = !!document.querySelector('[data-testid="login-button"], .login-page, button[aria-label="Sign in"], [class*="login"]')
+        || document.title.toLowerCase().includes('login')
+        || document.title.toLowerCase().includes('sign in');
+      return { isLoginPage, url: location.href };
+    },
+  });
+  if (!result?.result?.isLoginPage) return;
 
-    if (result?.result?.isLoginPage) {
-      console.log(`${LOG} Grindr logged out detected, attempting relogin...`);
-      safeNotify('grindr-relogin', {
-        type: 'basic', iconUrl: 'icons/icon-128.png',
-        title: 'Grindr logged out',
-        message: 'Attempting to log back in via Apple Sign-In...',
-        requireInteraction: true,
-      });
+  console.log(`${LOG} Grindr logged out detected, attempting relogin...`);
+  safeNotify('grindr-relogin', {
+    type: 'basic', iconUrl: 'icons/icon-128.png',
+    title: 'Grindr logged out',
+    message: 'Attempting to log back in via Apple Sign-In...',
+    requireInteraction: true,
+  });
 
-      // Try clicking the Apple Sign-In button
-      await chrome.scripting.executeScript({
-        target: { tabId: grindrTab.id },
-        func: () => {
-          // Try multiple login button selectors — Grindr changes these
-          const selectors = [
-            // Apple Sign-In
-            'button[data-testid="apple-login"]',
-            '[aria-label*="Apple"]',
-            '[class*="apple-login"]',
-            'button:has(svg[class*="apple"])',
-            // Google Sign-In
-            'button[data-testid="google-login"]',
-            '[aria-label*="Google"]',
-            '[class*="google-login"]',
-            // Generic sign-in
-            'button[data-testid="login-button"]',
-            'a[href*="login"]',
-            'button[class*="sign-in"]',
-            'button[class*="login"]',
-          ];
-          for (const sel of selectors) {
-            const btn = document.querySelector<HTMLElement>(sel);
-            if (btn) { btn.click(); return `clicked: ${sel}`; }
-          }
-          // Last resort: just reload the page — sometimes clears the logout state
-          location.reload();
-          return 'reloaded';
-        },
-      });
-    }
-  } catch (err) {
-    // Tab might not be accessible (e.g., chrome:// page)
-  }
-});
+  // Try clicking SSO buttons. Grindr rotates these selectors often; order by
+  // preference (Apple first since that's what most accounts use).
+  await chrome.scripting.executeScript({
+    target: { tabId: grindrTab.id },
+    func: () => {
+      const selectors = [
+        'button[data-testid="apple-login"]',
+        '[aria-label*="Apple"]',
+        '[class*="apple-login"]',
+        'button:has(svg[class*="apple"])',
+        'button[data-testid="google-login"]',
+        '[aria-label*="Google"]',
+        '[class*="google-login"]',
+        'button[data-testid="login-button"]',
+        'a[href*="login"]',
+        'button[class*="sign-in"]',
+        'button[class*="login"]',
+      ];
+      for (const sel of selectors) {
+        const btn = document.querySelector<HTMLElement>(sel);
+        if (btn) { btn.click(); return `clicked: ${sel}`; }
+      }
+      // Last resort — a full reload sometimes clears the logout banner
+      location.reload();
+      return 'reloaded';
+    },
+  });
+}
+
 chrome.alarms.create('block-rule-check', { periodInMinutes: 5 });
 chrome.alarms.create('task-sync', { periodInMinutes: 5 });
 console.log(`${LOG} Service worker ready`);

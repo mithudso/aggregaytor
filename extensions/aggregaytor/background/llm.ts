@@ -56,20 +56,32 @@ const PROVIDER_RPM: Record<string, number> = {
   copilot: 10,      // No public API — community proxy only, rate undisclosed
 };
 
-// Per-provider request tracking for proactive cycling
+// Per-provider request tracking for proactive cycling.
+//
+// `providerRequestCounts` stores a rolling window of request timestamps per
+// provider. Entries older than 60s are dropped on every read so the array
+// never grows unbounded on sustained heavy use. A hard ceiling is enforced
+// defensively in case a provider is hit more than the soft-cap in 60s.
 const providerRequestCounts = new Map<string, number[]>();
+const PROVIDER_TS_HARD_CAP = 2000;
 
 function getProviderRPMUsed(provider: string): number {
   const now = Date.now();
   const timestamps = providerRequestCounts.get(provider) || [];
   const recent = timestamps.filter(t => now - t < 60_000);
-  providerRequestCounts.set(provider, recent);
+  if (recent.length !== timestamps.length) providerRequestCounts.set(provider, recent);
   return recent.length;
 }
 
 function recordProviderRequest(provider: string): void {
   const timestamps = providerRequestCounts.get(provider) || [];
   timestamps.push(Date.now());
+  // Defensive ceiling: if we somehow record thousands of requests within 60s
+  // (bug or very high-RPM paid tier) the array could balloon. Trim to keep
+  // memory bounded; the RPM calculation still uses the 60s filter below.
+  if (timestamps.length > PROVIDER_TS_HARD_CAP) {
+    timestamps.splice(0, timestamps.length - PROVIDER_TS_HARD_CAP);
+  }
   providerRequestCounts.set(provider, timestamps);
 }
 
@@ -194,10 +206,19 @@ async function processQueue(): Promise<void> {
 
     // Check rate limit
     if (isRateLimited(rateSettings.maxRequestsPerMinute)) {
-      // Drop background requests that have been queued — they can retry later
-      const dropped = requestQueue.filter(r => FEATURE_PRIORITY[r.feature] !== 'interactive');
+      // Drop background requests that have been queued — they can retry later.
+      // Previous implementation: O(n²) — `filter` to find droppable then
+      // `splice(indexOf())` to remove each. Now a single in-place partition:
+      // keep interactive requests, reject the rest.
+      const keep: QueuedRequest[] = [];
+      const dropped: QueuedRequest[] = [];
+      for (const r of requestQueue) {
+        if (FEATURE_PRIORITY[r.feature] === 'interactive') keep.push(r);
+        else dropped.push(r);
+      }
+      requestQueue.length = 0;
+      for (const r of keep) requestQueue.push(r);
       for (const d of dropped) {
-        requestQueue.splice(requestQueue.indexOf(d), 1);
         d.reject(new Error('Rate limited — background request dropped'));
       }
 
@@ -639,8 +660,13 @@ function buildConversationContext(messages: Message[], contactName: string, feat
   }).join('\n');
 }
 
-// 4. Incremental dossier extraction — only process new messages
+// 4. Incremental dossier extraction — only process new messages.
+//    Bounded at DOSSIER_TS_CAP entries so long-lived SWs on heavy accounts
+//    don't accumulate an entry per contact forever. When the cap is hit,
+//    the oldest ~20% of entries are dropped (JS Map preserves insertion
+//    order, so iterating `keys()` gives us FIFO eviction).
 const lastDossierExtractTimestamp = new Map<string, string>();
+const DOSSIER_TS_CAP = 2000;
 
 function getNewMessagesSinceLastExtraction(contactId: string, messages: Message[]): Message[] {
   const lastTs = lastDossierExtractTimestamp.get(contactId);
@@ -649,9 +675,17 @@ function getNewMessagesSinceLastExtraction(contactId: string, messages: Message[
 }
 
 function markDossierExtracted(contactId: string, messages: Message[]): void {
-  if (messages.length) {
-    const latest = messages.reduce((a, b) => a.timestamp > b.timestamp ? a : b);
-    lastDossierExtractTimestamp.set(contactId, latest.timestamp);
+  if (!messages.length) return;
+  const latest = messages.reduce((a, b) => a.timestamp > b.timestamp ? a : b);
+  lastDossierExtractTimestamp.set(contactId, latest.timestamp);
+  if (lastDossierExtractTimestamp.size > DOSSIER_TS_CAP) {
+    const toDrop = Math.floor(DOSSIER_TS_CAP * 0.2);
+    const iter = lastDossierExtractTimestamp.keys();
+    for (let i = 0; i < toDrop; i++) {
+      const next = iter.next();
+      if (next.done) break;
+      lastDossierExtractTimestamp.delete(next.value);
+    }
   }
 }
 
@@ -730,7 +764,46 @@ let totalCacheHits = 0;
 let totalApiCalls = 0;
 
 export function getLLMOptimizationStats() {
-  return { totalTokensSaved, totalCacheHits, totalApiCalls, cacheSize: responseCache.size, coalescedRequests: totalCoalesced };
+  return {
+    totalTokensSaved, totalCacheHits, totalApiCalls,
+    cacheSize: responseCache.size,
+    coalescedRequests: totalCoalesced,
+    // Surface the bounded-map sizes too so the settings UI can show the
+    // user how much memory the LLM subsystem is holding on to.
+    summaryCacheSize: conversationSummaryCache.size,
+    dossierTimestampSize: lastDossierExtractTimestamp.size,
+    providerTrackerSize: providerRequestCounts.size,
+  };
+}
+
+/**
+ * Drop every in-memory cache the LLM subsystem owns: response cache,
+ * rolling summaries, dossier extraction cursors, and per-provider rate
+ * trackers. Counters (totalApiCalls etc.) are preserved — those are
+ * lifetime stats that are useful for debugging long-running SWs.
+ *
+ * Exposed as `CLEAR_LLM_CACHE` in the service-worker message router so the
+ * settings UI can offer a one-click "reset" without a full extension reload.
+ */
+export function clearLLMCaches(): { cleared: Record<string, number> } {
+  const cleared = {
+    responseCache: responseCache.size,
+    summaryCache: conversationSummaryCache.size,
+    dossierTimestamps: lastDossierExtractTimestamp.size,
+    providerRequestCounts: providerRequestCounts.size,
+    inflightRequests: inflightRequests.size,
+  };
+  responseCache.clear();
+  conversationSummaryCache.clear();
+  lastDossierExtractTimestamp.clear();
+  providerRequestCounts.clear();
+  // Don't clear requestTimestamps or backoffUntil — those affect live rate
+  // limiting. And `inflightRequests` clears naturally when promises resolve.
+  // We reset cachedSystemPrompt so the next call rebuilds from current
+  // personality settings (useful after a style guide refresh).
+  cachedSystemPrompt = '';
+  systemPromptHash = '';
+  return { cleared };
 }
 
 // 8. Request coalescing — dedupe concurrent identical prompts
@@ -758,9 +831,28 @@ async function coalescedCallProvider(
   }
 }
 
-// 9. Rolling conversation summary — compress old messages into a summary
+// 9. Rolling conversation summary — compress old messages into a summary.
+//    Capped at SUMMARY_CACHE_CAP entries with FIFO eviction (same pattern as
+//    lastDossierExtractTimestamp above) so the SW memory stays bounded.
 const conversationSummaryCache = new Map<string, { summary: string; messageCount: number; timestamp: number }>();
 const SUMMARY_CACHE_TTL = 10 * 60_000; // 10 min
+const SUMMARY_CACHE_CAP = 500;
+
+function setSummaryCache(
+  contactId: string,
+  entry: { summary: string; messageCount: number; timestamp: number },
+): void {
+  conversationSummaryCache.set(contactId, entry);
+  if (conversationSummaryCache.size > SUMMARY_CACHE_CAP) {
+    const toDrop = Math.floor(SUMMARY_CACHE_CAP * 0.2);
+    const iter = conversationSummaryCache.keys();
+    for (let i = 0; i < toDrop; i++) {
+      const next = iter.next();
+      if (next.done) break;
+      conversationSummaryCache.delete(next.value);
+    }
+  }
+}
 
 async function getCompactConversationContext(
   messages: Message[], contactName: string, contactId: string, feature: string,
@@ -793,7 +885,7 @@ async function getCompactConversationContext(
   const topics = extractTopics(olderMessages);
   const summary = `${olderMessages.length} earlier messages (${inCount} from them, ${outCount} from you). Topics: ${topics || 'general chat'}.`;
 
-  conversationSummaryCache.set(contactId, {
+  setSummaryCache(contactId, {
     summary, messageCount: olderMessages.length, timestamp: Date.now(),
   });
 
@@ -1376,7 +1468,13 @@ Return ONLY a JSON object with the fields you found new info for. Omit fields wi
       }
       console.log(`${LOG} Dossier extraction found ${Object.keys(result).length} fields`);
       return result;
-    } catch { return {}; }
+    } catch (parseErr) {
+      // LLM returned non-JSON — log a short preview so repeated failures
+      // stand out instead of being silently dropped. Common causes: model
+      // wrapped the JSON in a markdown code fence, or returned prose.
+      console.warn(`${LOG} Dossier JSON parse failed (${(parseErr as Error).message}): "${text.slice(0, 80).replace(/\n/g, ' ')}..."`);
+      return {};
+    }
   } catch (err) {
     console.error(`${LOG} Dossier extraction failed:`, err);
     return localDossierExtraction(messages);
