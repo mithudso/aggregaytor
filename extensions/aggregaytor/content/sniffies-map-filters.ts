@@ -176,20 +176,28 @@ function resolveMarkerRoot(el: HTMLElement): HTMLElement | null {
 }
 
 function extractIdFromElement(el: HTMLElement): string {
-  // Try background-image URL on the element or children — check both
-  // inline style AND computed style (Sniffies may set it via CSS class)
+  // 1. Background-image URL on this element or its children — cover both
+  //    inline style and computed style (Sniffies may set it via CSS class).
   const targets = [el, ...el.querySelectorAll('.marker-avatar-image, [style*="sniffiesassets"], [class*="avatar"], [class*="marker"]')];
   for (const target of targets) {
-    // Check inline style first (faster)
     let bg = (target as HTMLElement).style?.backgroundImage || '';
-    // Fall back to computed style if inline is empty
     if (!bg || !bg.includes('sniffiesassets')) {
       try { bg = getComputedStyle(target).backgroundImage || ''; } catch {}
     }
     const match = bg.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
     if (match) return match[1].toLowerCase();
   }
-  // Try <img src> for anonymous markers — Sniffies sometimes uses <img> tags
+  // 2. Walk up the ancestor chain checking for a background-image on any
+  //    parent — Sniffies sometimes renders the avatar on a wrapper.
+  let node: HTMLElement | null = el;
+  while (node && node !== document.body) {
+    let bg = (node.style?.backgroundImage) || '';
+    if (!bg) { try { bg = getComputedStyle(node).backgroundImage || ''; } catch {} }
+    const m = bg.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+    if (m) return m[1].toLowerCase();
+    node = node.parentElement;
+  }
+  // 3. <img src> for anonymous markers — Sniffies sometimes uses <img> tags.
   const imgs = el.querySelectorAll('img');
   for (const img of imgs) {
     const src = img.getAttribute('src') || '';
@@ -197,29 +205,120 @@ function extractIdFromElement(el: HTMLElement): string {
       || src.match(/\/profiles?\/([0-9a-f]{6,})/i);
     if (match) return match[1].toLowerCase();
   }
-  // Try href on any link in or near the element
+  // 4. <a href="/profile/{id}"> in or around the element.
   const link = el.querySelector('a[href*="/profile/"]') || el.closest('a[href*="/profile/"]');
   if (link) {
     const href = link.getAttribute('href') || '';
     const match = href.match(/\/profile\/([0-9a-f]{6,})/i);
     if (match) return match[1].toLowerCase();
   }
-  // Try data attributes on this element and all descendants — cover
-  // any custom attribute Sniffies might set on anonymous markers too
+  // 5. data-* attributes on this element or any descendant.
   for (const attr of ['data-profile-id', 'data-user-id', 'data-cruiser-id', 'data-pid', 'data-id']) {
     const val = el.getAttribute(attr) || el.querySelector(`[${attr}]`)?.getAttribute(attr) || '';
     if (val && /^[0-9a-f]{6,}$/i.test(val)) return val.toLowerCase();
   }
-  // Try aria-label — sometimes anonymous markers still have the ID in their label
+  // 6. .marker-container's `id` attribute — Sniffies sets this to the
+  //    profile hex ID directly (learned from the Sniffies Soft Filter
+  //    userscript 0.7.46, function getMarkerIdFromElement).
+  const container = el.closest('.marker-container') as HTMLElement | null
+    || el.querySelector('.marker-container') as HTMLElement | null;
+  if (container) {
+    const cid = container.getAttribute('id') || '';
+    if (cid && /^[0-9a-f]{6,}$/i.test(cid)) return cid.toLowerCase();
+  }
+  // 7. aria-label — sometimes anonymous markers still encode the ID.
   const aria = el.getAttribute('aria-label') || el.querySelector('[aria-label]')?.getAttribute('aria-label') || '';
   const ariaMatch = aria.match(/([0-9a-f]{16,})/i);
   if (ariaMatch) return ariaMatch[1].toLowerCase();
-  // Last resort: look for any hex-id pattern in the marker's own attributes
+  // 8. Last resort: any hex-id pattern in the marker's attribute values.
   for (const attr of Array.from(el.attributes)) {
     const m = (attr.value || '').match(/([0-9a-f]{24,})/i);
     if (m) return m[1].toLowerCase();
   }
   return '';
+}
+
+// ── MapLibre Feature Querying ──────────────────────────────────────────────
+// Adapted from the Sniffies Soft Filter userscript (0.7.46). When an anonymous
+// marker has no extractable ID from the DOM, we can still resolve it by asking
+// the MapLibre map instance what feature is rendered at a given screen point —
+// the feature's properties always contain the profile ID, regardless of whether
+// the marker has a picture or not.
+
+let cachedMap: { getCanvas(): HTMLCanvasElement; queryRenderedFeatures(pt: [number, number]): any[] } | null = null;
+
+function findMap(): typeof cachedMap {
+  if (cachedMap && typeof cachedMap.getCanvas === 'function') return cachedMap;
+  const canvas = document.querySelector<HTMLCanvasElement>('.maplibregl-canvas');
+  if (!canvas) return null;
+  const w = window as any;
+  const candidates = [
+    w.map, w._map, w.__map,
+    w.SNIFFIES?.map, w.SNIFFIES?.mapInstance,
+    w.SNIFFIES?.mapService?.map, w.SNIFFIES?.mapService?.mapInstance,
+  ].filter(Boolean);
+  for (const c of candidates) {
+    try {
+      if (c.getCanvas && c.queryRenderedFeatures && c.getCanvas() === canvas) {
+        cachedMap = c; return c;
+      }
+    } catch {}
+  }
+  // Last-resort: scan window for any object exposing a MapLibre-shaped API
+  // that owns the same canvas.
+  try {
+    for (const k in w) {
+      const v = w[k];
+      if (v && typeof v === 'object' && typeof v.getCanvas === 'function' && typeof v.queryRenderedFeatures === 'function') {
+        try { if (v.getCanvas() === canvas) { cachedMap = v; return v; } } catch {}
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function extractIdFromFeature(feature: any): string {
+  if (!feature) return '';
+  const candidates: unknown[] = [];
+  if (feature.id) candidates.push(feature.id);
+  const p = feature.properties || {};
+  for (const k of ['_id', 'id', 'userId', 'user_id', 'profileId', 'profile_id', 'cruiserId', 'cruiser_id']) {
+    if (p[k]) candidates.push(p[k]);
+  }
+  // Fall back to scanning every property value for a hex id.
+  for (const v of Object.values(p)) candidates.push(v);
+  let best = '';
+  for (const c of candidates) {
+    if (c == null) continue;
+    const m = String(c).match(/[0-9a-f]{6,}/i);
+    if (m && m[0].length > best.length) best = m[0];
+  }
+  return best.toLowerCase();
+}
+
+/** Query the MapLibre map at a screen point and return the profile ID, if any. */
+function getIdFromMapAtPoint(clientX: number, clientY: number): string {
+  const map = findMap();
+  if (!map) return '';
+  const canvas = map.getCanvas();
+  const rect = canvas.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const y = clientY - rect.top;
+  if (x < 0 || y < 0 || x > rect.width || y > rect.height) return '';
+  let feats: any[] = [];
+  try { feats = map.queryRenderedFeatures([x, y]) || []; } catch { return ''; }
+  for (const f of feats) {
+    const id = extractIdFromFeature(f);
+    if (id) return id;
+  }
+  return '';
+}
+
+/** Try to resolve a marker element's ID via MapLibre by using its centre point. */
+function tryIdFromMapForMarker(marker: HTMLElement): string {
+  const rect = marker.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) return '';
+  return getIdFromMapAtPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
 }
 
 function scanMarkers(): void {
@@ -480,47 +579,23 @@ function blockById(id: string, marker: HTMLElement | null): void {
 }
 
 /**
- * Block a marker whose ID couldn't be extracted from the DOM (e.g. anonymous
- * profiles without a picture). Strategy: click the marker to trigger the
- * Sniffies SPA to open the profile, wait for the URL to change to /profile/{id},
- * read the ID from there, then navigate back to the map.
+ * Resolve a profile ID from a marker using every available strategy,
+ * in order of preference:
+ *   1. DOM-based extraction (background-image, href, data-*, container id)
+ *   2. MapLibre queryRenderedFeatures() at the marker's centre point
+ * This is the approach used by the original Sniffies Soft Filter userscript
+ * (v0.7.46) — anonymous/no-picture markers are always resolvable via
+ * MapLibre's feature query as long as the map instance is discoverable.
  */
-async function blockAnonymousMarker(marker: HTMLElement): Promise<void> {
-  const startUrl = location.href;
-  // Prefer clicking a child that's likely the interactive handle; fall back
-  // to the marker root. Use a real MouseEvent so the SPA's click handlers fire.
-  const clickTarget = (marker.querySelector('.marker-avatar, .marker-container, img, div') as HTMLElement) || marker;
-  clickTarget.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-
-  // Poll for up to 2.5s for the URL to change to a profile path
-  const deadline = Date.now() + 2500;
-  let extractedId = '';
-  while (Date.now() < deadline) {
-    const href = location.href;
-    if (href !== startUrl) {
-      const m = href.match(/\/profile\/([0-9a-f]{6,})/i);
-      if (m) { extractedId = m[1].toLowerCase(); break; }
-    }
-    await new Promise(r => setTimeout(r, 80));
+function resolveMarkerId(marker: HTMLElement, clientX?: number, clientY?: number): string {
+  const fromDom = extractIdFromElement(marker);
+  if (fromDom) return fromDom;
+  // Prefer the click's exact coords when available (more accurate than centre).
+  if (typeof clientX === 'number' && typeof clientY === 'number') {
+    const fromPoint = getIdFromMapAtPoint(clientX, clientY);
+    if (fromPoint) return fromPoint;
   }
-
-  if (!extractedId) {
-    console.warn('[Aggregaytor:MapFilters] Could not resolve anonymous marker ID — click did not navigate to a profile');
-    return;
-  }
-
-  // Block it. The marker on the map may not be present right now (we're on
-  // the profile view), so applyFilters() will re-apply HIDE_CLASS when the
-  // map re-renders after we go back.
-  blockById(extractedId, null);
-
-  // Return to the map so the user sees the marker has been hidden.
-  if (window.history.length > 1) window.history.back();
-  else window.location.href = 'https://sniffies.com/';
-
-  // Re-scan after a short delay once the SPA restores the map view.
-  setTimeout(applyFilters, 600);
-  setTimeout(applyFilters, 1500);
+  return tryIdFromMapForMarker(marker);
 }
 
 function setupClickHandlers(): void {
@@ -554,47 +629,36 @@ function setupClickHandlers(): void {
       return;
     }
 
-    // On map marker → quick-hide
+    // On map marker → quick-hide. resolveMarkerId falls back to MapLibre's
+    // queryRenderedFeatures when the DOM has no extractable ID (anonymous
+    // profiles without a picture).
     if (!marker) return;
-    const id = extractIdFromElement(marker);
+    const id = resolveMarkerId(marker, e.clientX, e.clientY);
+    if (!id) return;
 
     e.preventDefault();
     e.stopPropagation();
-
-    if (id) {
-      // Identified marker — block immediately
-      blockById(id, marker);
-    } else {
-      // Anonymous marker (no picture / no extractable ID): click the marker
-      // to open the profile page, read the ID from the URL after the SPA
-      // navigates, block it, then return to the map.
-      blockAnonymousMarker(marker).catch(() => {});
-    }
+    blockById(id, marker);
   }, true);
 
-  // Shift+click on map marker = toggle block
+  // Shift+click on map marker = toggle block (works on anonymous markers too)
   document.addEventListener('click', (e) => {
     if (!e.shiftKey) return;
     const marker = resolveMarkerRoot(e.target as HTMLElement);
     if (!marker) return;
-    const id = extractIdFromElement(marker);
+    const id = resolveMarkerId(marker, e.clientX, e.clientY);
+    if (!id) return;
 
     e.preventDefault();
     e.stopPropagation();
-
-    if (id) {
-      if (settings.blockedIds.has(id)) {
-        settings.blockedIds.delete(id);
-        marker.classList.remove(HIDE_CLASS);
-      } else {
-        settings.blockedIds.add(id);
-        marker.classList.add(HIDE_CLASS);
-      }
-      saveBlockedIds();
+    if (settings.blockedIds.has(id)) {
+      settings.blockedIds.delete(id);
+      marker.classList.remove(HIDE_CLASS);
     } else {
-      // Anonymous marker — same click-to-resolve fallback as middle-click
-      blockAnonymousMarker(marker).catch(() => {});
+      settings.blockedIds.add(id);
+      marker.classList.add(HIDE_CLASS);
     }
+    saveBlockedIds();
   }, true);
 }
 
