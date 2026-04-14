@@ -39,7 +39,27 @@ chrome.storage.local.get(['aggregaytor_timestamp_format', 'aggregaytor_auto_navi
   prefTimestampAbsolute = result.aggregaytor_timestamp_format === 'absolute';
   prefAutoNavigate = result.aggregaytor_auto_navigate !== false;
   prefToolbarMode = result.aggregaytor_toolbar_mode || 'icon';
+  applyInboxToolbarMode();
 });
+
+/**
+ * Rewrite the inbox top-bar buttons (⚡⧉☑📷🖼🔄⚙) according to the current
+ * toolbar-display preference. Each button carries its icon + label in
+ * data-icon / data-label attributes so we can flip modes without losing
+ * either piece. Call this after load AND whenever the mode changes.
+ */
+function applyInboxToolbarMode() {
+  const mode = prefToolbarMode || 'icon';
+  document.querySelectorAll('.header-settings[data-icon][data-label]').forEach((btn) => {
+    const icon = btn.getAttribute('data-icon') || '';
+    const label = btn.getAttribute('data-label') || '';
+    if (mode === 'text') btn.textContent = label;
+    else if (mode === 'icon-text') btn.textContent = `${icon} ${label}`;
+    else btn.textContent = icon;
+    btn.classList.toggle('header-settings-text', mode === 'text');
+    btn.classList.toggle('header-settings-icon-text', mode === 'icon-text');
+  });
+}
 
 // ── Global image error handler ──────────────────────────────────────────────
 document.addEventListener('error', (e) => {
@@ -1920,8 +1940,10 @@ document.getElementById('sp-auto-navigate').addEventListener('change', (e) => {
 });
 document.getElementById('sp-toolbar-mode')?.addEventListener('change', (e) => {
   const mode = e.target.value;
+  prefToolbarMode = mode;
   chrome.storage.local.set({ aggregaytor_toolbar_mode: mode });
-  if (currentThread) renderHeaderActions(); // re-render toolbar with new mode
+  applyInboxToolbarMode(); // rewrite inbox top-bar icons/labels
+  if (currentThread) renderHeaderActions(); // re-render thread-view toolbar
 });
 
 // Hotkey help button in settings

@@ -96,8 +96,16 @@ body {
 .header-actions { display: none; gap: 2px; flex-shrink: 0; }
 .header-settings {
   background: none; border: none; color: #6b7280; font-size: 16px; cursor: pointer; padding: 2px 4px;
+  white-space: nowrap; line-height: 1.2;
 }
 .header-settings:hover { color: #e7e9ea; }
+.header-settings-icon-text, .header-settings-text {
+  font-size: 11px; padding: 3px 6px; border-radius: 4px;
+  border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03);
+}
+.header-settings-icon-text:hover, .header-settings-text:hover {
+  background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.15);
+}
 
 /* ── Search ── */
 .search-bar {
