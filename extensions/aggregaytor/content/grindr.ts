@@ -367,8 +367,13 @@ function removeBlockedCardFromDom(profileId: string): void {
 /** Attempt a single block/hide call. Returns {ok, status, sessionDead}. */
 async function attemptBlock(profileId: string, auth: Record<string, string>): Promise<{ ok: boolean; status: number; sessionDead: boolean }> {
   try {
+    // credentials: 'include' is critical — Grindr's session cookies must be
+    // sent alongside any Authorization header, otherwise the API rejects
+    // even a valid bearer token with a 401. This was silently broken in the
+    // v0.57.0 rewrite and is why middle-click appeared to stop working.
     const res = await fetch(`https://web.grindr.com/api/v1/me/hides/${profileId}`, {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json', ...auth },
     });
     if (res.ok) return { ok: true, status: res.status, sessionDead: false };
@@ -377,6 +382,7 @@ async function attemptBlock(profileId: string, auth: Record<string, string>): Pr
     // Fallback to block API
     const b = await fetch(`https://web.grindr.com/api/v3/me/blocks/${profileId}`, {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json', ...auth },
     });
     if (b.ok) return { ok: true, status: b.status, sessionDead: false };
@@ -397,10 +403,17 @@ async function processBlockQueue(): Promise<void> {
       const waitMs = Math.max(0, blockBackoffUntil - Date.now());
       if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs));
 
-      // Session dead? stop until it's revived
+      // Session dead? We used to hard-break here, which meant any single
+      // stale 401 (e.g. from a mid-run enrichment pass) permanently paused
+      // middle-click blocking until the user saved credentials and got
+      // auto-logged back in. That was a footgun — often the session
+      // wasn't actually dead and a retry would have worked. Now: try once
+      // more with fresh auth; if it works, clear the flag and carry on.
       if (blockSessionDead) {
-        console.warn(`${LOG} Block queue paused — session dead. ${blockQueue.length} queued.`);
-        break;
+        console.log(`${LOG} Session-dead flag set; trying one canary call to see if it's actually dead.`);
+        // Fall through into the normal call path below — if it 401s again
+        // the dead flag stays set and we'll break; if it works, the ok
+        // branch clears it.
       }
 
       // Rolling-hour cap
@@ -420,9 +433,23 @@ async function processBlockQueue(): Promise<void> {
       const profileId = blockQueue.shift()!;
       const auth = getCapturedAuth('grindr.com');
       if (!auth) {
-        console.warn(`${LOG} No captured auth — waiting for page to issue an API call first`);
-        showGrindrToast('Grindr auth not yet captured. Browse a bit then try again.', 'warn');
-        break;
+        // Don't drop the click. Put the id BACK on the queue and wait for
+        // the adapter to capture auth from Grindr's own traffic. We poll
+        // once per second and resume as soon as it's available.
+        blockQueue.unshift(profileId);
+        console.warn(`${LOG} No captured auth yet — waiting for page to issue an API call. ${blockQueue.length} queued.`);
+        showGrindrToast('Capturing Grindr auth… (scroll the cascade)', 'warn');
+        // Poll for up to 60s
+        let waited = 0;
+        while (waited < 60_000 && !getCapturedAuth('grindr.com')) {
+          await new Promise(r => setTimeout(r, 1000));
+          waited += 1000;
+        }
+        if (!getCapturedAuth('grindr.com')) {
+          console.warn(`${LOG} Gave up after 60s of no auth capture; queue retained for next time.`);
+          break;
+        }
+        continue; // loop around and try again with fresh auth
       }
 
       const result = await attemptBlock(profileId, auth);
@@ -432,6 +459,14 @@ async function processBlockQueue(): Promise<void> {
         console.log(`${LOG} Hide/block ok for ${profileId}`);
         sendToBridge({ type: 'PROFILE_BLOCKED', contactId: `grindr:${profileId}`, platform: 'grindr' });
         removeBlockedCardFromDom(profileId);
+        // Any successful call proves the session is alive — clear the
+        // dead-session flag so a previous stale 401 doesn't keep
+        // blocking the queue forever.
+        if (blockSessionDead) {
+          console.log(`${LOG} Canary succeeded — clearing session-dead flag.`);
+          blockSessionDead = false;
+          blockBackoffUntil = 0;
+        }
       } else if (result.sessionDead) {
         blockSessionDead = true;
         // Put this profileId back on the queue so we retry after session recovery
@@ -484,6 +519,17 @@ window.addEventListener('__aggregaytor_block_profile', ((event: CustomEvent) => 
 
   enqueueBlock(profileId);
 }) as EventListener);
+
+// Manual recovery hook — from DevTools console on the Grindr tab:
+//   __aggregaytor_grindr_reset_queue()
+// Use when you KNOW you're logged in but the queue got wedged thinking
+// the session was dead. Clears all gating state and re-kicks processing.
+(window as any).__aggregaytor_grindr_reset_queue = function(): void {
+  console.log(`${LOG} Manual reset: clearing session-dead flag & backoff. ${blockQueue.length} queued.`);
+  blockSessionDead = false;
+  blockBackoffUntil = 0;
+  processBlockQueue();
+};
 
 // Expose a settings-update hook so the side panel / settings UI can flip
 // localOnlyHide and the rate-limit parameters at runtime.
