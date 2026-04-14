@@ -1222,55 +1222,101 @@ async function handleMessage(msg: any): Promise<any> {
             world: 'MAIN',
             args: [chunk],
             func: async (batch: string[]) => {
-              // Grindr auth discovery (same pattern as BULK_TRAIN import).
-              const findGrindrAuth = (): string => {
-                const keys = ['authToken', 'auth-token', 'grindrAuthToken', 'session', 'grindrSession', 'accessToken', 'token'];
-                for (const k of keys) {
-                  const v = localStorage.getItem(k);
-                  if (v && v.length > 20 && !v.startsWith('{')) return v;
-                }
-                for (let i = 0; i < localStorage.length; i++) {
-                  const k = localStorage.key(i) || '';
-                  const v = localStorage.getItem(k) || '';
-                  if (/^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$/.test(v)) return v;
-                  if (v.startsWith('{')) {
-                    try {
-                      const obj = JSON.parse(v);
-                      const t = obj.authToken || obj.accessToken || obj.token || obj.session?.authToken;
-                      if (t && String(t).length > 20) return String(t);
-                    } catch {}
+              // PRIMARY auth source: the grindr.ts adapter already captures
+              // live Authorization headers from Grindr's own network traffic
+              // and exposes them via window.__aggregaytor_get_grindr_auth().
+              // This avoids re-discovering the token from scratch and always
+              // gives us the exact same header Grindr is using right now.
+              const captured = (window as any).__aggregaytor_get_grindr_auth?.() || null;
+
+              // Fallback: scan localStorage (older code path — Grindr usually
+              // doesn't store the token there, but worth trying).
+              const findTokenFromStorage = (): string => {
+                try {
+                  const keys = ['authToken', 'auth-token', 'grindrAuthToken', 'session', 'grindrSession', 'accessToken', 'token'];
+                  for (const k of keys) {
+                    const v = localStorage.getItem(k);
+                    if (v && v.length > 20 && !v.startsWith('{')) return v;
                   }
-                }
+                  for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i) || '';
+                    const v = localStorage.getItem(k) || '';
+                    if (/^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$/.test(v)) return v;
+                    if (v.startsWith('{')) {
+                      try {
+                        const obj = JSON.parse(v);
+                        const t = obj.authToken || obj.accessToken || obj.token || obj.session?.authToken;
+                        if (t && String(t).length > 20) return String(t);
+                      } catch {}
+                    }
+                  }
+                } catch {}
                 return '';
               };
-              const token = findGrindrAuth();
+
               const headers: Record<string, string> = { 'Accept': 'application/json' };
-              if (token) {
-                headers['Authorization'] = token.startsWith('Grindr3 ') || token.startsWith('Bearer ')
-                  ? token : `Grindr3 ${token}`;
+              let authSource = 'none';
+              if (captured && Object.keys(captured).length) {
+                Object.assign(headers, captured);
+                authSource = 'adapter';
+              } else {
+                const token = findTokenFromStorage();
+                if (token) {
+                  headers['Authorization'] = token.startsWith('Grindr3 ') || token.startsWith('Bearer ')
+                    ? token : `Grindr3 ${token}`;
+                  authSource = 'localStorage';
+                }
               }
-              const out: Array<{ id: string; ok: boolean; status: number; data?: any }> = [];
+              console.log('[Aggregaytor:Enrich] Auth source:', authSource,
+                'headers:', Object.keys(headers).join(','),
+                'auth value prefix:', (headers.Authorization || headers.authorization || '').slice(0, 20));
+
+              const out: Array<{ id: string; ok: boolean; status: number; data?: any; error?: string }> = [];
+              if (authSource === 'none') {
+                // No auth — fail fast so the caller knows to browse Grindr
+                // a bit first to prime the adapter's auth cache.
+                console.warn('[Aggregaytor:Enrich] No auth headers available. Browse Grindr for a few seconds to let the adapter capture the JWT, then retry.');
+                return out.concat(batch.map(id => ({ id, ok: false, status: -1, error: 'no-auth' })));
+              }
+
               for (const id of batch) {
                 try {
                   const res = await fetch(`https://web.grindr.com/api/v4/profiles/${id}`, {
                     credentials: 'include', headers,
                   });
                   if (res.status === 401 || res.status === 403) {
-                    out.push({ id, ok: false, status: res.status });
-                    break; // abort — session dead, no point continuing
+                    let body = '';
+                    try { body = (await res.text()).slice(0, 200); } catch {}
+                    console.warn(`[Aggregaytor:Enrich] ${id} → ${res.status} (auth rejected). Body:`, body);
+                    out.push({ id, ok: false, status: res.status, error: body });
+                    break; // abort the rest of the batch
                   }
-                  if (!res.ok) { out.push({ id, ok: false, status: res.status }); }
-                  else { const data = await res.json(); out.push({ id, ok: true, status: 200, data }); }
+                  if (!res.ok) {
+                    let body = '';
+                    try { body = (await res.text()).slice(0, 120); } catch {}
+                    out.push({ id, ok: false, status: res.status, error: body });
+                  } else {
+                    const data = await res.json();
+                    out.push({ id, ok: true, status: 200, data });
+                  }
                 } catch (e: any) {
-                  out.push({ id, ok: false, status: 0 });
+                  out.push({ id, ok: false, status: 0, error: String(e?.message || e) });
                 }
-                await new Promise(r => setTimeout(r, 2000)); // 2s between calls — safely under rate limit
+                await new Promise(r => setTimeout(r, 2000));
               }
               return out;
             },
           });
 
           const batchOut = (result?.result as any[]) || [];
+          // If the first batch couldn't even find auth headers, surface a
+          // distinct error so the user knows to browse Grindr (not re-login).
+          if (batchOut.length && batchOut.every(r => r.error === 'no-auth')) {
+            return {
+              ok: false,
+              error: 'No Grindr auth headers captured yet. Browse web.grindr.com for ~5 seconds (scroll the cascade, open a chat) so the adapter intercepts a live API call, then re-run Enrich Blocked.',
+            };
+          }
           for (const row of batchOut) {
             if (row.status === 401 || row.status === 403) {
               sessionDead = true;

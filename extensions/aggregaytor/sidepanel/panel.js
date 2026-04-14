@@ -2495,12 +2495,23 @@ document.getElementById('sp-enrich-blocked')?.addEventListener('click', async ()
   try {
     const res = await chrome.runtime.sendMessage({ type: 'ENRICH_BLOCKED_PROFILES' });
     if (!res?.ok) {
-      progress.style.color = '#f87171';
-      progress.textContent = 'Error: ' + (res?.error || 'unknown');
+      progress.style.color = '#fbbf24';
+      progress.textContent = res?.error || 'Unknown error';
       return;
     }
     if (res.total === 0) {
       progress.textContent = res.message || 'Nothing to enrich';
+      return;
+    }
+    // Distinguish "enrichment ran but Grindr kicked you" from "first call
+    // failed and aborted" (previous wording claimed logout even when the
+    // actual cause was missing auth or a bad request).
+    if (res.sessionDead && res.enriched === 0) {
+      progress.style.color = '#fbbf24';
+      progress.textContent = `Grindr returned 401/403 on the very first call. ` +
+        `Either the session is dead (reload Grindr and re-log in), ` +
+        `or the adapter hasn't captured an auth header yet (browse the cascade for a few seconds). ` +
+        `Check the service worker console for the exact response body.`;
       return;
     }
     const summary = `Enriched ${res.enriched}/${res.total} profiles (${res.failed} failed)` +

@@ -69,6 +69,15 @@ function indexProfileFromPayload(obj: Record<string, unknown>): void {
   return photoHashToProfileId.get(photoHash) || '';
 };
 
+// Expose the captured Grindr auth headers on window so the service worker
+// (running chrome.scripting.executeScript in world: 'MAIN') can read them
+// when it needs to make an authenticated API call (e.g. enrichment pass).
+// The adapter populates this via captureAuthHeaders() whenever Grindr's
+// own requests fly past our network interceptor.
+(window as any).__aggregaytor_get_grindr_auth = function(): Record<string, string> | null {
+  return getCapturedAuth('grindr.com') || null;
+};
+
 function sendToBridge(message: Record<string, unknown>): void {
   try {
     window.dispatchEvent(
