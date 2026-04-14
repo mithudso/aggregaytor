@@ -52,20 +52,46 @@ function injectHideStyles(): void {
   (document.head || document.documentElement).appendChild(style);
 }
 
+/**
+ * Walk up from a profile link to find the smallest ancestor that represents
+ * just THIS one card. The boundary is: as soon as we step into a parent that
+ * contains multiple /profile/ links, the previous node was the card. If we
+ * walk up 10 levels without ever finding a sibling profile link, we fall
+ * back to the link itself (safer than hiding a big chunk of the page).
+ *
+ * The previous implementation used class-substring selectors like
+ * [class*="user"] which match container elements like <div class="users-list">
+ * that wrap ALL profiles — one block caused the whole page to vanish.
+ */
+function findCardContainer(link: HTMLElement): HTMLElement {
+  let prev: HTMLElement = link;
+  let node: HTMLElement | null = link.parentElement;
+  let steps = 0;
+  while (node && node !== document.body && node !== document.documentElement && steps < 10) {
+    const profileLinks = node.querySelectorAll('a[href*="/profile/"]');
+    if (profileLinks.length > 1) {
+      // node contains multiple cards → prev was the card boundary
+      return prev;
+    }
+    prev = node;
+    node = node.parentElement;
+    steps += 1;
+  }
+  // Reached the top without ever seeing a sibling profile link — the whole
+  // page is about this one profile (/profile/{username} detail page). Don't
+  // hide anything big; fall back to the link.
+  return link;
+}
+
 /** Find the wrapper element for a profile card, given any descendant. */
 function resolveProfileCard(el: HTMLElement): { card: HTMLElement; username: string } | null {
   // A4A profile cards are almost always anchored on <a href="/profile/...">
-  const link = el.closest('a[href*="/profile/"]') as HTMLElement | null
-    || el.querySelector('a[href*="/profile/"]') as HTMLElement | null;
+  const link = el.closest('a[href*="/profile/"]') as HTMLElement | null;
   if (link) {
     const href = link.getAttribute('href') || '';
     const match = href.match(/\/profile\/([^/?#]+)/i);
     if (match) {
-      const username = match[1];
-      // Walk up to the enclosing card container (thumbnail wrapper, table
-      // row, list item, or any ancestor that's bigger than the link).
-      const card = (link.closest('[class*="thumb"], [class*="member"], [class*="user"], [class*="card"], [class*="tile"], tr, li') as HTMLElement) || link;
-      return { card, username };
+      return { card: findCardContainer(link), username: match[1] };
     }
   }
   // Fallback: check common data attributes
@@ -85,15 +111,35 @@ function resolveProfileCard(el: HTMLElement): { card: HTMLElement; username: str
 function applyHideFilter(): void {
   if (!blockedUsernames.size) return;
   injectHideStyles();
-  document.querySelectorAll<HTMLElement>('a[href*="/profile/"]').forEach(link => {
+  // Safety: if we'd end up hiding more profile links than we see NOT blocked,
+  // something's wrong with card detection — bail and log rather than nuking
+  // the page. This is belt-and-suspenders on top of findCardContainer.
+  const allLinks = Array.from(document.querySelectorAll<HTMLElement>('a[href*="/profile/"]'));
+  const toHide: HTMLElement[] = [];
+  let matched = 0;
+  for (const link of allLinks) {
     const href = link.getAttribute('href') || '';
     const match = href.match(/\/profile\/([^/?#]+)/i);
-    if (!match) return;
+    if (!match) continue;
     const username = match[1].toLowerCase();
-    if (!blockedUsernames.has(username)) return;
-    const card = link.closest('[class*="thumb"], [class*="member"], [class*="user"], [class*="card"], [class*="tile"], tr, li') || link;
-    (card as HTMLElement).classList.add(HIDE_CLASS);
-  });
+    if (!blockedUsernames.has(username)) continue;
+    matched++;
+    const card = findCardContainer(link);
+    // Sanity check: the resolved card must not contain MORE than one profile
+    // link — if it does, our walk-up got confused and we'd hide a mega-
+    // container. In that case, just hide the link itself.
+    if (card.querySelectorAll('a[href*="/profile/"]').length <= 1) {
+      toHide.push(card);
+    } else {
+      console.warn(`${LOG} Card for ${username} contained multiple profile links; falling back to link-only hide.`);
+      toHide.push(link);
+    }
+  }
+  if (matched && toHide.length === 0) {
+    console.warn(`${LOG} Hide filter found ${matched} match(es) but resolved zero safe cards — skipping.`);
+    return;
+  }
+  for (const el of toHide) el.classList.add(HIDE_CLASS);
 }
 
 function hideCard(card: HTMLElement): void {
@@ -125,6 +171,15 @@ document.addEventListener('auxclick', (e) => {
 
   const { card, username } = resolved;
   if (!username) return;
+
+  // Safety: refuse to hide a container that encloses more than one profile
+  // link. Better a missed block than a nuked page. User can re-click after
+  // we log a warning.
+  const enclosedProfileLinks = card.querySelectorAll('a[href*="/profile/"]').length;
+  if (enclosedProfileLinks > 1) {
+    console.warn(`${LOG} Middle-click refused: card for ${username} contains ${enclosedProfileLinks} profile links (would hide multiple). Pick a more specific element.`);
+    return;
+  }
 
   e.preventDefault();
   e.stopPropagation();
@@ -198,6 +253,48 @@ window.addEventListener('__aggregaytor_a4a_blocked_update', ((event: CustomEvent
   saveBlockedList();
   applyHideFilter();
 }) as EventListener);
+
+// Self-heal: if any element on the page currently has HIDE_CLASS AND contains
+// multiple profile links, it was hidden by the buggy previous version (a
+// containers-too-greedy selector). Un-hide it — applyHideFilter will then
+// re-apply proper per-card hides. Runs once on page load.
+setTimeout(() => {
+  document.querySelectorAll<HTMLElement>(`.${HIDE_CLASS}`).forEach(el => {
+    if (el.querySelectorAll('a[href*="/profile/"]').length > 1) {
+      console.log(`${LOG} Self-heal: un-hiding container with multiple profile links (left over from the v0.57.13 over-greedy hide).`);
+      el.classList.remove(HIDE_CLASS);
+      el.style.opacity = '';
+    }
+  });
+  applyHideFilter();
+}, 1000);
+
+// ── Emergency Recovery Helpers (DevTools console) ──────────────────────────
+// __aggregaytor_a4a_reset()       — clear blocklist, un-hide everything
+// __aggregaytor_a4a_unhide_all()  — un-hide currently-hidden cards but keep
+//                                    the blocklist (hide re-applies on scroll)
+// __aggregaytor_a4a_list_blocked()— print the stored blocklist
+(window as any).__aggregaytor_a4a_reset = function(): void {
+  console.log(`${LOG} Reset: clearing ${blockedUsernames.size} blocked username(s) and unhiding.`);
+  blockedUsernames.clear();
+  saveBlockedList();
+  document.querySelectorAll<HTMLElement>(`.${HIDE_CLASS}`).forEach(el => {
+    el.classList.remove(HIDE_CLASS);
+    el.style.opacity = '';
+  });
+};
+(window as any).__aggregaytor_a4a_unhide_all = function(): void {
+  document.querySelectorAll<HTMLElement>(`.${HIDE_CLASS}`).forEach(el => {
+    el.classList.remove(HIDE_CLASS);
+    el.style.opacity = '';
+  });
+  console.log(`${LOG} All hidden cards revealed. Blocklist unchanged (${blockedUsernames.size} entries).`);
+};
+(window as any).__aggregaytor_a4a_list_blocked = function(): string[] {
+  const list = [...blockedUsernames].sort();
+  console.log(`${LOG} ${list.length} blocked username(s):`, list);
+  return list;
+};
 
 // Relay MAIN world adapter events to service worker
 window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
