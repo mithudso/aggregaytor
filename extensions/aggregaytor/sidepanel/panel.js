@@ -2536,7 +2536,14 @@ function renderEnrichState(state) {
   }
   progress.style.display = 'block';
   const pct = state.total ? Math.round((state.processed / state.total) * 100) : 0;
-  const base = `${state.processed}/${state.total} (${pct}%) — ${state.enriched} enriched, ${state.failed} failed`;
+  // Show the honest breakdown: enriched-with-features vs empty-shell
+  // responses vs network failures. Previous version conflated all three
+  // into "enriched", which is why the total appeared to keep growing
+  // (empty-shell responses re-entered the needs-enrich pool each tick).
+  const noFeat = state.noFeatures || 0;
+  const base = noFeat > 0
+    ? `${state.processed}/${state.total} (${pct}%) — ${state.enriched} with features, ${noFeat} empty shell, ${state.failed} failed`
+    : `${state.processed}/${state.total} (${pct}%) — ${state.enriched} enriched, ${state.failed} failed`;
   if (state.status === 'paused') {
     progress.style.color = '#fbbf24';
     const reasonMsg = {

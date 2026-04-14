@@ -1403,6 +1403,7 @@ async function handleMessage(msg: any): Promise<any> {
           total: resumable ? (state.total || remaining) : remaining,
           processed: resumable ? state.processed : 0,
           enriched: resumable ? state.enriched : 0,
+          noFeatures: resumable ? (state.noFeatures || 0) : 0,
           failed: resumable ? state.failed : 0,
           startedAt: resumable ? state.startedAt : Date.now(),
           lastTickAt: Date.now(),
@@ -2521,16 +2522,36 @@ interface EnrichState {
   pauseReason: EnrichPauseReason;
   total: number;
   processed: number;
-  enriched: number;
-  failed: number;
+  enriched: number;       // got useful features back from the platform
+  noFeatures: number;     // 200 OK but the response had no features to extract
+  failed: number;         // network error / non-200 / parse error
   startedAt: number;
   lastTickAt: number;
   lastError: string | null;
 }
 const DEFAULT_ENRICH_STATE: EnrichState = {
   status: 'idle', platform: 'grindr', pauseReason: null, total: 0, processed: 0, enriched: 0,
-  failed: 0, startedAt: 0, lastTickAt: 0, lastError: null,
+  noFeatures: 0, failed: 0, startedAt: 0, lastTickAt: 0, lastError: null,
 };
+
+/** Stamp enrichmentAttempted=true on a contact so the needs-enrich filter
+ *  stops selecting it. Used on failure paths where we can't extract features
+ *  but also don't want to loop on the same dead ID. */
+async function markEnrichmentAttempted(cid: string, platform: Platform): Promise<void> {
+  try {
+    const existing = await getContact(`contact:${cid}`);
+    if (!existing) return;
+    await upsertContact({
+      id: cid, platform,
+      platformUserId: cid.replace(/^[a-z]+:/, ''),
+      displayName: existing.displayName || '',
+      profileUrl: existing.profileUrl || '',
+      avatarUrl: existing.avatarUrl || '',
+      lastSeen: existing.lastSeen || new Date().toISOString(),
+      metadata: { ...(existing.metadata || {}), enrichmentAttempted: true, enrichmentGotFeatures: false },
+    });
+  } catch {}
+}
 const ENRICH_STORAGE_KEY = 'aggregaytor_enrich_blocked_state';
 // 40 profiles per tick × ~1.3s per call = ~52s of work per minute, leaving
 // an ~8s buffer before the next alarm. That gives 40/min = 2400/hour, which
@@ -2745,13 +2766,15 @@ async function runEnrichTick(): Promise<void> {
           idPrefix: 'sniffies:',
           isThin: (c: any) => {
             const md = c.metadata || {};
-            // Sniffies "thin" = no real discriminating features. We already
-            // have md.isBlocked or md.isPinned as the training signal; need
-            // ANY of the feature fields to be present.
             const hasFeatures = md.bodyType || md.position || md.age || md.ethnicity
               || md.height || md.profileText || md.aboutMe || md.lookingFor;
             const hasBlockOrPin = md.isBlocked || md.isPinned;
-            return hasBlockOrPin && !hasFeatures;
+            // md.enrichmentAttempted === true means we've already tried the
+            // platform's profile endpoint for this id and it came back with
+            // nothing useful. Don't re-try it — otherwise the total keeps
+            // growing forever as Grindr/Sniffies refuse to return features
+            // for blocked profiles on each attempt.
+            return hasBlockOrPin && !hasFeatures && !md.enrichmentAttempted;
           },
         }
       : {
@@ -2763,7 +2786,7 @@ async function runEnrichTick(): Promise<void> {
             const md = c.metadata || {};
             const hasFeatures = md.bodyType || md.position || md.age || md.ethnicity
               || md.height || md.profileText || md.aboutMe || c.avatarUrl;
-            return md.isBlocked && !hasFeatures;
+            return md.isBlocked && !hasFeatures && !md.enrichmentAttempted;
           },
         };
 
@@ -2808,6 +2831,7 @@ async function runEnrichTick(): Promise<void> {
     }
 
     let enriched = state.enriched, failed = state.failed, processed = state.processed;
+    let noFeatures = state.noFeatures || 0;
     let sessionDead = false;
     for (const row of (payload.results || [])) {
       if (row.status === 401 || row.status === 403) {
@@ -2815,17 +2839,44 @@ async function runEnrichTick(): Promise<void> {
         break;
       }
       processed++;
-      if (!row.ok || !row.data) { failed++; continue; }
+      if (!row.ok || !row.data) {
+        failed++;
+        // Still mark it attempted so we don't loop on the same dead id.
+        await markEnrichmentAttempted(`${platformCfg.idPrefix}${row.id}`, platform as Platform);
+        continue;
+      }
 
       const md: any = (platform === 'sniffies')
         ? extractSniffiesMetadata(row.data)
         : extractGrindrMetadata(row.data);
-      if (!md) { failed++; continue; }
+      if (!md) {
+        failed++;
+        await markEnrichmentAttempted(`${platformCfg.idPrefix}${row.id}`, platform as Platform);
+        continue;
+      }
+
+      // Did we actually get training-useful features from this response? Some
+      // platforms strip attributes for blocked users on direct fetch even
+      // though they return 200 OK. Count those as "attempted but no features"
+      // (noFeatures++) rather than inflating the enriched count.
+      const gotFeatures = !!(md.bodyType || md.position || md.age || md.ethnicity
+        || md.height || md.profileText || md.aboutMe || md.lookingFor);
 
       try {
         const existing = await getContact(`${platformCfg.contactPrefix}${row.id}`);
         let avatarUrl = md.__avatarUrl || '';
         delete md.__avatarUrl;
+        // CRITICAL: stamp enrichmentAttempted so this contact drops out of
+        // the needs-enrich pool regardless of whether we got real features
+        // or an empty shell. Previous version re-selected the same "enriched"
+        // contacts every tick forever because Grindr sometimes returns 200
+        // with near-empty profile data for blocked users.
+        const mergedMd = {
+          ...(existing?.metadata || {}),
+          ...md,
+          enrichmentAttempted: true,
+          enrichmentGotFeatures: gotFeatures,
+        };
         await upsertContact({
           id: `${platformCfg.idPrefix}${row.id}`,
           platform: platform as Platform,
@@ -2836,23 +2887,26 @@ async function runEnrichTick(): Promise<void> {
             : `https://web.grindr.com/chat/${row.id}`),
           avatarUrl: avatarUrl || existing?.avatarUrl || '',
           lastSeen: new Date().toISOString(),
-          metadata: { ...(existing?.metadata || {}), ...md },
+          metadata: mergedMd,
         });
-        enriched++;
-      } catch { failed++; }
+        if (gotFeatures) enriched++;
+        else noFeatures++;
+      } catch {
+        failed++;
+      }
     }
 
     const nextState: EnrichState = {
       ...state,
       total: correctedTotal,
-      processed, enriched, failed,
+      processed, enriched, noFeatures, failed,
       lastTickAt: Date.now(),
       status: sessionDead ? 'paused' : 'running',
       pauseReason: sessionDead ? 'session-dead' : null,
       lastError: sessionDead ? 'Grindr returned 401/403. Waiting for you to log back in (auto-login will help if you saved credentials).' : null,
     };
     await setEnrichState(nextState);
-    console.log(`[Aggregaytor:SW] Enrich tick: +${processed - state.processed} processed (total ${processed}/${nextState.total}), ${enriched} enriched, ${failed} failed, status=${nextState.status}${sessionDead ? ' (paused)' : ''}`);
+    console.log(`[Aggregaytor:SW] Enrich tick: +${processed - state.processed} processed (total ${processed}/${nextState.total}), ${enriched} with features, ${noFeatures} empty shell, ${failed} failed, status=${nextState.status}${sessionDead ? ' (paused)' : ''}`);
   } catch (err) {
     const state = await getEnrichState();
     await setEnrichState({ ...state, status: 'paused', pauseReason: 'error', lastTickAt: Date.now(),
