@@ -898,20 +898,60 @@ async function handleMessage(msg: any): Promise<any> {
             const payload = (result?.result as any) || { results: [], debug: [] };
             const signals = payload.results || [];
             const seen = new Set<string>();
+            let skippedEmpty = 0;
+            let enrichedCount = 0;
             for (const { profileId, liked } of signals) {
               const cid = `grindr:${profileId}`;
               if (seen.has(cid)) continue;
               seen.add(cid);
               if (autoTrainedSet.has(cid)) continue;
-              await recordFeedback(cid, 'grindr', liked, {
-                bodyType: '', position: '', age: '', ethnicity: '', height: '',
-                profileTextLength: 0, profileTextKeywords: [], hasPhoto: 0,
-                photoCount: 0, distance: '', conversationLength: 0, responseRate: 0,
-              });
+
+              // Enrich features from any existing contact record the adapter
+              // captured from cascade/views/chat/profile traffic. Without this
+              // the ML model trains on blank features and learns nothing useful.
+              let features: ProfileFeatures;
+              try {
+                const contact = await getContact(`contact:grindr:${profileId}`);
+                const md = (contact?.metadata || {}) as any;
+                const hasAnyFeature =
+                  md.bodyType || md.position || md.age || md.ethnicity ||
+                  md.height || md.profileText || md.distance || (contact?.avatarUrl);
+                if (!hasAnyFeature) {
+                  // Empty shell — the block/favorite list endpoint gave us only
+                  // an id and no observable attributes. Training on this would
+                  // feed the logistic-regression model a zero-feature sample
+                  // that can't teach it anything; skip to keep signal quality
+                  // high. The user can enrich these later by browsing cascade
+                  // or opening the profiles (adapter will backfill metadata).
+                  skippedEmpty++;
+                  continue;
+                }
+                features = {
+                  bodyType: String(md.bodyType || ''),
+                  position: String(md.position || ''),
+                  age: String(md.age || ''),
+                  ethnicity: String(md.ethnicity || ''),
+                  height: String(md.height || ''),
+                  profileTextLength: String(md.profileText || md.aboutMe || md.bio || '').length,
+                  profileTextKeywords: [],
+                  hasPhoto: contact?.avatarUrl ? 1 : 0,
+                  photoCount: Array.isArray(md.photos) ? md.photos.length : 0,
+                  distance: String(md.distance || ''),
+                  conversationLength: 0,
+                  responseRate: 0,
+                };
+                enrichedCount++;
+              } catch {
+                skippedEmpty++;
+                continue;
+              }
+              await recordFeedback(cid, 'grindr', liked, features);
               autoTrainedSet.add(cid);
               trained++;
             }
-            console.log('[Aggregaytor:SW] Grindr import: received', signals.length, 'signals, trained', trained, 'new (skipped already-trained).');
+            console.log(
+              `[Aggregaytor:SW] Grindr import: ${signals.length} ids received, ${enrichedCount} trained with real features, ${skippedEmpty} skipped (empty shells — no attributes observed yet).`,
+            );
           }
           // Fallback/supplement: also scan contacts already in the database
           // that the ADAPTER flagged from natural page-load traffic (when the
@@ -963,6 +1003,71 @@ async function handleMessage(msg: any): Promise<any> {
       try {
         const result = await autoTrainFromSignals();
         return { ok: true, ...result };
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
+    case 'DIAGNOSE_TRAINING_DATA': {
+      // Audit every training sample in the database and report how many
+      // carried useful features vs. came in as empty shells. Helps answer
+      // "did my Grindr blocks actually teach the model anything?"
+      try {
+        const store = await getDB();
+        const result = await store.allDocs({
+          startkey: 'pref:',
+          endkey: 'pref:\uffff',
+          include_docs: true,
+        });
+        const buckets = {
+          total: 0,
+          grindr: { liked: 0, disliked: 0, withBody: 0, withPosition: 0, withAge: 0, withEthnicity: 0, withPhoto: 0, withProfileText: 0, empty: 0 },
+          sniffies: { liked: 0, disliked: 0, withBody: 0, withPosition: 0, withAge: 0, withEthnicity: 0, withPhoto: 0, withProfileText: 0, empty: 0 },
+          other: { liked: 0, disliked: 0, withBody: 0, withPosition: 0, withAge: 0, withEthnicity: 0, withPhoto: 0, withProfileText: 0, empty: 0 },
+        };
+        const samples: any[] = [];
+        for (const row of result.rows) {
+          const doc = row.doc as any;
+          if (!doc || doc.docType !== 'preference_feedback') continue;
+          buckets.total++;
+          const b = (buckets as any)[doc.platform] || buckets.other;
+          const f = doc.features || {};
+          if (doc.liked) b.liked++; else b.disliked++;
+          const hasBody = !!String(f.bodyType || '').trim();
+          const hasPos = !!String(f.position || '').trim();
+          const hasAge = !!String(f.age || '').trim();
+          const hasEthn = !!String(f.ethnicity || '').trim();
+          const hasPhoto = !!f.hasPhoto;
+          const hasText = (f.profileTextLength || 0) > 0;
+          if (hasBody) b.withBody++;
+          if (hasPos) b.withPosition++;
+          if (hasAge) b.withAge++;
+          if (hasEthn) b.withEthnicity++;
+          if (hasPhoto) b.withPhoto++;
+          if (hasText) b.withProfileText++;
+          if (!hasBody && !hasPos && !hasAge && !hasEthn && !hasPhoto && !hasText) b.empty++;
+          if (samples.length < 8) {
+            samples.push({
+              contactId: doc.contactId,
+              platform: doc.platform,
+              liked: doc.liked,
+              features: f,
+            });
+          }
+        }
+        const emptyRatio = (b: any) => b.liked + b.disliked > 0
+          ? Math.round((b.empty / (b.liked + b.disliked)) * 100)
+          : 0;
+        const summary = {
+          total: buckets.total,
+          grindr: { ...buckets.grindr, emptyPct: emptyRatio(buckets.grindr) },
+          sniffies: { ...buckets.sniffies, emptyPct: emptyRatio(buckets.sniffies) },
+          other: { ...buckets.other, emptyPct: emptyRatio(buckets.other) },
+          verdict: buckets.total === 0 ? 'no training data'
+            : (buckets.grindr.empty > buckets.grindr.liked + buckets.grindr.disliked - buckets.grindr.empty)
+              ? 'Most Grindr samples are EMPTY shells — the blocks list endpoint only returns IDs, no profile attributes. Run Grindr cascade browsing to enrich contacts, then Full Retrain.'
+              : 'Training data has useful features',
+          sampleSignals: samples,
+        };
+        console.log('[Aggregaytor:SW] Training data diagnostic:', summary);
+        return { ok: true, ...summary };
       } catch (err) { return { ok: false, error: (err as Error).message }; }
     }
     case 'CAPTURE_QUICK_PHRASE': {

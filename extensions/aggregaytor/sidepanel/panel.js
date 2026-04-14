@@ -2463,6 +2463,45 @@ document.getElementById('sp-retrain-model')?.addEventListener('click', async () 
   } catch (err) { status.textContent = 'Error: ' + err.message; }
 });
 
+document.getElementById('sp-diagnose-training')?.addEventListener('click', async () => {
+  const status = document.getElementById('sp-train-status');
+  status.textContent = 'Auditing training data…';
+  status.style.color = '';
+  try {
+    const r = await chrome.runtime.sendMessage({ type: 'DIAGNOSE_TRAINING_DATA' });
+    if (!r?.ok) { status.textContent = 'Error: ' + (r?.error || 'unknown'); return; }
+    const fmt = (b, label) => {
+      const total = (b.liked || 0) + (b.disliked || 0);
+      if (!total) return '';
+      return `\n${label}: ${total} samples (${b.liked}👍 ${b.disliked}👎) — ` +
+        `${b.withBody} with body, ${b.withPosition} with position, ${b.withAge} with age, ` +
+        `${b.withEthnicity} with ethnicity, ${b.withPhoto} with photo — ` +
+        `${b.empty} EMPTY (${b.emptyPct}%)`;
+    };
+    const lines = [
+      `Total: ${r.total} training samples`,
+      fmt(r.grindr, 'Grindr'),
+      fmt(r.sniffies, 'Sniffies'),
+      fmt(r.other, 'Other'),
+      `\nVerdict: ${r.verdict}`,
+    ].filter(Boolean).join('');
+    // Show the full multi-line report in a scrollable pre instead of the
+    // single-line status span — easier to read.
+    const el = document.getElementById('sp-model-stats');
+    if (el) {
+      el.textContent = lines;
+      el.style.whiteSpace = 'pre-wrap';
+      el.style.fontSize = '11px';
+    }
+    status.textContent = 'Diagnostic complete — see details above. Full samples in the service worker console.';
+    status.style.color = '#22c55e';
+    console.log('[Aggregaytor] Training data diagnostic:', r);
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+    status.style.color = '#f87171';
+  }
+});
+
 async function loadModelStats() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_MODEL_STATS' });
