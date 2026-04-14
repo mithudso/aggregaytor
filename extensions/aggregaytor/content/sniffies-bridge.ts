@@ -615,7 +615,10 @@ function showFloatingPanel(contactId: string, platform: string): void {
   // Close — hide the panel entirely (can be re-opened from side panel)
   panel.querySelector('.fp-close-btn')!.addEventListener('click', () => hideFloatingPanel());
 
-  // Block — hide the profile on Sniffies map AND mark in aggregator
+  // Block — hide the profile on Sniffies map AND mark in aggregator.
+  // When the user is viewing a profile (which is when this panel is shown),
+  // we also navigate back to the map so they get immediate visual confirmation
+  // that the marker is now hidden.
   panel.querySelector('.fp-block-btn')!.addEventListener('click', () => {
     const pid = fpContactId.replace(/^[a-z]+:/, '');
     // Use postMessage to cross the ISOLATED→MAIN world boundary.
@@ -628,6 +631,20 @@ function showFloatingPanel(contactId: string, platform: string): void {
       contactId: fpContactId,
       platform: fpPlatform,
     }).catch(() => {});
+    // Show a brief toast so the user knows the block succeeded
+    showBlockToast(pid);
+    // Navigate back to the map so the user can see the marker is hidden.
+    // Only do this if we're currently on a /profile/ URL (the typical case
+    // when the floating panel is shown on Sniffies).
+    if (location.pathname.match(/\/profile\//)) {
+      // Prefer history.back() when there's history to go back to;
+      // fall back to navigating to the root of the platform otherwise.
+      if (window.history.length > 1) {
+        window.history.back();
+      } else {
+        window.location.href = 'https://sniffies.com/';
+      }
+    }
     hideFloatingPanel();
   });
 
@@ -707,6 +724,23 @@ function showFloatingPanel(contactId: string, platform: string): void {
 function hideFloatingPanel(): void {
   document.getElementById(FP_ID)?.remove();
   fpContactId = '';
+}
+
+/** Show a brief toast in the bottom-right to confirm a block action. */
+function showBlockToast(profileId: string): void {
+  const ID = 'aggregaytor-block-toast';
+  document.getElementById(ID)?.remove();
+  const toast = document.createElement('div');
+  toast.id = ID;
+  toast.style.cssText =
+    'position:fixed;bottom:20px;right:20px;z-index:999999;' +
+    'background:rgba(220,38,38,0.95);color:#fff;padding:10px 16px;' +
+    'border-radius:8px;font-family:system-ui,sans-serif;font-size:13px;' +
+    'box-shadow:0 4px 12px rgba(0,0,0,0.4);transition:opacity 0.3s';
+  toast.textContent = `🚫 Profile blocked${profileId ? ' (' + profileId.slice(0, 8) + '…)' : ''}`;
+  document.body.appendChild(toast);
+  setTimeout(() => { toast.style.opacity = '0'; }, 1600);
+  setTimeout(() => toast.remove(), 2000);
 }
 
 // ── Map Filter Floating Panel ─────────────────────────────────────────────

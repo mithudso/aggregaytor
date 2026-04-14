@@ -189,6 +189,14 @@ function extractIdFromElement(el: HTMLElement): string {
     const match = bg.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
     if (match) return match[1].toLowerCase();
   }
+  // Try <img src> for anonymous markers — Sniffies sometimes uses <img> tags
+  const imgs = el.querySelectorAll('img');
+  for (const img of imgs) {
+    const src = img.getAttribute('src') || '';
+    const match = src.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i)
+      || src.match(/\/profiles?\/([0-9a-f]{6,})/i);
+    if (match) return match[1].toLowerCase();
+  }
   // Try href on any link in or near the element
   const link = el.querySelector('a[href*="/profile/"]') || el.closest('a[href*="/profile/"]');
   if (link) {
@@ -196,10 +204,20 @@ function extractIdFromElement(el: HTMLElement): string {
     const match = href.match(/\/profile\/([0-9a-f]{6,})/i);
     if (match) return match[1].toLowerCase();
   }
-  // Try data attributes
-  for (const attr of ['data-profile-id', 'data-user-id', 'data-cruiser-id']) {
+  // Try data attributes on this element and all descendants — cover
+  // any custom attribute Sniffies might set on anonymous markers too
+  for (const attr of ['data-profile-id', 'data-user-id', 'data-cruiser-id', 'data-pid', 'data-id']) {
     const val = el.getAttribute(attr) || el.querySelector(`[${attr}]`)?.getAttribute(attr) || '';
     if (val && /^[0-9a-f]{6,}$/i.test(val)) return val.toLowerCase();
+  }
+  // Try aria-label — sometimes anonymous markers still have the ID in their label
+  const aria = el.getAttribute('aria-label') || el.querySelector('[aria-label]')?.getAttribute('aria-label') || '';
+  const ariaMatch = aria.match(/([0-9a-f]{16,})/i);
+  if (ariaMatch) return ariaMatch[1].toLowerCase();
+  // Last resort: look for any hex-id pattern in the marker's own attributes
+  for (const attr of Array.from(el.attributes)) {
+    const m = (attr.value || '').match(/([0-9a-f]{24,})/i);
+    if (m) return m[1].toLowerCase();
   }
   return '';
 }
@@ -444,6 +462,67 @@ function applyFilters(): void {
 
 // ── Click Handlers ─────────────────────────────────────────────────────────
 
+/** Core block logic — add to blockedIds, hide the marker, persist, notify. */
+function blockById(id: string, marker: HTMLElement | null): void {
+  settings.blockedIds.add(id);
+  hideHistory.push(id);
+  if (hideHistory.length > 50) hideHistory.shift();
+  if (marker) marker.classList.add(HIDE_CLASS);
+  hideChatPreview();
+  saveBlockedIds();
+  window.dispatchEvent(new CustomEvent('__aggregaytor_message', {
+    detail: JSON.parse(JSON.stringify({
+      type: 'PROFILE_BLOCKED',
+      contactId: `sniffies:${id}`,
+      platform: 'sniffies',
+    })),
+  }));
+}
+
+/**
+ * Block a marker whose ID couldn't be extracted from the DOM (e.g. anonymous
+ * profiles without a picture). Strategy: click the marker to trigger the
+ * Sniffies SPA to open the profile, wait for the URL to change to /profile/{id},
+ * read the ID from there, then navigate back to the map.
+ */
+async function blockAnonymousMarker(marker: HTMLElement): Promise<void> {
+  const startUrl = location.href;
+  // Prefer clicking a child that's likely the interactive handle; fall back
+  // to the marker root. Use a real MouseEvent so the SPA's click handlers fire.
+  const clickTarget = (marker.querySelector('.marker-avatar, .marker-container, img, div') as HTMLElement) || marker;
+  clickTarget.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+
+  // Poll for up to 2.5s for the URL to change to a profile path
+  const deadline = Date.now() + 2500;
+  let extractedId = '';
+  while (Date.now() < deadline) {
+    const href = location.href;
+    if (href !== startUrl) {
+      const m = href.match(/\/profile\/([0-9a-f]{6,})/i);
+      if (m) { extractedId = m[1].toLowerCase(); break; }
+    }
+    await new Promise(r => setTimeout(r, 80));
+  }
+
+  if (!extractedId) {
+    console.warn('[Aggregaytor:MapFilters] Could not resolve anonymous marker ID — click did not navigate to a profile');
+    return;
+  }
+
+  // Block it. The marker on the map may not be present right now (we're on
+  // the profile view), so applyFilters() will re-apply HIDE_CLASS when the
+  // map re-renders after we go back.
+  blockById(extractedId, null);
+
+  // Return to the map so the user sees the marker has been hidden.
+  if (window.history.length > 1) window.history.back();
+  else window.location.href = 'https://sniffies.com/';
+
+  // Re-scan after a short delay once the SPA restores the map view.
+  setTimeout(applyFilters, 600);
+  setTimeout(applyFilters, 1500);
+}
+
 function setupClickHandlers(): void {
   // Middle-click behavior:
   // - On map marker → quick-hide the profile
@@ -478,24 +557,19 @@ function setupClickHandlers(): void {
     // On map marker → quick-hide
     if (!marker) return;
     const id = extractIdFromElement(marker);
-    if (!id) return;
 
     e.preventDefault();
     e.stopPropagation();
-    settings.blockedIds.add(id);
-    hideHistory.push(id); // track for undo
-    if (hideHistory.length > 50) hideHistory.shift(); // cap history
-    marker.classList.add(HIDE_CLASS);
-    hideChatPreview(); // dismiss any visible preview
-    saveBlockedIds();
-    // Notify bridge for aggregator tracking
-    window.dispatchEvent(new CustomEvent('__aggregaytor_message', {
-      detail: JSON.parse(JSON.stringify({
-        type: 'PROFILE_BLOCKED',
-        contactId: `sniffies:${id}`,
-        platform: 'sniffies',
-      })),
-    }));
+
+    if (id) {
+      // Identified marker — block immediately
+      blockById(id, marker);
+    } else {
+      // Anonymous marker (no picture / no extractable ID): click the marker
+      // to open the profile page, read the ID from the URL after the SPA
+      // navigates, block it, then return to the map.
+      blockAnonymousMarker(marker).catch(() => {});
+    }
   }, true);
 
   // Shift+click on map marker = toggle block
@@ -504,18 +578,23 @@ function setupClickHandlers(): void {
     const marker = resolveMarkerRoot(e.target as HTMLElement);
     if (!marker) return;
     const id = extractIdFromElement(marker);
-    if (!id) return;
 
     e.preventDefault();
     e.stopPropagation();
-    if (settings.blockedIds.has(id)) {
-      settings.blockedIds.delete(id);
-      marker.classList.remove(HIDE_CLASS);
+
+    if (id) {
+      if (settings.blockedIds.has(id)) {
+        settings.blockedIds.delete(id);
+        marker.classList.remove(HIDE_CLASS);
+      } else {
+        settings.blockedIds.add(id);
+        marker.classList.add(HIDE_CLASS);
+      }
+      saveBlockedIds();
     } else {
-      settings.blockedIds.add(id);
-      marker.classList.add(HIDE_CLASS);
+      // Anonymous marker — same click-to-resolve fallback as middle-click
+      blockAnonymousMarker(marker).catch(() => {});
     }
-    saveBlockedIds();
   }, true);
 }
 
