@@ -202,6 +202,74 @@ window.addEventListener('__aggregaytor_block_by_hash', (async (event: CustomEven
   }));
 }) as EventListener);
 
+// ── Block by React Fiber Lookup ──────────────────────────────────────────────
+// Fallback path for profile cells with no picture, no /chat/ link, no data
+// attributes — Grindr still has the profileId in the React component's props.
+// The ISOLATED bridge tagged the clicked element with data-aggregaytor-
+// fiber-lookup="<marker>"; we find that element and walk its React fiber
+// tree to extract the profileId from memoizedProps / pendingProps.
+window.addEventListener('__aggregaytor_block_by_fiber', ((event: CustomEvent) => {
+  const { marker } = event.detail || {};
+  if (!marker) return;
+  const el = document.querySelector(`[data-aggregaytor-fiber-lookup="${marker}"]`) as HTMLElement | null;
+  if (!el) {
+    console.warn(`${LOG} Fiber lookup: marker element not found`);
+    return;
+  }
+
+  // React attaches fiber references as __reactFiber$<hash> and props as
+  // __reactProps$<hash>. We walk up the fiber's .return chain, inspecting
+  // memoizedProps / stateNode on each ancestor until we find a numeric id.
+  const findProfileIdInFiber = (startEl: HTMLElement): string => {
+    const anyEl: any = startEl;
+    const keys = Object.keys(anyEl).filter(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+    if (!keys.length) {
+      console.warn(`${LOG} Fiber lookup: element has no React fiber attached`);
+      return '';
+    }
+    let fiber: any = anyEl[keys[0]];
+    let depth = 0;
+    while (fiber && depth < 30) {
+      const candidates = [fiber.memoizedProps, fiber.pendingProps, fiber.stateNode?.props, fiber.stateNode?.state];
+      for (const props of candidates) {
+        if (!props || typeof props !== 'object') continue;
+        // Common Grindr prop shapes: { profileId }, { profile: { profileId } },
+        // { item: { profileId } }, { data: { profileId } }, { id }.
+        const checks = [
+          props.profileId,
+          props.profile?.profileId,
+          props.profile?.id,
+          props.item?.profileId,
+          props.item?.id,
+          props.data?.profileId,
+          props.data?.id,
+          props.user?.profileId,
+          props.user?.id,
+          props.id,
+        ];
+        for (const v of checks) {
+          const s = String(v || '');
+          if (/^\d{7,}$/.test(s)) return s;
+        }
+      }
+      fiber = fiber.return;
+      depth++;
+    }
+    return '';
+  };
+
+  const profileId = findProfileIdInFiber(el);
+  if (!profileId) {
+    console.warn(`${LOG} Fiber lookup: no profile id found in React tree`);
+    return;
+  }
+
+  console.log(`${LOG} Fiber lookup: resolved to profileId ${profileId}`);
+  window.dispatchEvent(new CustomEvent('__aggregaytor_block_profile', {
+    detail: { profileId },
+  }));
+}) as EventListener);
+
 // ── Block/Hide Profile Handler ──────────────────────────────────────────────
 // Middle-click on a profile triggers this via the bridge. Uses the captured
 // Grindr auth token (from intercepted API calls) to call the block API,

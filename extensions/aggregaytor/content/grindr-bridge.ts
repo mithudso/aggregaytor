@@ -169,9 +169,48 @@ document.addEventListener('auxclick', (e) => {
         const orig = (profileEl as HTMLElement).style.opacity;
         (profileEl as HTMLElement).style.opacity = '0.3';
         setTimeout(() => { (profileEl as HTMLElement).style.opacity = orig || ''; }, 500);
+        e.preventDefault();
         return;
       }
     }
+  }
+
+  // Strategy 4: scan every attribute on the cell and its descendants for a
+  // numeric profile id. Grindr sometimes embeds profileId in data-testid,
+  // aria-label, id, or similar attributes on the card even without a picture.
+  if (!profileId) {
+    const candidates = [profileEl, ...profileEl.querySelectorAll('*')];
+    for (const el of candidates) {
+      for (const attr of Array.from((el as Element).attributes || [])) {
+        const m = String(attr.value || '').match(/(?<![0-9])([0-9]{7,})(?![0-9])/);
+        if (m) { profileId = m[1]; break; }
+      }
+      if (profileId) break;
+    }
+  }
+
+  // Strategy 5 (last resort — picture-less cells): let the MAIN world walk
+  // React's fiber tree to pull the profileId from component props. ISOLATED
+  // world can't read __reactFiber$... properties because React attaches them
+  // via MAIN-world JS. We tag the element with a one-shot marker attr and
+  // fire an event; MAIN world finds the element and handles the block.
+  if (!profileId) {
+    const marker = `fiber-lookup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    (profileEl as HTMLElement).setAttribute('data-aggregaytor-fiber-lookup', marker);
+    console.log(`${LOG} Middle-click: dispatching React fiber lookup (marker=${marker})`);
+    window.dispatchEvent(new CustomEvent('__aggregaytor_block_by_fiber', {
+      detail: { marker },
+    }));
+    // Visual feedback
+    const orig = (profileEl as HTMLElement).style.opacity;
+    (profileEl as HTMLElement).style.opacity = '0.3';
+    setTimeout(() => {
+      (profileEl as HTMLElement).style.opacity = orig || '';
+      // Leave the marker in place for ~2s so MAIN world has time to find it
+      setTimeout(() => (profileEl as HTMLElement).removeAttribute('data-aggregaytor-fiber-lookup'), 2000);
+    }, 500);
+    e.preventDefault();
+    return;
   }
 
   if (!profileId || !/^\d+$/.test(profileId)) {
