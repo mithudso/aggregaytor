@@ -698,49 +698,118 @@ async function handleMessage(msg: any): Promise<any> {
         const platform = msg.platform as Platform;
 
         if (platform === 'grindr') {
-          // Fetch Grindr's blocked and hidden lists via the platform tab
+          // Fetch Grindr's blocked and hidden lists via the platform tab.
+          // We run the fetch inside the tab so credentials (session cookies +
+          // any required Grindr auth headers) come along automatically.
           const tabs = await chrome.tabs.query({});
           const grindrTab = tabs.find((t: any) => t.url?.includes('web.grindr.com'));
           if (grindrTab?.id) {
             const [result] = await chrome.scripting.executeScript({
               target: { tabId: grindrTab.id },
               func: async () => {
-                const results: Array<{ profileId: string; liked: boolean }> = [];
-                try {
-                  // Fetch favorites (liked)
-                  // Note: Grindr doesn't have a simple favorites API list endpoint
+                const results: Array<{ profileId: string; liked: boolean; source: string }> = [];
+                const debug: Array<{ url: string; status: number; keys: string[]; count: number; sample: any }> = [];
 
-                  // Fetch blocks (disliked)
-                  const blocksRes = await fetch('https://web.grindr.com/api/v4/blocks?page=1', { credentials: 'include' });
-                  if (blocksRes.ok) {
-                    const data = await blocksRes.json();
-                    const profiles = data.profiles || data.items || [];
-                    for (const p of profiles) {
-                      const pid = String(p.profileId || p.id || '');
-                      if (pid) results.push({ profileId: pid, liked: false });
+                // Extract profile IDs from an arbitrary response shape. Grindr
+                // uses various envelope formats across endpoints (profiles[],
+                // items[], blocks[], list[], a bare array of ids, etc.).
+                const extractIds = (data: any): string[] => {
+                  if (!data) return [];
+                  const ids: string[] = [];
+                  const walk = (v: any) => {
+                    if (v == null) return;
+                    if (Array.isArray(v)) { for (const item of v) walk(item); return; }
+                    if (typeof v === 'string' || typeof v === 'number') {
+                      const s = String(v);
+                      if (/^\d{5,}$/.test(s)) ids.push(s);
+                      return;
                     }
-                  }
-
-                  // Fetch hides (disliked)
-                  const hidesRes = await fetch('https://web.grindr.com/api/v1/hides', { credentials: 'include' });
-                  if (hidesRes.ok) {
-                    const data = await hidesRes.json();
-                    const profiles = data.profiles || data.items || data || [];
-                    if (Array.isArray(profiles)) {
-                      for (const p of profiles) {
-                        const pid = String(p.profileId || p.id || p || '');
-                        if (pid && /^\d+$/.test(pid)) results.push({ profileId: pid, liked: false });
+                    if (typeof v !== 'object') return;
+                    for (const k of ['profileId', 'profile_id', 'id', 'userId', 'user_id', 'blockedProfileId', 'hiddenProfileId']) {
+                      const x = (v as any)[k];
+                      if (x != null) {
+                        const s = String(x);
+                        if (/^\d{5,}$/.test(s)) { ids.push(s); return; }
                       }
                     }
+                    // Recurse into container keys
+                    for (const k of ['profiles', 'items', 'data', 'list', 'blocks', 'hides', 'results', 'content']) {
+                      if ((v as any)[k]) walk((v as any)[k]);
+                    }
+                  };
+                  walk(data);
+                  return [...new Set(ids)];
+                };
+
+                // Paginate an endpoint until no more ids are returned or we hit
+                // a safety cap. Grindr endpoints accept ?page=, ?pageNumber=,
+                // or ?offset= / ?cursor= — we try the common ones.
+                const paginateEndpoint = async (baseUrl: string, liked: boolean, source: string): Promise<void> => {
+                  const seen = new Set<string>();
+                  // Strategy 1: page=1,2,3... until empty or unchanged
+                  for (let page = 1; page <= 40; page++) {
+                    const sep = baseUrl.includes('?') ? '&' : '?';
+                    const url = `${baseUrl}${sep}page=${page}&pageNumber=${page}&limit=100&pageSize=100`;
+                    try {
+                      const res = await fetch(url, { credentials: 'include' });
+                      if (!res.ok) {
+                        debug.push({ url, status: res.status, keys: [], count: 0, sample: null });
+                        break;
+                      }
+                      const data = await res.json();
+                      const ids = extractIds(data);
+                      const keys = (data && typeof data === 'object') ? Object.keys(data).slice(0, 10) : [];
+                      const sample = Array.isArray(data) ? data.slice(0, 1) :
+                                     (data?.profiles?.[0] || data?.items?.[0] || data?.data?.[0] || null);
+                      debug.push({ url, status: res.status, keys, count: ids.length, sample });
+                      let newIds = 0;
+                      for (const pid of ids) {
+                        if (seen.has(pid)) continue;
+                        seen.add(pid);
+                        newIds++;
+                        results.push({ profileId: pid, liked, source });
+                      }
+                      // Stop if this page added nothing new — we've exhausted
+                      // the list (or the endpoint doesn't support pagination)
+                      if (newIds === 0) break;
+                    } catch (e: any) {
+                      debug.push({ url, status: -1, keys: [], count: 0, sample: String(e?.message || e) });
+                      break;
+                    }
                   }
-                } catch {}
-                return results;
+                };
+
+                // Try every known endpoint for blocks and hides.
+                const blockEndpoints = [
+                  'https://web.grindr.com/api/v4/blocks',
+                  'https://web.grindr.com/api/v3/blocks',
+                  'https://web.grindr.com/api/blocks',
+                  'https://web.grindr.com/api/v1/blocks',
+                ];
+                const hideEndpoints = [
+                  'https://web.grindr.com/api/v4/hides',
+                  'https://web.grindr.com/api/v3/hides',
+                  'https://web.grindr.com/api/v1/hides',
+                  'https://web.grindr.com/api/hides',
+                ];
+                for (const e of blockEndpoints) await paginateEndpoint(e, false, 'block');
+                for (const e of hideEndpoints) await paginateEndpoint(e, false, 'hide');
+
+                // Surface full debug in console so the user can see exactly
+                // which endpoints worked and how many they returned.
+                console.log('[Aggregaytor:Grindr] Block/hide import debug:', debug);
+                console.log('[Aggregaytor:Grindr] Total unique ids captured:', results.length);
+                return { results, debug };
               },
             });
 
-            const signals = result?.result || [];
+            const payload = (result?.result as any) || { results: [], debug: [] };
+            const signals = payload.results || [];
+            const seen = new Set<string>();
             for (const { profileId, liked } of signals) {
               const cid = `grindr:${profileId}`;
+              if (seen.has(cid)) continue;
+              seen.add(cid);
               if (autoTrainedSet.has(cid)) continue;
               await recordFeedback(cid, 'grindr', liked, {
                 bodyType: '', position: '', age: '', ethnicity: '', height: '',
@@ -750,6 +819,7 @@ async function handleMessage(msg: any): Promise<any> {
               autoTrainedSet.add(cid);
               trained++;
             }
+            console.log('[Aggregaytor:SW] Grindr import: received', signals.length, 'signals, trained', trained, 'new (skipped already-trained).');
           }
         }
 

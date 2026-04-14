@@ -112,6 +112,14 @@ export async function upsertContacts(
       doc.unreadCount = prev.unreadCount;
       // Preserve existing avatar if new one is empty
       if (!doc.avatarUrl && prev.avatarUrl) doc.avatarUrl = prev.avatarUrl;
+      // Preserve existing display name if the new payload didn't include one.
+      // Many code paths (chat panel scraper, message-only captures) emit
+      // contacts with displayName: '' — those should NOT clobber a previously
+      // captured real name.
+      if (!doc.displayName && prev.displayName) doc.displayName = prev.displayName;
+      // Merge metadata so message-source updates don't erase profile-source
+      // fields (e.g. bodyType, position) that arrived from a richer payload.
+      doc.metadata = { ...(prev.metadata || {}), ...(doc.metadata || {}) };
       updated++;
     } else {
       created++;

@@ -1003,11 +1003,10 @@ function checkUrlChange() {
     } catch {}
   }
 
-  // If the user navigated to the chat panel (/chat), scrape the conversation
-  // list after a delay to let Angular render the chat items
-  if (url.match(/sniffies\.com\/chat\/?$/i)) {
-    setTimeout(() => scrapeChatPanel(), 2000);
-  }
+  // Scrape the Recents panel whenever the URL changes. The panel can appear
+  // on both /chat and the map view as a drawer, so we try scraping on any
+  // Sniffies URL — scrapeChatPanel is a no-op if no rows are found.
+  setTimeout(() => scrapeChatPanel(), 1500);
 }
 /**
  * Scrape the Sniffies chat panel (/chat) for the conversation list.
@@ -1094,16 +1093,24 @@ function scrapeChatPanel() {
         metadata: { isPinned },
       });
 
-      // Create a message record from the preview (if non-empty)
+      // Create a message record from the preview (if non-empty). We use a
+      // DETERMINISTIC id based on preview content + timestamp so repeated
+      // scrapes of the same row don't create duplicate message docs — the
+      // adapter's store-level dedup also catches this but a stable id is
+      // cheaper.
       if (preview.length > 1) {
+        const ts = parseRelativeTime(timeText);
+        // 5-minute bucket so minor parse drift collapses together
+        const bucket = Math.floor(new Date(ts).getTime() / 300000);
+        const bodyHash = preview.slice(0, 40).replace(/\s+/g, '').toLowerCase();
         messages.push({
-          id: `sniffies:chatpanel-${profileId}-${Date.now()}`,
+          id: `sniffies:chatpanel-${profileId}-${bucket}-${bodyHash}`,
           platform: 'sniffies',
           threadId: `sniffies:${profileId}`, // thread = contact for 1:1
           contactId: `sniffies:${profileId}`,
           direction,
           body: preview.slice(0, 200),
-          timestamp: parseRelativeTime(timeText), // use message time, not download time
+          timestamp: ts, // use message time, not download time
           read: unreadCount === 0, // mark as read only if unread badge is absent
           metadata: {
             profileId, source: 'chat-panel', avatarUrl,
@@ -1125,12 +1132,44 @@ function scrapeChatPanel() {
   }
 }
 
-// If the page is already on /chat when the extension loads (e.g., user refreshed
-// the chat page), scrape immediately with a longer delay to let Angular finish
-// rendering the conversation list.
-if (location.href.match(/sniffies\.com\/chat\/?$/i)) {
-  setTimeout(() => scrapeChatPanel(), 3000);
-}
+// Scrape immediately at extension load (with a short delay for Angular to
+// render) so we pick up any rows already visible. scrapeChatPanel is a
+// no-op when no rows are found, so running it unconditionally is safe.
+setTimeout(() => scrapeChatPanel(), 3000);
+
+// Also scrape every 15s while the page is open. The Sniffies Recents panel
+// updates in-place via Angular bindings — new conversations appear without
+// any route change. Periodic scraping is the only way to catch them promptly.
+// 15s is a balance between freshness and CPU — the scrape itself is ~1-3ms
+// per row and a typical Recents panel has <30 rows.
+setInterval(() => scrapeChatPanel(), 15_000);
+
+// Additionally, watch for new chat-list-vertical-item elements appearing in
+// the DOM and re-scrape immediately. This covers the case where a new
+// conversation arrives while the user is idle on the map view.
+try {
+  const chatPanelObserver = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      for (const node of Array.from(m.addedNodes)) {
+        if (node instanceof Element && (
+          node.tagName === 'CHAT-LIST-VERTICAL-ITEM' ||
+          node.querySelector?.('chat-list-vertical-item')
+        )) {
+          // Debounce: a burst of mutations should only trigger one scrape.
+          if (!(window as any).__aggregaytor_scrape_pending) {
+            (window as any).__aggregaytor_scrape_pending = true;
+            setTimeout(() => {
+              (window as any).__aggregaytor_scrape_pending = false;
+              scrapeChatPanel();
+            }, 400);
+          }
+          return;
+        }
+      }
+    }
+  });
+  chatPanelObserver.observe(document.body, { childList: true, subtree: true });
+} catch { /* MutationObserver unavailable */ }
 
 // ── URL Change Polling ──────────────────────────────────────────────────────
 // Poll every 3 seconds because pushState (used by Angular Router for in-app

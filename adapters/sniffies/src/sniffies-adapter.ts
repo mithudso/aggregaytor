@@ -484,13 +484,19 @@ export class SniffiesAdapter extends BaseAdapter {
           for (const [key, value] of Object.entries(obj)) {
             const k = normalizeKey(key);
             if (typeof value === 'string' && value.length < 100) {
-              if (/bodytype|body|build/.test(k)) md.bodyType = value;
-              if (/attitude|position|role/.test(k)) md.position = value;
+              // `body` on Sniffies message objects is the MESSAGE TEXT, so we
+              // must be strict: only accept exact `bodytype` / `build`, plus
+              // `body` when the value looks like a body-type label (one word,
+              // no sentence punctuation). Anything with `.`, `?`, `!`, or
+              // multiple spaces is almost certainly a message body.
+              if (/^(bodytype|build)$/.test(k)) md.bodyType = value;
+              else if (k === 'body' && /^[a-z][a-z -]{1,30}$/i.test(value.trim())) md.bodyType = value;
+              if (/^(attitude|position|role|sexualposition)$/.test(k)) md.position = value;
               if (/^age$/.test(k)) md.age = value;
               if (/ethnicity|race/.test(k)) md.ethnicity = value;
-              if (/height/.test(k)) md.height = value;
-              if (/distance|miles|km/.test(k)) md.distance = value;
-              if (/hosting|host/.test(k)) md.hosting = value;
+              if (/^height$/.test(k)) md.height = value;
+              if (/^(distance|miles|km|approximatedistance)$/.test(k)) md.distance = value;
+              if (/^(hosting|host|hostingstatus)$/.test(k)) md.hosting = value;
             }
             if (Array.isArray(value) && /photo|image|pic/.test(k)) {
               md.photos = value.filter(v => typeof v === 'string').slice(0, 10);
