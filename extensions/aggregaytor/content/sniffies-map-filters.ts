@@ -723,6 +723,13 @@ function loadSettings(): void {
 window.addEventListener('__aggregaytor_map_filter_settings', ((event: CustomEvent) => {
   const update = event.detail;
   if (!update) return;
+  console.log('[Aggregaytor:MapFilters] Filter settings updated:', {
+    excludeEnabled: update.excludeEnabled,
+    includeEnabled: update.includeEnabled,
+    excludeTerms: update.excludeTerms?.length,
+    includeTerms: update.includeTerms?.length,
+    hiddenCount: settings.blockedIds.size,
+  });
   Object.assign(settings, update);
   if (Array.isArray(update.blockedIds)) {
     settings.blockedIds = new Set(update.blockedIds);

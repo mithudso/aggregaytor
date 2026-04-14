@@ -480,6 +480,7 @@ export class SniffiesAdapter extends BaseAdapter {
           const md: Record<string, unknown> = {};
 
           // Capture all profile attributes into metadata
+          const searchParts: string[] = [];
           for (const [key, value] of Object.entries(obj)) {
             const k = normalizeKey(key);
             if (typeof value === 'string' && value.length < 100) {
@@ -494,6 +495,21 @@ export class SniffiesAdapter extends BaseAdapter {
             if (Array.isArray(value) && /photo|image|pic/.test(k)) {
               md.photos = value.filter(v => typeof v === 'string').slice(0, 10);
             }
+            // Build a searchable text blob for include/exclude term filters.
+            // We accept any string field longer than a single character and
+            // skip IDs/URLs/timestamps so the text matches user-intent keywords.
+            if (typeof value === 'string' && value.length >= 2 && value.length < 500) {
+              // Skip obvious non-text fields
+              if (/^_?id$|photoid|mediaid|createdat|updatedat|url|link|hash|token/.test(k)) continue;
+              if (/^https?:\/\//.test(value)) continue;
+              if (/^[0-9a-f]{16,}$/i.test(value)) continue; // hex ids
+              searchParts.push(value);
+            }
+          }
+          // Store the combined searchable text. All exclude/include term
+          // matching runs against this blob (case-insensitive).
+          if (searchParts.length) {
+            md.profileText = searchParts.join(' | ').slice(0, 2000).toLowerCase();
           }
 
           if (avatarUrl || displayName || Object.keys(md).length > 0) {

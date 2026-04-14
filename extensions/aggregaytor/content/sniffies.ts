@@ -147,6 +147,15 @@ window.addEventListener('message', (event) => {
       detail: { text: event.data.text, contactId: event.data.contactId },
     }));
   }
+  if (event.data.type === '__aggregaytor_map_filter_settings') {
+    // Re-dispatch as a CustomEvent so the map-filters module (also in MAIN
+    // world) picks it up. CustomEvents don't cross ISOLATED/MAIN worlds,
+    // which is why the floating filter panel has to route through postMessage.
+    console.log('[Aggregaytor:Sniffies] Cross-world filter settings received:', Object.keys(event.data.update || {}).length, 'keys');
+    window.dispatchEvent(new CustomEvent('__aggregaytor_map_filter_settings', {
+      detail: event.data.update,
+    }));
+  }
 });
 
 // ── Auto-Send Mechanism ────────────────────────────────────────────────────

@@ -306,10 +306,11 @@ try {
       return true;
     }
     if (message.type === 'MAP_FILTER_SETTINGS') {
-      // Relay map filter settings from the side panel to the MAIN world
-      window.dispatchEvent(new CustomEvent('__aggregaytor_map_filter_settings', {
-        detail: message.settings,
-      }));
+      // Relay map filter settings from the side panel to the MAIN world.
+      // postMessage crosses the ISOLATED→MAIN world boundary; CustomEvents
+      // do NOT (which is why filters silently did nothing before v0.56.6).
+      console.log('[Aggregaytor:Bridge:Sniffies] Relaying MAP_FILTER_SETTINGS to MAIN world:', Object.keys(message.settings || {}).length, 'keys');
+      window.postMessage({ type: '__aggregaytor_map_filter_settings', update: message.settings }, '*');
       sendResponse({ ok: true });
       return true;
     }
@@ -766,6 +767,32 @@ function showMapFilterPanel(): void {
   // Load current filter settings
   const settings = JSON.parse(localStorage.getItem('aggregaytor_map_filter_settings') || '{}');
 
+  // Inject the CSS for the redesigned filter panel (only once per page load).
+  if (!document.getElementById('aggregaytor-fp-filters-css')) {
+    const st = document.createElement('style');
+    st.id = 'aggregaytor-fp-filters-css';
+    st.textContent = `
+      #${FP_ID} .fp-section { margin-bottom:10px }
+      #${FP_ID} .fp-section-hdr { display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;color:#9ca3af;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em }
+      #${FP_ID} .fp-switch { display:inline-flex;align-items:center;gap:4px;color:#9ca3af;font-size:10px;cursor:pointer;text-transform:none;font-weight:400;letter-spacing:0 }
+      #${FP_ID} .fp-switch input { margin:0 }
+      #${FP_ID} .fp-switch.on { color:#3b82f6 }
+      #${FP_ID} .fp-chips { display:flex;flex-wrap:wrap;gap:3px }
+      #${FP_ID} .fp-chip { display:inline-flex;align-items:center;gap:3px;padding:2px 6px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;font-size:10px;color:#9ca3af;cursor:pointer;user-select:none;transition:background 0.12s,border-color 0.12s }
+      #${FP_ID} .fp-chip input { display:none }
+      #${FP_ID} .fp-chip:hover { background:rgba(59,130,246,0.10);border-color:rgba(59,130,246,0.25) }
+      #${FP_ID} .fp-chip.checked { background:rgba(59,130,246,0.18);border-color:rgba(59,130,246,0.55);color:#bfdbfe }
+      #${FP_ID} .fp-terms { width:100%;box-sizing:border-box;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:5px;padding:5px 7px;color:#e7e9ea;font-size:10px;font-family:inherit;resize:vertical;min-height:32px }
+      #${FP_ID} .fp-terms:focus { border-color:rgba(59,130,246,0.5);outline:none }
+      #${FP_ID} .fp-disabled { opacity:0.35;pointer-events:none }
+      #${FP_ID} .fp-hint { color:#6b7280;font-size:9px;font-style:italic;margin-top:2px }
+      #${FP_ID} .fp-save-state { font-size:9px;color:#22c55e;min-height:11px;margin-top:4px;text-align:center }
+    `;
+    (document.head || document.documentElement).appendChild(st);
+  }
+
+  const posAttributes = ['Bottom', 'VersBottom', 'Vers', 'VersTop', 'Top', 'Side', 'Unspecified'];
+
   panel.innerHTML = `
     <div class="fp-header">
       <span class="fp-header-title">⚡ Map Filters</span>
@@ -775,36 +802,60 @@ function showMapFilterPanel(): void {
       </div>
     </div>
     <div class="fp-body" style="font-size:11px">
-      <div style="margin-bottom:6px;color:#6b7280;font-size:10px">Hide by position:</div>
-      <div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:8px">
-        ${['Bottom', 'VersBottom', 'Vers', 'VersTop', 'Top', 'Side', 'Unspecified'].map(att => {
-          const key = `hide${att}`;
-          const checked = settings[key] ? 'checked' : '';
-          return `<label style="display:flex;align-items:center;gap:2px;font-size:10px;color:#9ca3af;cursor:pointer">
-            <input type="checkbox" class="fp-filter-cb" data-key="${key}" ${checked} style="margin:0"> ${att.replace('Vers', 'V.')}
-          </label>`;
-        }).join('')}
+      <div class="fp-section">
+        <div class="fp-section-hdr">Hide by position</div>
+        <div class="fp-chips">
+          ${posAttributes.map(att => {
+            const key = `hide${att}`;
+            const isOn = !!settings[key];
+            const label = att.replace('VersBottom','Vers-Btm').replace('VersTop','Vers-Top').replace('Unspecified','Unspec.');
+            return `<label class="fp-chip ${isOn ? 'checked' : ''}">
+              <input type="checkbox" class="fp-filter-cb" data-key="${key}" ${isOn ? 'checked' : ''}> ${label}
+            </label>`;
+          }).join('')}
+        </div>
       </div>
-      <div style="margin-bottom:6px;color:#6b7280;font-size:10px">Chat filters:</div>
-      <div style="display:flex;flex-direction:column;gap:3px;margin-bottom:8px">
-        <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#9ca3af;cursor:pointer">
-          <input type="checkbox" class="fp-filter-cb" data-key="hideRecentChats" ${settings.hideRecentChats ? 'checked' : ''} style="margin:0"> Hide chatted (24h)
-        </label>
-        <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#9ca3af;cursor:pointer">
-          <input type="checkbox" class="fp-filter-cb" data-key="showChatAgeBadges" ${settings.showChatAgeBadges ? 'checked' : ''} style="margin:0"> Show chat age badges
-        </label>
+
+      <div class="fp-section">
+        <div class="fp-section-hdr">Chat activity</div>
+        <div class="fp-chips">
+          <label class="fp-chip ${settings.hideRecentChats ? 'checked' : ''}">
+            <input type="checkbox" class="fp-filter-cb" data-key="hideRecentChats" ${settings.hideRecentChats ? 'checked' : ''}> Hide chatted &lt;24h
+          </label>
+          <label class="fp-chip ${settings.showChatAgeBadges ? 'checked' : ''}">
+            <input type="checkbox" class="fp-filter-cb" data-key="showChatAgeBadges" ${settings.showChatAgeBadges ? 'checked' : ''}> Show age badges
+          </label>
+        </div>
       </div>
-      <div style="margin-bottom:4px;color:#6b7280;font-size:10px">Exclude terms:</div>
-      <textarea class="fp-notes-input" id="fp-exclude-terms" rows="2" style="font-size:10px;min-height:24px" placeholder="one per line">${(settings.excludeTerms || []).join('\n')}</textarea>
-      <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#9ca3af;margin-top:3px;cursor:pointer">
-        <input type="checkbox" class="fp-filter-cb" data-key="excludeEnabled" ${settings.excludeEnabled ? 'checked' : ''} style="margin:0"> Enable exclude
-      </label>
-      <div style="margin-top:6px;margin-bottom:4px;color:#6b7280;font-size:10px">Include/highlight terms:</div>
-      <textarea class="fp-notes-input" id="fp-include-terms" rows="2" style="font-size:10px;min-height:24px" placeholder="one per line">${(settings.includeTerms || []).join('\n')}</textarea>
-      <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#9ca3af;margin-top:3px;cursor:pointer">
-        <input type="checkbox" class="fp-filter-cb" data-key="includeEnabled" ${settings.includeEnabled ? 'checked' : ''} style="margin:0"> Enable include
-      </label>
-      <button class="fp-action-btn" id="fp-apply-filters" style="margin-top:8px;width:100%;text-align:center">Apply Filters</button>
+
+      <div class="fp-section">
+        <div class="fp-section-hdr">
+          <span>🚫 Hide profiles containing…</span>
+          <label class="fp-switch ${settings.excludeEnabled ? 'on' : ''}" data-switch="excludeEnabled">
+            <input type="checkbox" class="fp-filter-cb" data-key="excludeEnabled" ${settings.excludeEnabled ? 'checked' : ''}>
+            <span>${settings.excludeEnabled ? 'ON' : 'off'}</span>
+          </label>
+        </div>
+        <div class="fp-filter-wrap ${settings.excludeEnabled ? '' : 'fp-disabled'}" data-wrap-for="excludeEnabled">
+          <textarea class="fp-terms" id="fp-exclude-terms" rows="2" placeholder="one term per line — e.g.&#10;trans&#10;no fats">${(settings.excludeTerms || []).join('\n')}</textarea>
+        </div>
+      </div>
+
+      <div class="fp-section">
+        <div class="fp-section-hdr">
+          <span>⭐ Highlight profiles containing…</span>
+          <label class="fp-switch ${settings.includeEnabled ? 'on' : ''}" data-switch="includeEnabled">
+            <input type="checkbox" class="fp-filter-cb" data-key="includeEnabled" ${settings.includeEnabled ? 'checked' : ''}>
+            <span>${settings.includeEnabled ? 'ON' : 'off'}</span>
+          </label>
+        </div>
+        <div class="fp-filter-wrap ${settings.includeEnabled ? '' : 'fp-disabled'}" data-wrap-for="includeEnabled">
+          <textarea class="fp-terms" id="fp-include-terms" rows="2" placeholder="one term per line — e.g.&#10;bbc&#10;daddy">${(settings.includeTerms || []).join('\n')}</textarea>
+        </div>
+      </div>
+
+      <div class="fp-hint">Changes save automatically as you type.</div>
+      <div class="fp-save-state" id="fp-save-state"></div>
     </div>`;
 
   document.body.appendChild(panel);
@@ -838,26 +889,76 @@ function showMapFilterPanel(): void {
     panel.remove();
   });
 
-  // Apply filters button
-  panel.querySelector('#fp-apply-filters')!.addEventListener('click', () => {
-    const update: Record<string, any> = {};
-    panel.querySelectorAll('.fp-filter-cb').forEach((cb: any) => {
-      update[cb.dataset.key] = cb.checked;
+  // ── Auto-Apply Filters ──────────────────────────────────────────────────
+  // Everything auto-saves: checkboxes apply immediately, textareas apply
+  // after a 400ms debounce so you can type without reapplying on every key.
+  // postMessage is used to cross the ISOLATED→MAIN world boundary (CustomEvents
+  // don't cross worlds, which is why the old Apply Filters button did nothing).
+  function collectAndApply(flashLabel: string = 'Saved') {
+    const update: Record<string, unknown> = {};
+    panel.querySelectorAll('.fp-filter-cb').forEach((cb) => {
+      const el = cb as HTMLInputElement;
+      update[el.dataset.key as string] = el.checked;
     });
     update.excludeTerms = ((panel.querySelector('#fp-exclude-terms') as HTMLTextAreaElement)?.value || '')
-      .split('\n').map((l: string) => l.trim()).filter((l: string) => l);
+      .split('\n').map((l) => l.trim()).filter((l) => l);
     update.includeTerms = ((panel.querySelector('#fp-include-terms') as HTMLTextAreaElement)?.value || '')
-      .split('\n').map((l: string) => l.trim()).filter((l: string) => l);
+      .split('\n').map((l) => l.trim()).filter((l) => l);
 
-    // Save and relay to MAIN world
-    localStorage.setItem('aggregaytor_map_filter_settings', JSON.stringify({ ...settings, ...update }));
-    window.dispatchEvent(new CustomEvent('__aggregaytor_map_filter_settings', { detail: update }));
+    // Merge with existing settings in localStorage so we don't clobber
+    // anything that the side panel wrote but this panel doesn't expose.
+    const prev = JSON.parse(localStorage.getItem('aggregaytor_map_filter_settings') || '{}');
+    const merged = { ...prev, ...update };
+    localStorage.setItem('aggregaytor_map_filter_settings', JSON.stringify(merged));
 
-    // Flash button
-    const btn = panel.querySelector('#fp-apply-filters') as HTMLElement;
-    btn.textContent = '✅ Applied!';
-    setTimeout(() => { btn.textContent = 'Apply Filters'; }, 1500);
+    // Cross the ISOLATED→MAIN world boundary via postMessage.
+    // sniffies.ts relays this to the map-filters CustomEvent listener.
+    window.postMessage({ type: '__aggregaytor_map_filter_settings', update: merged }, '*');
+
+    const state = panel.querySelector('#fp-save-state') as HTMLElement;
+    if (state) {
+      state.textContent = `✓ ${flashLabel}`;
+      setTimeout(() => { if (state.textContent === `✓ ${flashLabel}`) state.textContent = ''; }, 1200);
+    }
+
+    // Update each on/off switch label and the textarea disabled styling
+    panel.querySelectorAll('.fp-switch').forEach((sw) => {
+      const key = (sw as HTMLElement).dataset.switch;
+      const cb = sw.querySelector('input') as HTMLInputElement;
+      if (!cb) return;
+      sw.classList.toggle('on', cb.checked);
+      const label = sw.querySelector('span');
+      if (label) label.textContent = cb.checked ? 'ON' : 'off';
+      const wrap = panel.querySelector(`[data-wrap-for="${key}"]`);
+      if (wrap) wrap.classList.toggle('fp-disabled', !cb.checked);
+    });
+
+    // Update chip styling
+    panel.querySelectorAll('.fp-chip').forEach((chip) => {
+      const cb = chip.querySelector('input') as HTMLInputElement;
+      if (cb) chip.classList.toggle('checked', cb.checked);
+    });
+  }
+
+  // Checkbox change → apply immediately
+  panel.querySelectorAll('.fp-filter-cb').forEach((cb) => {
+    cb.addEventListener('change', () => collectAndApply('Applied'));
   });
+
+  // Textareas → debounced save (400ms after user stops typing)
+  let textTimer: ReturnType<typeof setTimeout> | null = null;
+  const debouncedApply = () => {
+    if (textTimer) clearTimeout(textTimer);
+    textTimer = setTimeout(() => collectAndApply('Saved'), 400);
+  };
+  panel.querySelector('#fp-exclude-terms')?.addEventListener('input', debouncedApply);
+  panel.querySelector('#fp-include-terms')?.addEventListener('input', debouncedApply);
+  // Also apply on blur so clicking away commits any pending changes
+  panel.querySelector('#fp-exclude-terms')?.addEventListener('blur', () => collectAndApply('Saved'));
+  panel.querySelector('#fp-include-terms')?.addEventListener('blur', () => collectAndApply('Saved'));
+
+  // Sync on first render in case settings drifted between panel opens
+  collectAndApply('Synced');
 }
 
 // ── URL Change Detection ────────────────────────────────────────────────────
