@@ -1180,6 +1180,161 @@ async function handleMessage(msg: any): Promise<any> {
         return { ok: true, ...result };
       } catch (err) { return { ok: false, error: (err as Error).message }; }
     }
+    case 'ENRICH_BLOCKED_PROFILES': {
+      // Fetch /api/v4/profiles/{id} for every Grindr contact flagged
+      // isBlocked that has no observable attributes, rate-limited to stay
+      // under Grindr's forced-logout threshold. Grindr typically returns
+      // full profile data on direct GET even for blocked profiles (the
+      // block only filters cascade/search results — the profile itself is
+      // still readable if you have the id, which we do).
+      try {
+        const targets = await getContactsByPlatform('grindr');
+        const needsEnrich = targets.filter((c: any) => {
+          const md = c.metadata || {};
+          const hasFeatures = md.bodyType || md.position || md.age || md.ethnicity ||
+            md.height || md.profileText || md.aboutMe || c.avatarUrl;
+          return md.isBlocked && !hasFeatures;
+        });
+        const total = needsEnrich.length;
+        if (!total) {
+          return { ok: true, total: 0, enriched: 0, failed: 0, message: 'No empty blocked contacts to enrich' };
+        }
+
+        const tabs = await chrome.tabs.query({});
+        const grindrTab = tabs.find((t: any) => t.url?.includes('web.grindr.com'));
+        if (!grindrTab?.id) {
+          return { ok: false, error: 'Open web.grindr.com in a tab first' };
+        }
+
+        // Chunk the profile ids into small batches so we can report progress
+        // back to the side panel between batches. 10 per batch ≈ 20s at the
+        // 2s-per-call pacing — fast enough for a progress bar, slow enough
+        // to stay safely under Grindr's rate limit.
+        const ids = needsEnrich.map((c: any) => (c._id || '').replace('contact:grindr:', '')).filter(Boolean);
+        let enriched = 0;
+        let failed = 0;
+        let sessionDead = false;
+        const BATCH_SIZE = 10;
+        for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+          const chunk = ids.slice(i, i + BATCH_SIZE);
+          const [result] = await chrome.scripting.executeScript({
+            target: { tabId: grindrTab.id },
+            world: 'MAIN',
+            args: [chunk],
+            func: async (batch: string[]) => {
+              // Grindr auth discovery (same pattern as BULK_TRAIN import).
+              const findGrindrAuth = (): string => {
+                const keys = ['authToken', 'auth-token', 'grindrAuthToken', 'session', 'grindrSession', 'accessToken', 'token'];
+                for (const k of keys) {
+                  const v = localStorage.getItem(k);
+                  if (v && v.length > 20 && !v.startsWith('{')) return v;
+                }
+                for (let i = 0; i < localStorage.length; i++) {
+                  const k = localStorage.key(i) || '';
+                  const v = localStorage.getItem(k) || '';
+                  if (/^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$/.test(v)) return v;
+                  if (v.startsWith('{')) {
+                    try {
+                      const obj = JSON.parse(v);
+                      const t = obj.authToken || obj.accessToken || obj.token || obj.session?.authToken;
+                      if (t && String(t).length > 20) return String(t);
+                    } catch {}
+                  }
+                }
+                return '';
+              };
+              const token = findGrindrAuth();
+              const headers: Record<string, string> = { 'Accept': 'application/json' };
+              if (token) {
+                headers['Authorization'] = token.startsWith('Grindr3 ') || token.startsWith('Bearer ')
+                  ? token : `Grindr3 ${token}`;
+              }
+              const out: Array<{ id: string; ok: boolean; status: number; data?: any }> = [];
+              for (const id of batch) {
+                try {
+                  const res = await fetch(`https://web.grindr.com/api/v4/profiles/${id}`, {
+                    credentials: 'include', headers,
+                  });
+                  if (res.status === 401 || res.status === 403) {
+                    out.push({ id, ok: false, status: res.status });
+                    break; // abort — session dead, no point continuing
+                  }
+                  if (!res.ok) { out.push({ id, ok: false, status: res.status }); }
+                  else { const data = await res.json(); out.push({ id, ok: true, status: 200, data }); }
+                } catch (e: any) {
+                  out.push({ id, ok: false, status: 0 });
+                }
+                await new Promise(r => setTimeout(r, 2000)); // 2s between calls — safely under rate limit
+              }
+              return out;
+            },
+          });
+
+          const batchOut = (result?.result as any[]) || [];
+          for (const row of batchOut) {
+            if (row.status === 401 || row.status === 403) {
+              sessionDead = true;
+              break;
+            }
+            if (!row.ok || !row.data) { failed++; continue; }
+
+            // Extract the profile object — Grindr wraps it in various shapes
+            const p = row.data.profile || row.data.data || row.data;
+            const md: any = {};
+            const pickString = (v: any) => typeof v === 'string' ? v : (v != null ? String(v) : '');
+            if (p.bodyType) md.bodyType = pickString(p.bodyType);
+            if (p.body) md.bodyType = md.bodyType || pickString(p.body);
+            if (p.sexualPosition) md.position = pickString(p.sexualPosition);
+            if (p.position) md.position = md.position || pickString(p.position);
+            if (p.age) md.age = pickString(p.age);
+            if (p.ethnicity) md.ethnicity = pickString(p.ethnicity);
+            if (p.height) md.height = pickString(p.height);
+            if (p.weight) md.weight = pickString(p.weight);
+            if (p.aboutMe) md.aboutMe = pickString(p.aboutMe);
+            if (p.lookingFor) md.lookingFor = Array.isArray(p.lookingFor) ? p.lookingFor.join(', ') : pickString(p.lookingFor);
+            if (p.displayName || p.name) md.displayName = pickString(p.displayName || p.name);
+            md.isBlocked = true; // preserve flag
+            md.enrichedAt = Date.now();
+
+            // Build photo URL from photoHash or photoMediaHashes
+            let avatarUrl = '';
+            const primaryHash = p.photoHash || p.profileImageMediaHash || p.primaryPhotoHash;
+            if (primaryHash) avatarUrl = `https://cdns.grindr.com/images/profile/1024x1024/${primaryHash}`;
+            else if (Array.isArray(p.photoMediaHashes) && p.photoMediaHashes.length) {
+              avatarUrl = `https://cdns.grindr.com/images/profile/1024x1024/${p.photoMediaHashes[0]}`;
+            }
+
+            try {
+              const existing = await getContact(`contact:grindr:${row.id}`);
+              await upsertContact({
+                id: `grindr:${row.id}`, platform: 'grindr', platformUserId: row.id,
+                displayName: md.displayName || existing?.displayName || '',
+                profileUrl: existing?.profileUrl || `https://web.grindr.com/chat/${row.id}`,
+                avatarUrl: avatarUrl || existing?.avatarUrl || '',
+                lastSeen: new Date().toISOString(),
+                metadata: { ...(existing?.metadata || {}), ...md },
+              });
+              enriched++;
+            } catch {
+              failed++;
+            }
+          }
+
+          // Broadcast progress to the side panel
+          const processed = Math.min(i + BATCH_SIZE, ids.length);
+          chrome.runtime.sendMessage({
+            type: 'ENRICH_BLOCKED_PROGRESS',
+            processed, total, enriched, failed, sessionDead,
+          }).catch(() => {});
+
+          if (sessionDead) break;
+        }
+
+        return { ok: true, total, enriched, failed, sessionDead };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    }
     case 'DIAGNOSE_TRAINING_DATA': {
       // Audit every training sample in the database and report how many
       // carried useful features vs. came in as empty shells. Helps answer

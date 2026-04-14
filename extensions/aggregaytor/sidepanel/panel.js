@@ -2483,6 +2483,145 @@ document.getElementById('sp-retrain-model')?.addEventListener('click', async () 
   } catch (err) { status.textContent = 'Error: ' + err.message; }
 });
 
+document.getElementById('sp-enrich-blocked')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-enrich-blocked');
+  const progress = document.getElementById('sp-enrich-progress');
+  const status = document.getElementById('sp-train-status');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  progress.style.display = 'block';
+  progress.textContent = 'Counting empty blocked profiles…';
+  status.textContent = '';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'ENRICH_BLOCKED_PROFILES' });
+    if (!res?.ok) {
+      progress.style.color = '#f87171';
+      progress.textContent = 'Error: ' + (res?.error || 'unknown');
+      return;
+    }
+    if (res.total === 0) {
+      progress.textContent = res.message || 'Nothing to enrich';
+      return;
+    }
+    const summary = `Enriched ${res.enriched}/${res.total} profiles (${res.failed} failed)` +
+      (res.sessionDead ? ' — Grindr logged you out mid-run; log back in and re-run to continue' : '');
+    progress.style.color = res.sessionDead ? '#fbbf24' : '#22c55e';
+    progress.textContent = summary;
+    status.textContent = 'Now click Full Retrain to train the model on the newly enriched data.';
+  } catch (err) {
+    progress.style.color = '#f87171';
+    progress.textContent = 'Error: ' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ── Grindr Auto-Login Credentials ──────────────────────────────────────────
+async function refreshGrindrCredStatus() {
+  const el = document.getElementById('sp-grindr-cred-status');
+  if (!el) return;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_GRINDR_CREDENTIAL_STATUS' });
+    if (!res?.ok) { el.textContent = ''; return; }
+    if (!res.saved) {
+      el.textContent = 'No credentials stored. Auto-login is disabled until you save.';
+      el.style.color = '#6b7280';
+      document.getElementById('sp-grindr-auto-login').checked = true; // sensible default
+    } else {
+      const ts = res.savedAt ? new Date(res.savedAt).toLocaleString() : 'unknown';
+      el.textContent = `✓ Credentials saved (${ts}). Auto-login: ${res.autoLogin ? 'ON' : 'OFF'}.`;
+      el.style.color = '#22c55e';
+      document.getElementById('sp-grindr-auto-login').checked = res.autoLogin;
+    }
+  } catch { el.textContent = ''; }
+}
+
+document.getElementById('sp-grindr-cred-save')?.addEventListener('click', async () => {
+  const emailEl = document.getElementById('sp-grindr-email');
+  const passEl = document.getElementById('sp-grindr-password');
+  const autoEl = document.getElementById('sp-grindr-auto-login');
+  const statusEl = document.getElementById('sp-grindr-cred-status');
+  const username = emailEl.value.trim();
+  const password = passEl.value;
+  if (!username || !password) {
+    statusEl.textContent = 'Enter both email and password.';
+    statusEl.style.color = '#f87171';
+    return;
+  }
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'SET_GRINDR_CREDENTIALS',
+      username, password, autoLogin: !!autoEl.checked,
+    });
+    if (res?.ok) {
+      // Clear the password field from memory
+      passEl.value = '';
+      statusEl.textContent = '✓ Saved & encrypted.';
+      statusEl.style.color = '#22c55e';
+      setTimeout(refreshGrindrCredStatus, 1000);
+    } else {
+      statusEl.textContent = 'Error: ' + (res?.error || 'unknown');
+      statusEl.style.color = '#f87171';
+    }
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+    statusEl.style.color = '#f87171';
+  }
+});
+
+document.getElementById('sp-grindr-cred-clear')?.addEventListener('click', async () => {
+  if (!confirm('Delete stored Grindr credentials? Auto-login will be disabled.')) return;
+  try {
+    await chrome.runtime.sendMessage({ type: 'SET_GRINDR_CREDENTIALS', username: '', password: '' });
+    document.getElementById('sp-grindr-email').value = '';
+    document.getElementById('sp-grindr-password').value = '';
+    await refreshGrindrCredStatus();
+  } catch {}
+});
+
+// When the user changes the auto-login toggle, re-save the same creds with
+// the new flag. We can't toggle without knowing the password, so this only
+// works if creds are currently saved — otherwise Save Credentials is the path.
+document.getElementById('sp-grindr-auto-login')?.addEventListener('change', async (e) => {
+  const statusEl = document.getElementById('sp-grindr-cred-status');
+  try {
+    const st = await chrome.runtime.sendMessage({ type: 'GET_GRINDR_CREDENTIAL_STATUS' });
+    if (!st?.saved) return; // nothing to update yet
+    // We don't have the password in memory, so fetch the decrypted creds
+    // and re-encrypt with the new autoLogin flag.
+    const got = await chrome.runtime.sendMessage({ type: 'GET_GRINDR_CREDENTIALS' });
+    if (!got?.credentials) {
+      statusEl.textContent = 'Re-enter your password to change this setting.';
+      statusEl.style.color = '#fbbf24';
+      return;
+    }
+    await chrome.runtime.sendMessage({
+      type: 'SET_GRINDR_CREDENTIALS',
+      username: got.credentials.username,
+      password: got.credentials.password,
+      autoLogin: !!e.target.checked,
+    });
+    refreshGrindrCredStatus();
+  } catch {}
+});
+
+// Refresh credential status whenever the settings view is opened
+document.addEventListener('DOMContentLoaded', () => refreshGrindrCredStatus());
+refreshGrindrCredStatus();
+
+// Progress updates from the enrichment job (fired every batch of 10)
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === 'ENRICH_BLOCKED_PROGRESS') {
+    const progress = document.getElementById('sp-enrich-progress');
+    if (!progress) return;
+    const pct = Math.round((msg.processed / msg.total) * 100);
+    progress.style.color = msg.sessionDead ? '#fbbf24' : '';
+    progress.textContent = `Enriching blocked profiles: ${msg.processed}/${msg.total} (${pct}%) — ` +
+      `${msg.enriched} succeeded, ${msg.failed} failed` +
+      (msg.sessionDead ? ' — session ended mid-run' : '');
+  }
+});
+
 document.getElementById('sp-diagnose-training')?.addEventListener('click', async () => {
   const status = document.getElementById('sp-train-status');
   status.textContent = 'Auditing training data…';

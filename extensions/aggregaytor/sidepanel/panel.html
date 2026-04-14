@@ -217,9 +217,11 @@
           <button class="settings-btn" id="sp-train-now" title="Scan all contacts for pins, favorites, blocks, and ratings — train the model on those signals">Train Now</button>
           <button class="settings-btn" id="sp-train-grindr" title="Import Grindr's blocked/hidden list as negative training data (fetches from Grindr API + stored contact metadata)">Import Grindr Lists</button>
           <button class="settings-btn" id="sp-train-sniffies" title="Import Sniffies blocked (from middle-clicks) and pinned contacts as training signals">Import Sniffies Lists</button>
+          <button class="settings-btn" id="sp-enrich-blocked" title="Fetch full profile data (body type, position, age, ethnicity) for every blocked Grindr contact that's currently an empty shell. Rate-limited to stay under Grindr's forced-logout threshold.">Enrich Blocked</button>
           <button class="settings-btn" id="sp-retrain-model" title="Retrain the entire model from scratch using all recorded feedback">Full Retrain</button>
           <button class="settings-btn" id="sp-diagnose-training" title="Audit training data quality — shows how many samples have real profile attributes (body type, position, age, etc.) vs. empty shells that taught the model nothing">Diagnose Data</button>
         </div>
+        <div id="sp-enrich-progress" class="settings-info" style="margin-top:4px;font-size:11px;display:none"></div>
         <div id="sp-train-status" class="settings-info" style="margin-top:4px"></div>
         <div id="sp-model-stats" class="settings-info" style="margin-top:4px;font-size:10px;color:#6b7280"></div>
       </div>
@@ -428,6 +430,36 @@
         <label class="settings-label">Travel time (min): <input type="number" id="sp-cal-travel" value="15" class="settings-num"></label>
         <button class="settings-btn" id="sp-cal-save">Save Calendar Settings</button>
         <div id="sp-cal-status" class="settings-info" style="margin-top:4px"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Grindr Auto-Login</h3>
+        <div class="settings-info">
+          Grindr rate-limits block actions and will force a re-login after too many.
+          Save your email + password here and the extension will fill the login form
+          for you the moment it detects you've been logged out — so the block queue
+          can resume without you noticing. Credentials are encrypted (AES-GCM with
+          a device-local key) and never leave your machine.
+          <br><br>
+          <b>⚠ Only works with email + password login.</b> If you use "Sign in with
+          Apple" / Google / Facebook, this won't help — those go through OAuth
+          popups that the extension can't drive. Switch Grindr to a plain email +
+          password account if you want auto-login to work.
+        </div>
+        <div id="sp-grindr-cred-status" class="settings-info" style="margin-top:6px;color:#6b7280"></div>
+        <label class="settings-label" style="margin-top:6px">Email
+          <input type="email" id="sp-grindr-email" class="settings-input" autocomplete="off" placeholder="you@example.com" style="margin-top:2px">
+        </label>
+        <label class="settings-label" style="margin-top:6px">Password
+          <input type="password" id="sp-grindr-password" class="settings-input" autocomplete="new-password" placeholder="••••••••" style="margin-top:2px">
+        </label>
+        <label class="settings-checkbox-label" style="margin-top:6px">
+          <input type="checkbox" id="sp-grindr-auto-login" checked>
+          Auto-fill the Grindr login form when I'm forced out
+        </label>
+        <div class="settings-row" style="margin-top:6px">
+          <button class="settings-btn" id="sp-grindr-cred-save">Save Credentials</button>
+          <button class="settings-btn" id="sp-grindr-cred-clear" title="Delete stored Grindr credentials" style="border-color:rgba(239,68,68,0.3);color:#f87171">Clear</button>
+        </div>
       </div>
     </div>
 
