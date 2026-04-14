@@ -43,13 +43,20 @@ export async function getThreadSummaries(
   // Step 1: Fetch messages using allDocs key-range instead of Mango find().
   // Message IDs are `msg:{platform}:{messageId}`, so we can use the platform
   // as a key-range filter when specified.
+  //
+  // v0.57.15: bumped the scan limit from 1000 to 5000. The previous cap
+  // silently truncated heavy-user inboxes — once you crossed 1000 messages
+  // across all threads, older conversations dropped off the list because
+  // their last message wasn't in the scanned window. 5000 covers ~250
+  // active threads at 20 msgs/thread; the SW cache still memoizes the
+  // result for 5s so this only fires a few times per minute.
   const startkey = opts?.platform ? `msg:${opts.platform}:` : 'msg:';
   const endkey = opts?.platform ? `msg:${opts.platform}:\uffff` : 'msg:\uffff';
   const result = await store.allDocs({
     startkey,
     endkey,
     include_docs: true,
-    limit: 1000,
+    limit: 5000,
   });
   const messages = result.rows
     .filter(r => r.doc && (r.doc as any).docType === 'message')

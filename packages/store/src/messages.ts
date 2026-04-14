@@ -384,9 +384,14 @@ export async function getUnreadCount(
   unreadCountCache.set(cacheKey, { count, time: Date.now(), capped });
   // Keep the cache small — at most one entry per platform × exact/limit
   // variant. Bounded by the fixed set of call sites, but trim defensively.
+  // v0.57.15: defensive guard against the (impossible-but-cheap-to-check)
+  // case where iter.next() returns done=true on a non-empty map; passing
+  // `undefined` to Map.delete is harmless but the cast hid the case from
+  // future maintainers.
   if (unreadCountCache.size > 32) {
     const iter = unreadCountCache.keys();
-    unreadCountCache.delete(iter.next().value as string);
+    const next = iter.next();
+    if (!next.done) unreadCountCache.delete(next.value as string);
   }
 
   return count;

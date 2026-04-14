@@ -709,15 +709,25 @@ function getCachedResponse(key: string): string | null {
 }
 
 function setCachedResponse(key: string, response: string, estimatedTokens: number): void {
+  // FIFO eviction (v0.57.15): JS Map preserves insertion order, so iterating
+  // `keys()` gives us the oldest entry without a sort. Pre-fix this used
+  // `[...entries].sort(...)` which is O(N log N) on every set when full —
+  // a hot-path on bursty auto-respond traffic. Now O(1).
+  //
+  // Note: cache hits do NOT refresh insertion order (entry.timestamp tracks
+  // age for TTL purposes, not LRU). For our 5-min TTL + 100-entry cap that's
+  // fine — by the time a 100-entry cache fills, every entry is < 5 min old.
   if (responseCache.size >= MAX_CACHE_SIZE) {
-    // Evict oldest
-    const oldest = [...responseCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp)[0];
-    if (oldest) responseCache.delete(oldest[0]);
+    // Drop the oldest (insertion-order first) to make room.
+    // Defensive: if the map is somehow empty, the iter.next() returns done=true
+    // and we fall through with no eviction — which is harmless.
+    const next = responseCache.keys().next();
+    if (!next.done) responseCache.delete(next.value as string);
   }
   responseCache.set(key, { response, timestamp: Date.now(), tokens: estimatedTokens });
 }
 
-// 2. System prompt composition — now driven by the modular cache above.
+// 2. System prompt composition — driven by the modular cache below.
 //    The old implementation cached a whole prompt string and did a regex
 //    swap on the contact name (which silently broke when the contact name
 //    contained regex special chars). Now each module is cached independently
@@ -725,18 +735,12 @@ function setCachedResponse(key: string, response: string, estimatedTokens: numbe
 //    heavy parts (persona, style guide) are reused across features, while
 //    contact name is interpolated fresh and always correct.
 //
-//    These symbols are preserved for back-compat with clearLLMCaches(). They
-//    no longer hold real data but we leave the references so older build
-//    artifacts don't crash when paired with new code during in-place reload.
-let cachedSystemPrompt = '';
-let systemPromptHash = '';
-
-async function getCachedSystemPrompt(contactName: string, platform: string): Promise<string> {
-  // No need to memoize the outer prompt — buildSystemPrompt now calls the
-  // module cache which returns pre-computed fragments. String.join() on a
-  // handful of fragments is ~0.01ms, below measurement noise.
-  return buildSystemPrompt(contactName, platform);
-}
+//    v0.57.15: removed the dead `cachedSystemPrompt` / `systemPromptHash`
+//    back-compat shims — they were preserved across the v0.57.8 caching
+//    overhaul to avoid breaking in-flight reloads, but enough release
+//    cycles have passed that no live build references them. The empty
+//    `getCachedSystemPrompt` wrapper is also gone; callers use
+//    `buildSystemPromptWithContext` directly.
 
 // 3. Conversation windowing — use fewer messages for simpler tasks
 const CONTEXT_WINDOWS: Record<string, number> = {
@@ -943,8 +947,8 @@ export function clearLLMCaches(): { cleared: Record<string, number> } {
   _contextBuilderCache.clear();
   // Don't clear requestTimestamps or backoffUntil — those affect live rate
   // limiting. And `inflightRequests` clears naturally when promises resolve.
-  cachedSystemPrompt = '';
-  systemPromptHash = '';
+  // (v0.57.15: removed assignments to the deleted cachedSystemPrompt/
+  // systemPromptHash shims — see the comment near the modular cache above.)
   return { cleared };
 }
 

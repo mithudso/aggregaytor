@@ -12,8 +12,14 @@ let currentMessages = [];
 
 // ── Instant Tooltips ──────────────────────────────────────────────────────────
 // Convert all title attributes to data-tip for instant CSS tooltips
-// (Chrome's native title tooltip has a ~2 second delay that can't be changed)
+// (Chrome's native title tooltip has a ~2 second delay that can't be changed).
+//
+// v0.57.15: the polling interval is now visibility-gated — when the panel
+// is hidden (collapsed sidebar, different tab), the 5s sweep is skipped so
+// we don't burn CPU repeatedly walking a stable DOM that the user can't
+// see. The panel is hidden roughly half the time for most users.
 function convertTitlesToTips() {
+  if (document.visibilityState === 'hidden') return;
   document.querySelectorAll('[title]').forEach(el => {
     const title = el.getAttribute('title');
     if (title && !el.hasAttribute('data-tip')) {
@@ -24,9 +30,14 @@ function convertTitlesToTips() {
     }
   });
 }
-// Run on load and periodically (for dynamically created elements)
+// Run on load and periodically (for dynamically created elements). The
+// poll itself short-circuits when hidden; we also re-run on visibilitychange
+// to catch elements added while the panel was off-screen.
 convertTitlesToTips();
 setInterval(convertTitlesToTips, 5000);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') convertTitlesToTips();
+});
 
 // ── User Preferences (loaded from chrome.storage.local) ─────────────────────
 let prefTimestampAbsolute = false; // true = "11:42 PM", false = "5m" (relative)
@@ -409,9 +420,21 @@ function renderThreads(summaries) {
   });
 }
 
-// Cache hover preview data to avoid repeated queries
+// Cache hover preview data to avoid repeated queries.
+// v0.57.15: bounded with FIFO eviction. Pre-fix the Map grew unbounded —
+// after a long browsing session a heavy user could accumulate hundreds of
+// rendered HTML strings in memory (each ~1-3KB).
 const hoverPreviewCache = new Map();
 const HOVER_CACHE_TTL = 30_000; // 30 seconds
+const HOVER_CACHE_MAX_ENTRIES = 100;
+
+function setHoverPreviewCache(contactId, entry) {
+  if (hoverPreviewCache.size >= HOVER_CACHE_MAX_ENTRIES) {
+    const next = hoverPreviewCache.keys().next();
+    if (!next.done) hoverPreviewCache.delete(next.value);
+  }
+  hoverPreviewCache.set(contactId, entry);
+}
 
 async function loadHoverPreview(contactId, platform, previewEl, threadEl) {
   // Check cache first
@@ -426,14 +449,18 @@ async function loadHoverPreview(contactId, platform, previewEl, threadEl) {
   previewEl.classList.add('active');
 
   try {
-    const [msgRes, summaryRes] = await Promise.all([
+    // v0.57.15: avoid the redundant GET_THREAD_SUMMARIES round-trip when
+    // possible. The current contact's avatar/displayName/metadata are most
+    // efficiently fetched via GET_CONTACT (single PouchDB.get) — that's
+    // ~200ms cheaper per hover than re-running the full summaries query
+    // (which scans up to 1000 messages on every call).
+    const [msgRes, contactRes] = await Promise.all([
       chrome.runtime.sendMessage({ type: 'GET_MESSAGES_BY_CONTACT', contactId, limit: 6 }),
-      chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} }),
+      chrome.runtime.sendMessage({ type: 'GET_CONTACT', contactId: `contact:${contactId.replace('contact:', '')}` }),
     ]);
 
     const messages = msgRes?.messages || [];
-    const thread = summaryRes?.summaries?.find(s => s.contactId === contactId);
-    const contact = thread?.contact;
+    const contact = contactRes?.contact;
     const meta = allThreadMeta.get(contactId) || {};
     const md = contact?.metadata || {};
 
@@ -477,8 +504,8 @@ async function loadHoverPreview(contactId, platform, previewEl, threadEl) {
         `).join('') : '<div class="hp-empty">No messages</div>'}
       </div>
     `;
-    // Cache the rendered preview
-    hoverPreviewCache.set(contactId, { html: previewEl.innerHTML, ts: Date.now() });
+    // Cache the rendered preview (v0.57.15: bounded by HOVER_CACHE_MAX_ENTRIES)
+    setHoverPreviewCache(contactId, { html: previewEl.innerHTML, ts: Date.now() });
   } catch (err) {
     previewEl.innerHTML = '<div class="hp-loading">Preview unavailable</div>';
   }

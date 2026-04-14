@@ -838,8 +838,11 @@ async function handleMessage(msg: any): Promise<any> {
       // Send a message to all favorited contacts on a specific platform.
       // Walks the platform tabs for each contact and posts a SEND_AUTO_RESPONSE
       // followed by SPA_NAVIGATE. Pacing defaults to 3s to stay under platform
-      // rate limits. Errors on individual recipients are logged (previously
-      // silently swallowed) so the caller can see partial failures.
+      // rate limits.
+      //
+      // v0.57.15: per-recipient errors are now collected and returned so the
+      // UI can surface partial failures. Pre-fix the docstring claimed errors
+      // were logged but they were silently swallowed by an empty `catch {}`.
       try {
         const allMeta = await getAllThreadMeta();
         const favorites = allMeta.filter(m =>
@@ -847,6 +850,7 @@ async function handleMessage(msg: any): Promise<any> {
           (!msg.platform || m.platform === msg.platform)
         );
         let sent = 0;
+        const failures: Array<{ contactId: string; error: string }> = [];
         const maxRecipients = Math.min(favorites.length, msg.maxRecipients || 50);
 
         for (let i = 0; i < maxRecipients; i++) {
@@ -858,6 +862,7 @@ async function handleMessage(msg: any): Promise<any> {
           try {
             const platform = meta.platform || contactId.split(':')[0];
             const tabs = await chrome.tabs.query({});
+            let recipientSent = false;
             for (const tab of tabs) {
               if (!tab.id || !tab.url) continue;
               const platformHosts: Record<string, string> = {
@@ -870,21 +875,33 @@ async function handleMessage(msg: any): Promise<any> {
                   text: msg.message,
                   contactId,
                 }).catch(() => {});
-                // Navigate to the conversation first
-                await chrome.tabs.sendMessage(tab.id, {
-                  type: 'SPA_NAVIGATE',
-                  url: PLATFORM_URLS[platform]?.(contactId) || '',
-                  path: new URL(PLATFORM_URLS[platform]?.(contactId) || 'about:blank').pathname,
-                }).catch(() => {});
+                // Navigate to the conversation first. Guard against an
+                // unmapped platform (would yield 'about:blank' before).
+                const navUrl = PLATFORM_URLS[platform]?.(contactId) || '';
+                if (navUrl) {
+                  await chrome.tabs.sendMessage(tab.id, {
+                    type: 'SPA_NAVIGATE',
+                    url: navUrl,
+                    path: new URL(navUrl).pathname,
+                  }).catch(() => {});
+                }
                 sent++;
+                recipientSent = true;
                 // Wait between sends to avoid rate limiting
                 await new Promise(r => setTimeout(r, msg.delay || 3000));
                 break;
               }
             }
-          } catch {}
+            if (!recipientSent) {
+              failures.push({ contactId, error: 'no matching platform tab open' });
+            }
+          } catch (e) {
+            const errMsg = (e as Error).message || String(e);
+            failures.push({ contactId, error: errMsg });
+            console.warn(`${LOG} Broadcast to ${contactId} failed:`, errMsg);
+          }
         }
-        return { ok: true, sent, total: favorites.length };
+        return { ok: true, sent, total: favorites.length, failures };
       } catch (err) { return { ok: false, error: (err as Error).message }; }
     }
 
@@ -1696,7 +1713,12 @@ async function handleMessage(msg: any): Promise<any> {
     // profile can read these, same as any browser password manager.
     case 'SET_GRINDR_CREDENTIALS': {
       try {
-        const { username, password, autoLogin } = msg;
+        // v0.57.15: trim incoming username/password — paste handlers in
+        // the popup commonly leave a trailing space which would cause Grindr
+        // to reject the auto-login attempt with a confusing 401.
+        const username = String(msg.username || '').trim();
+        const password = String(msg.password || '').trim();
+        const autoLogin = msg.autoLogin;
         if (!username || !password) {
           await chrome.storage.local.remove(['aggregaytor_grindr_credentials']);
           return { ok: true, cleared: true };
@@ -1762,6 +1784,49 @@ async function handleMessage(msg: any): Promise<any> {
       } catch (err) { return { ok: false, error: (err as Error).message }; }
     }
 
+    // ── Diagnostics ────────────────────────────────────────────────────────
+    // v0.57.15: lightweight read-only handlers for surfacing build metadata
+    // and search-index health to the settings UI without requiring DEBUG.
+
+    /** Return manifest version + build hash (when present). Lets the UI tell
+     *  the user "you're on 0.57.15 (build a3f4...)" without parsing the
+     *  service worker version string. */
+    case 'GET_BUILD_INFO': {
+      const m = chrome.runtime.getManifest() as any;
+      let buildHash = '';
+      try {
+        const res = await fetch(chrome.runtime.getURL('.build-hash'), { cache: 'no-store' });
+        if (res.ok) buildHash = (await res.text()).trim();
+      } catch {}
+      return {
+        ok: true,
+        version: m.version,
+        name: m.name,
+        manifestVersion: m.manifest_version,
+        buildHash,
+        isDevBuild: !m.update_url,
+        permissions: m.permissions || [],
+        hostPermissions: m.host_permissions || [],
+        uptimeMin: Math.round((Date.now() - swPerfStart) / 60_000),
+      };
+    }
+
+    /** Return search-index health: ready, size, cap, and what fraction of
+     *  the cap is consumed. Surfaced in settings so users can tell whether
+     *  full-text search is operating on the fast path or falling back to
+     *  the PouchDB scan. */
+    case 'GET_SEARCH_INDEX_INFO': {
+      return {
+        ok: true,
+        ready: isIndexReady(),
+        size: getIndexSize(),
+        cap: SEARCH_INDEX_MAX_DOCS,
+        utilization: SEARCH_INDEX_MAX_DOCS > 0
+          ? Math.round((getIndexSize() / SEARCH_INDEX_MAX_DOCS) * 1000) / 10
+          : 0,
+      };
+    }
+
     // Debug commands (from MCP server or dev tools)
     case 'DEBUG_COMMAND': return { ok: true, result: await handleDebugCommand(msg.command, msg.params) };
 
@@ -1810,7 +1875,11 @@ async function handleIncomingMessages(messages: UnifiedMessage[], platform: Plat
     // Run block rules
     await runBlockRules(messages).catch(e => console.warn(`${LOG} Block rules error:`, e));
 
-    // Queue dossier auto-extraction — waits for 30s of inactivity before starting
+    // Queue dossier auto-extraction — waits for 30s of inactivity before starting.
+    // v0.57.15: also enforces a 5-minute MAX deadline so a steady stream of
+    // inbound messages (chatty group thread, bursty platform) can't starve
+    // the extraction indefinitely. Once the first queued contact has waited
+    // DOSSIER_MAX_DELAY ms, processing fires regardless of activity.
     const contactIds = new Set(messages.filter(m => m.direction === 'in').map(m => m.contactId));
     for (const cid of contactIds) {
       dossierExtractionQueue.add(`${cid}:${messages[0]?.platform || platform}`);
@@ -1819,19 +1888,34 @@ async function handleIncomingMessages(messages: UnifiedMessage[], platform: Plat
     if (dossierExtractionQueue.size > 0) {
       if (dossierExtractionTimer) clearTimeout(dossierExtractionTimer);
       dossierExtractionTimer = setTimeout(processDossierExtractions, 30_000); // 30s idle debounce
+      if (!dossierFirstQueuedAt) dossierFirstQueuedAt = Date.now();
+      // If we've been deferring for too long, force-fire the extraction now
+      // even though a fresh message just arrived.
+      if (Date.now() - dossierFirstQueuedAt >= DOSSIER_MAX_DELAY_MS) {
+        clearTimeout(dossierExtractionTimer);
+        dossierExtractionTimer = setTimeout(processDossierExtractions, 0);
+      }
     }
   }
 
   return { ok: true, ...result };
 }
 
-// Debounced dossier extraction — serial processing, 30s idle trigger
+// Debounced dossier extraction — serial processing, 30s idle trigger,
+// 5-minute hard deadline. v0.57.15 added DOSSIER_MAX_DELAY_MS / dossierFirstQueuedAt
+// so heavy chat traffic can't starve the extraction by perpetually resetting
+// the idle timer.
 const dossierExtractionQueue = new Set<string>();
 let dossierExtractionTimer: ReturnType<typeof setTimeout> | null = null;
 let dossierProcessing = false;
+let dossierFirstQueuedAt = 0;
+const DOSSIER_MAX_DELAY_MS = 5 * 60_000;
 
 async function processDossierExtractions(): Promise<void> {
   dossierExtractionTimer = null;
+  // v0.57.15: clear the deadline tracker as soon as the run starts so the
+  // next queue-add cycle starts fresh rather than carrying the stale stamp.
+  dossierFirstQueuedAt = 0;
   if (dossierProcessing) return; // already running, will pick up queued items
   dossierProcessing = true;
 
@@ -1945,10 +2029,19 @@ async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void>
     }
   }
 
-  // Cap the dedup cache
+  // Cap the dedup cache. v0.57.15: switched from O(N log N) sort-based
+  // eviction to O(K) FIFO iteration. JS Map preserves insertion order, so
+  // walking `keys()` yields the oldest entries in O(K) where K is the number
+  // we want to drop. On accounts with thousands of contact upserts per
+  // minute the previous sort dominated this hot path.
   if (recentContactUpserts.size > 500) {
-    const oldest = [...recentContactUpserts.entries()].sort((a, b) => a[1].time - b[1].time).slice(0, 200);
-    for (const [k] of oldest) recentContactUpserts.delete(k);
+    const toDrop = 200;
+    const iter = recentContactUpserts.keys();
+    for (let i = 0; i < toDrop; i++) {
+      const next = iter.next();
+      if (next.done) break;
+      recentContactUpserts.delete(next.value as string);
+    }
   }
 
   // Debounced notification
@@ -2189,8 +2282,11 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       case 'grindr-login-check':
         await runGrindrLoginCheck().catch(() => { /* tab often inaccessible */ });
         break;
-      // keepalive removed — was causing CPU overhead; dev-reload-keepalive is
-      // intentionally a no-op here (the actual work is a setInterval poll).
+      // dev-reload-keepalive: intentionally a no-op handler. The alarm exists
+      // ONLY to keep the MV3 service worker warm so the setInterval poll in
+      // startDevAutoReload() (the actual rebuild-detector) can fire reliably.
+      // The legacy 25s "keepalive" alarm was removed in v0.57.7 — this one
+      // is dev-only (guarded by absence of update_url) and short-lived.
       case 'dev-reload-keepalive':
         break;
       case 'enrich-blocked-tick':
@@ -2240,7 +2336,13 @@ async function updateBadgeCount(): Promise<void> {
     const count = await getUnreadCount();
     chrome.action.setBadgeText({ text: count > 0 ? String(count) : '' });
     chrome.action.setBadgeBackgroundColor({ color: '#FF6B6B' });
-  } catch {}
+  } catch (err) {
+    // v0.57.15: previously swallowed silently. Badge updates failing
+    // chronically can mask real DB issues (corrupt PouchDB, unloaded
+    // service-worker context). Logging at warn level — these are recoverable
+    // (next badge-refresh alarm will retry) but worth knowing about.
+    console.warn(`${LOG} updateBadgeCount failed:`, (err as Error).message || err);
+  }
 }
 
 updateBadgeCount().catch(() => {});

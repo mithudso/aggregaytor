@@ -8,6 +8,9 @@ const PROVIDER_INFO = {
   gemini: 'Gemini 2.5 Flash Lite (15 RPM free). aistudio.google.com',
   openai: 'GPT-4o-mini (500 RPM, $5 tier). platform.openai.com',
   groq: 'Llama 3.1 8B (30 RPM free, ultra-fast). console.groq.com',
+  // Cerebras: largest free daily quota (1M tokens/day) at ~2600 tok/s on
+  // wafer-scale chips. Added v0.57.9 to llm.ts; popup option added v0.57.15.
+  cerebras: 'Llama 4 Scout (30 RPM, 1M tokens/day free). cloud.cerebras.ai',
   perplexity: 'Sonar (50 RPM, pay-as-you-go). perplexity.ai/settings/api',
   mistral: 'Mistral Small (2 RPM free). console.mistral.ai',
   copilot: 'Via Copilot proxy (unofficial). Needs Copilot sub.',

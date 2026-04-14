@@ -60,8 +60,21 @@ export interface IndexableMessage {
 
 // Module-level singleton — one index per SW lifetime.
 let _index: any = null;
-// Insertion order so we can evict oldest when the cap is exceeded.
+// Insertion-order list of currently-indexed PouchDB ids so we can evict
+// the oldest when the cap is exceeded. Kept in sync with `_indexedSet`
+// for O(1) "have we seen this id?" lookups.
+//
+// Bug history (v0.57.15): pre-fix, `addOne` unconditionally `push`ed the
+// id every time a doc was re-indexed (FlexSearch.add() overwrites silently
+// for an existing id, so re-indexing is common — every message-write
+// path eagerly upserts to keep the index hot). The duplicate pushes meant
+// `_indexedIds.length` overstated true index size, and the cap-eviction
+// loop would `shift()` ids that were still indexed under a fresher
+// duplicate further down the list — silently dropping live messages from
+// the search index. The set-backed dedup below restores the invariant
+// that `_indexedIds.length === _index document count`.
 const _indexedIds: string[] = [];
+const _indexedSet = new Set<string>();
 let _seeded = false;
 
 /** Create the FlexSearch instance with tuned defaults. */
@@ -84,18 +97,26 @@ function createIndex(): any {
 }
 
 /** Add a single message to the index. Idempotent — re-indexing the same id
- *  overwrites the previous body. */
+ *  overwrites the previous body in FlexSearch AND skips the duplicate-id
+ *  push into `_indexedIds`, so the eviction cap reflects the true number
+ *  of distinct documents in the index. */
 function addOne(doc: IndexableMessage): void {
   if (!_index) return;
   try {
     _index.add(doc);
-    _indexedIds.push(doc._id);
+    if (!_indexedSet.has(doc._id)) {
+      _indexedIds.push(doc._id);
+      _indexedSet.add(doc._id);
+    }
     // Enforce the cap by evicting the oldest-indexed doc. We don't bother
     // evicting by timestamp here — insertion order is a good enough proxy
     // for most users, and it's O(1) vs O(n log n) for a timestamp sort.
     while (_indexedIds.length > SEARCH_INDEX_MAX_DOCS) {
       const evictId = _indexedIds.shift();
-      if (evictId) _index.remove(evictId);
+      if (evictId) {
+        _index.remove(evictId);
+        _indexedSet.delete(evictId);
+      }
     }
   } catch (err) {
     // A malformed body (very rare — we sanity-check above) can throw inside
@@ -146,11 +167,34 @@ export function indexMessages(msgs: IndexableMessage[]): void {
 /**
  * Remove messages from the index. Used by CLEAR_THREAD_MESSAGES so search
  * results don't return ids that no longer exist in PouchDB.
+ *
+ * Bug history (v0.57.15): pre-fix, this only called `_index.remove(id)`
+ * but left zombie entries in `_indexedIds`/`_indexedSet`. Over time those
+ * zombies inflated the indexed-doc count, triggering premature evictions
+ * and underreporting `getIndexSize()`. Removed ids are now scrubbed from
+ * the bookkeeping structures too.
+ *
+ * Splicing N items out of `_indexedIds` is O(N+M); a one-time rebuild via
+ * filter() is the same big-O but allocation-friendlier when many ids are
+ * deleted at once (e.g. clearing a 500-message thread). We use the
+ * filter+rebuild path when more than 50 ids are deleted, otherwise the
+ * cheaper indexOf+splice loop.
  */
 export function removeFromIndex(ids: string[]): void {
   if (!_index || !ids.length) return;
   for (const id of ids) {
     try { _index.remove(id); } catch { /* missing id — ignore */ }
+    _indexedSet.delete(id);
+  }
+  if (ids.length > 50) {
+    const next = _indexedIds.filter(id => _indexedSet.has(id));
+    _indexedIds.length = 0;
+    for (const id of next) _indexedIds.push(id);
+  } else {
+    for (const id of ids) {
+      const idx = _indexedIds.indexOf(id);
+      if (idx >= 0) _indexedIds.splice(idx, 1);
+    }
   }
 }
 
@@ -161,6 +205,7 @@ export function removeFromIndex(ids: string[]): void {
 export function clearIndex(): void {
   _index = null;
   _indexedIds.length = 0;
+  _indexedSet.clear();
   _seeded = false;
 }
 
