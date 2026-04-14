@@ -217,7 +217,8 @@
           <button class="settings-btn" id="sp-train-now" title="Scan all contacts for pins, favorites, blocks, and ratings — train the model on those signals">Train Now</button>
           <button class="settings-btn" id="sp-train-grindr" title="Import Grindr's blocked/hidden list as negative training data (fetches from Grindr API + stored contact metadata)">Import Grindr Lists</button>
           <button class="settings-btn" id="sp-train-sniffies" title="Import Sniffies blocked (from middle-clicks) and pinned contacts as training signals">Import Sniffies Lists</button>
-          <button class="settings-btn" id="sp-enrich-blocked" title="Fetch full profile data (body type, position, age, ethnicity) for every blocked Grindr contact that's currently an empty shell. Rate-limited to stay under Grindr's forced-logout threshold.">Enrich Blocked</button>
+          <button class="settings-btn" id="sp-enrich-blocked" title="Start a background enrichment pass that fetches full profile data (body type, position, age, ethnicity) for every blocked Grindr contact that's currently an empty shell. Runs ~5 profiles/min, pauses automatically if Grindr logs you out, and resumes on its own the moment you're logged back in.">Enrich Blocked</button>
+          <button class="settings-btn" id="sp-enrich-stop" title="Stop the background enrichment pass" style="display:none;border-color:rgba(239,68,68,0.3);color:#f87171">Stop Enrich</button>
           <button class="settings-btn" id="sp-retrain-model" title="Retrain the entire model from scratch using all recorded feedback">Full Retrain</button>
           <button class="settings-btn" id="sp-diagnose-training" title="Audit training data quality — shows how many samples have real profile attributes (body type, position, age, etc.) vs. empty shells that taught the model nothing">Diagnose Data</button>
         </div>

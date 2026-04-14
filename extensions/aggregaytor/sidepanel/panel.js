@@ -2483,49 +2483,86 @@ document.getElementById('sp-retrain-model')?.addEventListener('click', async () 
   } catch (err) { status.textContent = 'Error: ' + err.message; }
 });
 
-document.getElementById('sp-enrich-blocked')?.addEventListener('click', async () => {
-  const btn = document.getElementById('sp-enrich-blocked');
+function renderEnrichState(state) {
+  const startBtn = document.getElementById('sp-enrich-blocked');
+  const stopBtn = document.getElementById('sp-enrich-stop');
   const progress = document.getElementById('sp-enrich-progress');
-  const status = document.getElementById('sp-train-status');
-  if (btn.disabled) return;
-  btn.disabled = true;
+  if (!startBtn || !stopBtn || !progress || !state) return;
+  const running = state.status === 'running' || state.status === 'paused';
+  stopBtn.style.display = running ? '' : 'none';
+  startBtn.textContent = state.status === 'paused' ? 'Resume Enrich'
+    : state.status === 'running' ? 'Enriching…'
+    : 'Enrich Blocked';
+  startBtn.disabled = state.status === 'running';
+  if (state.total === 0 && state.status === 'idle') {
+    progress.style.display = 'none';
+    progress.textContent = '';
+    return;
+  }
   progress.style.display = 'block';
-  progress.textContent = 'Counting empty blocked profiles…';
-  status.textContent = '';
+  const pct = state.total ? Math.round((state.processed / state.total) * 100) : 0;
+  const base = `${state.processed}/${state.total} (${pct}%) — ${state.enriched} enriched, ${state.failed} failed`;
+  if (state.status === 'paused') {
+    progress.style.color = '#fbbf24';
+    const reasonMsg = {
+      'no-auth': 'Waiting for Grindr auth — scroll the cascade on the Grindr tab so the adapter can capture a token.',
+      'no-tab': 'Open web.grindr.com in a tab — enrichment will resume on the next tick.',
+      'session-dead': 'Grindr logged you out. Log back in (auto-login will do it if creds are saved) — auto-resumes.',
+      'manual': 'Paused manually — click Resume Enrich to continue.',
+      'error': state.lastError || 'Error — click Resume Enrich to retry.',
+    };
+    progress.textContent = `Paused — ${base}. ${reasonMsg[state.pauseReason] || 'Retrying on next tick.'}`;
+  } else if (state.status === 'running') {
+    progress.style.color = '';
+    progress.textContent = `Enriching: ${base}. Runs in the background ~5/min — safe to close this panel, extension, or even the browser.`;
+  } else if (state.processed > 0) {
+    progress.style.color = '#22c55e';
+    progress.textContent = `Enrichment complete — ${base}. Click Full Retrain to use the new data.`;
+  }
+}
+
+async function refreshEnrichStatus() {
   try {
-    const res = await chrome.runtime.sendMessage({ type: 'ENRICH_BLOCKED_PROFILES' });
+    const res = await chrome.runtime.sendMessage({ type: 'ENRICH_BLOCKED_STATUS' });
+    if (res?.ok && res.state) renderEnrichState(res.state);
+  } catch {}
+}
+
+document.getElementById('sp-enrich-blocked')?.addEventListener('click', async () => {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'ENRICH_BLOCKED_START' });
     if (!res?.ok) {
+      const progress = document.getElementById('sp-enrich-progress');
+      progress.style.display = 'block';
       progress.style.color = '#fbbf24';
-      progress.textContent = res?.error || 'Unknown error';
+      progress.textContent = res?.error || 'Unknown error starting enrichment';
       return;
     }
     if (res.total === 0) {
-      progress.textContent = res.message || 'Nothing to enrich';
+      const progress = document.getElementById('sp-enrich-progress');
+      progress.style.display = 'block';
+      progress.style.color = '#6b7280';
+      progress.textContent = res.message || 'Nothing to enrich — all blocked contacts already have features.';
       return;
     }
-    // Distinguish "enrichment ran but Grindr kicked you" from "first call
-    // failed and aborted" (previous wording claimed logout even when the
-    // actual cause was missing auth or a bad request).
-    if (res.sessionDead && res.enriched === 0) {
-      progress.style.color = '#fbbf24';
-      progress.textContent = `Grindr returned 401/403 on the very first call. ` +
-        `Either the session is dead (reload Grindr and re-log in), ` +
-        `or the adapter hasn't captured an auth header yet (browse the cascade for a few seconds). ` +
-        `Check the service worker console for the exact response body.`;
-      return;
-    }
-    const summary = `Enriched ${res.enriched}/${res.total} profiles (${res.failed} failed)` +
-      (res.sessionDead ? ' — Grindr logged you out mid-run; log back in and re-run to continue' : '');
-    progress.style.color = res.sessionDead ? '#fbbf24' : '#22c55e';
-    progress.textContent = summary;
-    status.textContent = 'Now click Full Retrain to train the model on the newly enriched data.';
+    await refreshEnrichStatus();
   } catch (err) {
+    const progress = document.getElementById('sp-enrich-progress');
+    progress.style.display = 'block';
     progress.style.color = '#f87171';
     progress.textContent = 'Error: ' + err.message;
-  } finally {
-    btn.disabled = false;
   }
 });
+
+document.getElementById('sp-enrich-stop')?.addEventListener('click', async () => {
+  try {
+    await chrome.runtime.sendMessage({ type: 'ENRICH_BLOCKED_STOP' });
+    await refreshEnrichStatus();
+  } catch {}
+});
+
+// Refresh once on load so a paused run from a previous session shows up
+refreshEnrichStatus();
 
 // ── Grindr Auto-Login Credentials ──────────────────────────────────────────
 async function refreshGrindrCredStatus() {
@@ -2620,16 +2657,12 @@ document.getElementById('sp-grindr-auto-login')?.addEventListener('change', asyn
 document.addEventListener('DOMContentLoaded', () => refreshGrindrCredStatus());
 refreshGrindrCredStatus();
 
-// Progress updates from the enrichment job (fired every batch of 10)
+// Live progress pushed by the service worker after every tick. The state
+// payload now contains the full EnrichState so the UI can render status,
+// pauseReason, and exact counts without another round-trip.
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === 'ENRICH_BLOCKED_PROGRESS') {
-    const progress = document.getElementById('sp-enrich-progress');
-    if (!progress) return;
-    const pct = Math.round((msg.processed / msg.total) * 100);
-    progress.style.color = msg.sessionDead ? '#fbbf24' : '';
-    progress.textContent = `Enriching blocked profiles: ${msg.processed}/${msg.total} (${pct}%) — ` +
-      `${msg.enriched} succeeded, ${msg.failed} failed` +
-      (msg.sessionDead ? ' — session ended mid-run' : '');
+  if (msg?.type === 'ENRICH_BLOCKED_PROGRESS' && msg.state) {
+    renderEnrichState(msg.state);
   }
 });
 

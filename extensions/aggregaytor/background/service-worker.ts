@@ -415,6 +415,12 @@ async function handleMessage(msg: any): Promise<any> {
     }
     case 'PROFILE_BLOCKED': {
       console.log(`${LOG} Block detected: ${msg.contactId}`);
+      // A PROFILE_BLOCKED event from the Grindr page proves the session is
+      // alive and our auth works — a good moment to auto-resume a paused
+      // enrichment pass if we were waiting on session recovery.
+      if (msg.platform === 'grindr') {
+        maybeResumeEnrich().catch(() => {});
+      }
       await upsertThreadMeta(msg.contactId, msg.platform, { blockedByThem: true, archived: true });
       chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform: msg.platform, count: 0 }).catch(() => {})
       // Immediate preference training — blocking is a strong negative signal.
@@ -1342,13 +1348,65 @@ async function handleMessage(msg: any): Promise<any> {
         return { ok: true, ...result };
       } catch (err) { return { ok: false, error: (err as Error).message }; }
     }
+    case 'ENRICH_BLOCKED_START': {
+      // Start (or resume) the background enrichment pass. The actual work
+      // happens on the enrich-blocked-tick alarm, NOT in this handler.
+      // This way a service worker restart, extension reload, Grindr logout,
+      // or browser restart doesn't lose progress — the alarm brings us
+      // back automatically and the state lives in chrome.storage.
+      try {
+        const state = await getEnrichState();
+        // Compute the initial total so the UI has something to show
+        const contacts = await getContactsByPlatform('grindr');
+        const remaining = contacts.filter((c: any) => {
+          const md = c.metadata || {};
+          const hasFeatures = md.bodyType || md.position || md.age || md.ethnicity ||
+            md.height || md.profileText || md.aboutMe || c.avatarUrl;
+          return md.isBlocked && !hasFeatures;
+        }).length;
+        if (!remaining) {
+          await setEnrichState({ ...DEFAULT_ENRICH_STATE, status: 'idle', lastTickAt: Date.now() });
+          return { ok: true, total: 0, message: 'Nothing to enrich — all blocked contacts already have features.' };
+        }
+        const next: EnrichState = {
+          status: 'running',
+          pauseReason: null,
+          total: state.status === 'idle' ? remaining : (state.total || remaining),
+          processed: state.status === 'idle' ? 0 : state.processed,
+          enriched: state.status === 'idle' ? 0 : state.enriched,
+          failed: state.status === 'idle' ? 0 : state.failed,
+          startedAt: state.status === 'idle' ? Date.now() : state.startedAt,
+          lastTickAt: Date.now(),
+          lastError: null,
+        };
+        await setEnrichState(next);
+        // Create the recurring alarm. 1 minute is the minimum reliable MV3
+        // period. Also fire one tick immediately so the user sees progress
+        // without waiting for the first cycle.
+        chrome.alarms.create('enrich-blocked-tick', { periodInMinutes: 1 });
+        runEnrichTick().catch(err => console.warn('[Aggregaytor:SW] enrich tick error:', err));
+        return { ok: true, resumed: state.status !== 'idle', total: next.total, processed: next.processed, enriched: next.enriched };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+    case 'ENRICH_BLOCKED_STOP': {
+      try {
+        chrome.alarms.clear('enrich-blocked-tick');
+        const state = await getEnrichState();
+        await setEnrichState({ ...state, status: 'idle', pauseReason: 'manual' });
+        return { ok: true };
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
+    case 'ENRICH_BLOCKED_STATUS': {
+      try {
+        const state = await getEnrichState();
+        return { ok: true, state };
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
+    // Legacy handler kept for callers that haven't updated — now just
+    // kicks off the resumable pass so behaviour is unchanged from the UI.
     case 'ENRICH_BLOCKED_PROFILES': {
-      // Fetch /api/v4/profiles/{id} for every Grindr contact flagged
-      // isBlocked that has no observable attributes, rate-limited to stay
-      // under Grindr's forced-logout threshold. Grindr typically returns
-      // full profile data on direct GET even for blocked profiles (the
-      // block only filters cascade/search results — the profile itself is
-      // still readable if you have the id, which we do).
       try {
         const targets = await getContactsByPlatform('grindr');
         const needsEnrich = targets.filter((c: any) => {
@@ -2126,6 +2184,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       // intentionally a no-op here (the actual work is a setInterval poll).
       case 'dev-reload-keepalive':
         break;
+      case 'enrich-blocked-tick':
+        await runEnrichTick().catch(e => console.warn(`${LOG} Enrich tick error:`, e));
+        break;
     }
   } catch (err) {
     console.warn(`${LOG} alarm ${alarm.name} failed:`, err);
@@ -2325,6 +2386,224 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
 // Scans thread metadata for signals (pins, favorites, blocks, ratings) and
 // feeds them to the ML preference model as training data.
 //
+// ── Resumable Enrichment State Machine ────────────────────────────────────
+// Replaces the old blocking ENRICH_BLOCKED_PROFILES handler with a tick-
+// driven, persistent state machine. Surviving constraints:
+//   • Service worker death (MV3 SWs die after 30s idle) — state in
+//     chrome.storage, tick brought back by chrome.alarms.
+//   • Grindr forced logout — status flips to 'paused' (session-dead) and
+//     retries every minute. First successful call after re-login clears.
+//   • Extension / browser reload — state persists, alarm recreated in
+//     startDevAutoReload init (below).
+//   • Low CPU priority — 1-minute alarm period, one small batch per tick,
+//     2s between profile calls within a batch. Default 5 profiles/tick
+//     ≈ 300 enrichments/hour ≈ ~10 hours for a 3000-profile backlog.
+type EnrichPauseReason = null | 'no-auth' | 'no-tab' | 'session-dead' | 'manual' | 'error';
+interface EnrichState {
+  status: 'idle' | 'running' | 'paused';
+  pauseReason: EnrichPauseReason;
+  total: number;
+  processed: number;
+  enriched: number;
+  failed: number;
+  startedAt: number;
+  lastTickAt: number;
+  lastError: string | null;
+}
+const DEFAULT_ENRICH_STATE: EnrichState = {
+  status: 'idle', pauseReason: null, total: 0, processed: 0, enriched: 0,
+  failed: 0, startedAt: 0, lastTickAt: 0, lastError: null,
+};
+const ENRICH_STORAGE_KEY = 'aggregaytor_enrich_blocked_state';
+const ENRICH_BATCH_SIZE = 5; // profiles per tick; 5 × 2s = 10s of wall clock
+
+async function getEnrichState(): Promise<EnrichState> {
+  try {
+    const data = await chrome.storage.local.get(ENRICH_STORAGE_KEY);
+    const stored = data[ENRICH_STORAGE_KEY];
+    return stored ? { ...DEFAULT_ENRICH_STATE, ...stored } : { ...DEFAULT_ENRICH_STATE };
+  } catch { return { ...DEFAULT_ENRICH_STATE }; }
+}
+async function setEnrichState(state: EnrichState): Promise<void> {
+  try { await chrome.storage.local.set({ [ENRICH_STORAGE_KEY]: state }); } catch {}
+  // Broadcast to any open side panel. Best-effort; silently swallow errors.
+  try { chrome.runtime.sendMessage({ type: 'ENRICH_BLOCKED_PROGRESS', state }).catch(() => {}); } catch {}
+}
+
+let enrichTickInFlight = false;
+async function runEnrichTick(): Promise<void> {
+  if (enrichTickInFlight) return;
+  enrichTickInFlight = true;
+  try {
+    const state = await getEnrichState();
+    if (state.status !== 'running') return;
+
+    // Find the Grindr tab. Without it we can't call the API.
+    const tabs = await chrome.tabs.query({});
+    const grindrTab = tabs.find((t: any) => t.url?.includes('web.grindr.com'));
+    if (!grindrTab?.id) {
+      await setEnrichState({ ...state, status: 'paused', pauseReason: 'no-tab', lastTickAt: Date.now(),
+        lastError: 'Open web.grindr.com so we can resume.' });
+      return;
+    }
+
+    // Grab a small batch of empty-blocked contacts.
+    const contacts = await getContactsByPlatform('grindr');
+    const needs = contacts.filter((c: any) => {
+      const md = c.metadata || {};
+      const hasFeatures = md.bodyType || md.position || md.age || md.ethnicity ||
+        md.height || md.profileText || md.aboutMe || c.avatarUrl;
+      return md.isBlocked && !hasFeatures;
+    });
+    if (!needs.length) {
+      // Done!
+      await setEnrichState({ ...state, status: 'idle', pauseReason: null, lastTickAt: Date.now() });
+      chrome.alarms.clear('enrich-blocked-tick');
+      console.log(`[Aggregaytor:SW] Enrichment complete. Processed ${state.processed}, enriched ${state.enriched}, failed ${state.failed}.`);
+      return;
+    }
+    // Keep total in sync if the user has added more blocks since we started
+    const correctedTotal = Math.max(state.total, state.processed + needs.length);
+    const chunk = needs.slice(0, ENRICH_BATCH_SIZE).map((c: any) =>
+      (c._id || '').replace('contact:grindr:', '')).filter(Boolean);
+
+    // Run the batch in the Grindr tab's MAIN world. Pulls the auth
+    // from the adapter's captured headers (same source as the send-message
+    // flow). Includes credentials:'include' so Grindr's session cookie is
+    // sent alongside the bearer token.
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId: grindrTab.id },
+      world: 'MAIN',
+      args: [chunk],
+      func: async (batch: string[]) => {
+        const captured = (window as any).__aggregaytor_get_grindr_auth?.() || null;
+        if (!captured || !Object.keys(captured).length) {
+          return { noAuth: true, results: [] };
+        }
+        const headers: Record<string, string> = { 'Accept': 'application/json', ...captured };
+        const out: Array<{ id: string; ok: boolean; status: number; data?: any; error?: string }> = [];
+        for (const id of batch) {
+          try {
+            const res = await fetch(`https://web.grindr.com/api/v4/profiles/${id}`, {
+              credentials: 'include', headers,
+            });
+            if (res.status === 401 || res.status === 403) {
+              let body = ''; try { body = (await res.text()).slice(0, 200); } catch {}
+              out.push({ id, ok: false, status: res.status, error: body });
+              break; // abort rest of batch — session dead
+            }
+            if (!res.ok) {
+              out.push({ id, ok: false, status: res.status });
+            } else {
+              const data = await res.json();
+              out.push({ id, ok: true, status: 200, data });
+            }
+          } catch (e: any) {
+            out.push({ id, ok: false, status: 0, error: String(e?.message || e) });
+          }
+          await new Promise(r => setTimeout(r, 2000)); // 2s between calls
+        }
+        return { noAuth: false, results: out };
+      },
+    });
+
+    const payload = (result?.result as any) || { noAuth: false, results: [] };
+    if (payload.noAuth) {
+      await setEnrichState({ ...state, status: 'paused', pauseReason: 'no-auth', lastTickAt: Date.now(),
+        total: correctedTotal, lastError: 'Waiting for Grindr to issue an authenticated API call…' });
+      return;
+    }
+
+    let enriched = state.enriched, failed = state.failed, processed = state.processed;
+    let sessionDead = false;
+    for (const row of (payload.results || [])) {
+      if (row.status === 401 || row.status === 403) {
+        sessionDead = true;
+        break;
+      }
+      processed++;
+      if (!row.ok || !row.data) { failed++; continue; }
+
+      const p = row.data.profile || row.data.data || row.data;
+      const md: any = {};
+      const pickString = (v: any) => typeof v === 'string' ? v : (v != null ? String(v) : '');
+      if (p.bodyType) md.bodyType = pickString(p.bodyType);
+      if (p.body) md.bodyType = md.bodyType || pickString(p.body);
+      if (p.sexualPosition) md.position = pickString(p.sexualPosition);
+      if (p.position) md.position = md.position || pickString(p.position);
+      if (p.age) md.age = pickString(p.age);
+      if (p.ethnicity) md.ethnicity = pickString(p.ethnicity);
+      if (p.height) md.height = pickString(p.height);
+      if (p.weight) md.weight = pickString(p.weight);
+      if (p.aboutMe) md.aboutMe = pickString(p.aboutMe);
+      if (p.lookingFor) md.lookingFor = Array.isArray(p.lookingFor) ? p.lookingFor.join(', ') : pickString(p.lookingFor);
+      if (p.displayName || p.name) md.displayName = pickString(p.displayName || p.name);
+      md.isBlocked = true;
+      md.enrichedAt = Date.now();
+      let avatarUrl = '';
+      const primaryHash = p.photoHash || p.profileImageMediaHash || p.primaryPhotoHash;
+      if (primaryHash) avatarUrl = `https://cdns.grindr.com/images/profile/1024x1024/${primaryHash}`;
+      else if (Array.isArray(p.photoMediaHashes) && p.photoMediaHashes.length) {
+        avatarUrl = `https://cdns.grindr.com/images/profile/1024x1024/${p.photoMediaHashes[0]}`;
+      }
+      try {
+        const existing = await getContact(`contact:grindr:${row.id}`);
+        await upsertContact({
+          id: `grindr:${row.id}`, platform: 'grindr', platformUserId: row.id,
+          displayName: md.displayName || existing?.displayName || '',
+          profileUrl: existing?.profileUrl || `https://web.grindr.com/chat/${row.id}`,
+          avatarUrl: avatarUrl || existing?.avatarUrl || '',
+          lastSeen: new Date().toISOString(),
+          metadata: { ...(existing?.metadata || {}), ...md },
+        });
+        enriched++;
+      } catch { failed++; }
+    }
+
+    const nextState: EnrichState = {
+      ...state,
+      total: correctedTotal,
+      processed, enriched, failed,
+      lastTickAt: Date.now(),
+      status: sessionDead ? 'paused' : 'running',
+      pauseReason: sessionDead ? 'session-dead' : null,
+      lastError: sessionDead ? 'Grindr returned 401/403. Waiting for you to log back in (auto-login will help if you saved credentials).' : null,
+    };
+    await setEnrichState(nextState);
+    console.log(`[Aggregaytor:SW] Enrich tick: +${processed - state.processed} processed (total ${processed}/${nextState.total}), ${enriched} enriched, ${failed} failed, status=${nextState.status}${sessionDead ? ' (paused)' : ''}`);
+  } catch (err) {
+    const state = await getEnrichState();
+    await setEnrichState({ ...state, status: 'paused', pauseReason: 'error', lastTickAt: Date.now(),
+      lastError: String((err as Error)?.message || err) });
+    console.warn('[Aggregaytor:SW] Enrich tick failed:', err);
+  } finally {
+    enrichTickInFlight = false;
+  }
+}
+
+/** Try to resume a paused enrichment. Called opportunistically when we
+ *  observe signs of session recovery (auth captured, blocks succeeding). */
+async function maybeResumeEnrich(): Promise<void> {
+  const state = await getEnrichState();
+  if (state.status !== 'paused') return;
+  if (state.pauseReason === 'manual') return; // don't override explicit stop
+  await setEnrichState({ ...state, status: 'running', pauseReason: null, lastTickAt: Date.now() });
+  // Re-create the alarm in case it was cleared
+  chrome.alarms.create('enrich-blocked-tick', { periodInMinutes: 1 });
+  runEnrichTick().catch(() => {});
+}
+
+// On SW startup, re-create the alarm if an enrichment is pending so the
+// user's backlog resumes automatically across extension reloads / browser
+// restarts / forced SW wakeups.
+getEnrichState().then(state => {
+  if (state.status === 'running' || state.status === 'paused') {
+    chrome.alarms.create('enrich-blocked-tick', { periodInMinutes: 1 });
+    console.log(`[Aggregaytor:SW] Resuming enrichment alarm (status=${state.status}, ${state.processed}/${state.total} done).`);
+    if (state.status === 'running') runEnrichTick().catch(() => {});
+  }
+}).catch(() => {});
+
 // `autoTrainedSet` tracks which contacts have already been trained during the
 // current service-worker lifetime so a periodic scan doesn't feed the model
 // the same sample repeatedly. It is capped so long-running SWs (days) on
