@@ -2514,7 +2514,13 @@ function renderEnrichState(state) {
     progress.textContent = `Paused — ${base}. ${reasonMsg[state.pauseReason] || 'Retrying on next tick.'}`;
   } else if (state.status === 'running') {
     progress.style.color = '';
-    progress.textContent = `Enriching: ${base}. Runs in the background ~5/min — safe to close this panel, extension, or even the browser.`;
+    // Estimate remaining time: ~20/min = 1200/hour.
+    const remaining = Math.max(0, state.total - state.processed);
+    const etaHours = remaining / 1200;
+    const eta = etaHours < 1
+      ? `~${Math.ceil(etaHours * 60)}m remaining`
+      : `~${etaHours.toFixed(1)}h remaining`;
+    progress.textContent = `Enriching: ${base} — ${eta}. Runs in the background at ~20/min; safe to close this panel, the extension, or even the browser.`;
   } else if (state.processed > 0) {
     progress.style.color = '#22c55e';
     progress.textContent = `Enrichment complete — ${base}. Click Full Retrain to use the new data.`;

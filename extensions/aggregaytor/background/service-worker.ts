@@ -2415,7 +2415,12 @@ const DEFAULT_ENRICH_STATE: EnrichState = {
   failed: 0, startedAt: 0, lastTickAt: 0, lastError: null,
 };
 const ENRICH_STORAGE_KEY = 'aggregaytor_enrich_blocked_state';
-const ENRICH_BATCH_SIZE = 5; // profiles per tick; 5 × 2s = 10s of wall clock
+// 20 profiles per tick × 2s per call = 40s of work per minute, leaving a
+// 20s idle gap before the next alarm. That gives 20/min = 1200/hour, which
+// finishes a 3000-profile backlog in ~2.5 hours. Well under Grindr's cascade-
+// scroll rate (humans trigger far more API calls just browsing), so no
+// rate-limit risk from this tier of enrichment alone.
+const ENRICH_BATCH_SIZE = 20;
 
 async function getEnrichState(): Promise<EnrichState> {
   try {
