@@ -2484,16 +2484,24 @@ document.getElementById('sp-retrain-model')?.addEventListener('click', async () 
 });
 
 function renderEnrichState(state) {
-  const startBtn = document.getElementById('sp-enrich-blocked');
+  const grindrBtn = document.getElementById('sp-enrich-blocked');
+  const sniffiesBtn = document.getElementById('sp-enrich-sniffies');
   const stopBtn = document.getElementById('sp-enrich-stop');
   const progress = document.getElementById('sp-enrich-progress');
-  if (!startBtn || !stopBtn || !progress || !state) return;
+  if (!grindrBtn || !sniffiesBtn || !stopBtn || !progress || !state) return;
   const running = state.status === 'running' || state.status === 'paused';
+  const platform = state.platform || 'grindr';
   stopBtn.style.display = running ? '' : 'none';
-  startBtn.textContent = state.status === 'paused' ? 'Resume Enrich'
-    : state.status === 'running' ? 'Enriching…'
-    : 'Enrich Blocked';
-  startBtn.disabled = state.status === 'running';
+  const label = platform === 'sniffies' ? 'Sniffies' : 'Grindr';
+  const activeBtn = platform === 'sniffies' ? sniffiesBtn : grindrBtn;
+  const idleBtn = platform === 'sniffies' ? grindrBtn : sniffiesBtn;
+  activeBtn.textContent = state.status === 'paused' ? `Resume ${label} Enrich`
+    : state.status === 'running' ? `Enriching ${label}…`
+    : `Enrich ${label}`;
+  activeBtn.disabled = state.status === 'running';
+  // Disable the OTHER platform's button while an enrichment is running so
+  // users don't accidentally interrupt mid-pass.
+  idleBtn.disabled = state.status === 'running';
   if (state.total === 0 && state.status === 'idle') {
     progress.style.display = 'none';
     progress.textContent = '';
@@ -2534,21 +2542,20 @@ async function refreshEnrichStatus() {
   } catch {}
 }
 
-document.getElementById('sp-enrich-blocked')?.addEventListener('click', async () => {
+async function startEnrich(platform) {
   try {
-    const res = await chrome.runtime.sendMessage({ type: 'ENRICH_BLOCKED_START' });
+    const res = await chrome.runtime.sendMessage({ type: 'ENRICH_BLOCKED_START', platform });
+    const progress = document.getElementById('sp-enrich-progress');
     if (!res?.ok) {
-      const progress = document.getElementById('sp-enrich-progress');
       progress.style.display = 'block';
       progress.style.color = '#fbbf24';
       progress.textContent = res?.error || 'Unknown error starting enrichment';
       return;
     }
     if (res.total === 0) {
-      const progress = document.getElementById('sp-enrich-progress');
       progress.style.display = 'block';
       progress.style.color = '#6b7280';
-      progress.textContent = res.message || 'Nothing to enrich — all blocked contacts already have features.';
+      progress.textContent = res.message || `Nothing to enrich for ${platform}.`;
       return;
     }
     await refreshEnrichStatus();
@@ -2558,7 +2565,10 @@ document.getElementById('sp-enrich-blocked')?.addEventListener('click', async ()
     progress.style.color = '#f87171';
     progress.textContent = 'Error: ' + err.message;
   }
-});
+}
+
+document.getElementById('sp-enrich-blocked')?.addEventListener('click', () => startEnrich('grindr'));
+document.getElementById('sp-enrich-sniffies')?.addEventListener('click', () => startEnrich('sniffies'));
 
 document.getElementById('sp-enrich-stop')?.addEventListener('click', async () => {
   try {
