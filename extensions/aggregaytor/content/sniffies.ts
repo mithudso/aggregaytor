@@ -132,6 +132,7 @@ window.addEventListener('message', (event) => {
   if (!event.data || typeof event.data !== 'object') return;
   if (event.data.type === '__aggregaytor_block') {
     const pid = event.data.profileId;
+    console.log('[Aggregaytor:Sniffies] Cross-world block message received, pid:', pid);
     if (pid) {
       window.dispatchEvent(new CustomEvent('__aggregaytor_block_by_map_filter', {
         detail: { profileId: pid },

@@ -501,6 +501,7 @@ function undoLastHide(): boolean {
 window.addEventListener('__aggregaytor_block_by_map_filter', ((event: CustomEvent) => {
   const { profileId } = event.detail || {};
   if (!profileId) return;
+  console.log('[Aggregaytor:MapFilters] Block event received, profileId:', profileId, 'total blocked:', settings.blockedIds.size + 1);
   settings.blockedIds.add(profileId);
   hideHistory.push(profileId);
   if (hideHistory.length > 50) hideHistory.shift();
@@ -600,27 +601,26 @@ function resolveMarkerId(marker: HTMLElement, clientX?: number, clientY?: number
 
 function setupClickHandlers(): void {
   // Middle-click behavior:
-  // - On map marker → quick-hide the profile
   // - In/near chat input → quick-send first available phrase
+  // - On a DOM map marker → quick-hide the profile
+  // - On the MapLibre canvas (even without a DOM marker — anonymous profiles
+  //   are drawn directly on the canvas as features) → query MapLibre at the
+  //   click point and quick-hide
   document.addEventListener('mousedown', (e) => {
     if (e.button !== 1) return; // middle click only
 
-    // Check if we're in a chat area (not on a map marker)
     const target = e.target as HTMLElement;
-    const chatArea = target.closest('[class*="chat"], [class*="message"], [class*="conversation"]');
-    const marker = resolveMarkerRoot(target);
+    if (!target) return;
 
-    // If in a chat area and NOT on a marker → quick-send a phrase
-    if (chatArea && !marker) {
+    // If in a chat area → quick-send a phrase (unchanged)
+    const chatArea = target.closest('[class*="chat"], [class*="message"], [class*="conversation"]');
+    const markerEl = resolveMarkerRoot(target);
+    if (chatArea && !markerEl) {
       e.preventDefault();
-      // Get a quick phrase from localStorage
       try {
         const phrases = JSON.parse(localStorage.getItem('aggregaytor_quick_phrases') || '[]');
-        // Only use quick phrases — NOT text substitutions (those include
-        // long entries like parking directions that shouldn't be auto-sent)
         const phrase = phrases[0] || '';
         if (phrase) {
-          // Dispatch auto-send event (handled by sniffies.ts)
           window.dispatchEvent(new CustomEvent('__aggregaytor_send_message', {
             detail: { text: phrase },
           }));
@@ -629,34 +629,62 @@ function setupClickHandlers(): void {
       return;
     }
 
-    // On map marker → quick-hide. resolveMarkerId falls back to MapLibre's
-    // queryRenderedFeatures when the DOM has no extractable ID (anonymous
-    // profiles without a picture).
-    if (!marker) return;
-    const id = resolveMarkerId(marker, e.clientX, e.clientY);
-    if (!id) return;
+    // Try DOM-based ID resolution first (fastest path for picture profiles)
+    let id = '';
+    let source = '';
+    if (markerEl) {
+      id = extractIdFromElement(markerEl);
+      if (id) source = 'dom';
+    }
+    // Fall back to MapLibre canvas query — this catches anonymous profiles
+    // that are drawn as map features without any .maplibregl-marker DOM node.
+    if (!id) {
+      id = getIdFromMapAtPoint(e.clientX, e.clientY);
+      if (id) source = 'map-query';
+    }
+    // Last resort: use the marker's centre point if we had a DOM marker
+    if (!id && markerEl) {
+      id = tryIdFromMapForMarker(markerEl);
+      if (id) source = 'marker-centre';
+    }
+
+    if (!id) {
+      console.log('[Aggregaytor:MapFilters] Middle-click: no ID resolved', {
+        hasMarkerEl: !!markerEl,
+        hasMap: !!findMap(),
+        targetTag: target.tagName,
+        targetClass: target.className,
+      });
+      return;
+    }
 
     e.preventDefault();
     e.stopPropagation();
-    blockById(id, marker);
+    console.log('[Aggregaytor:MapFilters] Blocking via middle-click:', id, `(source: ${source})`);
+    blockById(id, markerEl);
   }, true);
 
-  // Shift+click on map marker = toggle block (works on anonymous markers too)
+  // Shift+click = toggle block (works on anonymous markers too via canvas query)
   document.addEventListener('click', (e) => {
     if (!e.shiftKey) return;
-    const marker = resolveMarkerRoot(e.target as HTMLElement);
-    if (!marker) return;
-    const id = resolveMarkerId(marker, e.clientX, e.clientY);
+    const target = e.target as HTMLElement;
+    if (!target) return;
+
+    const markerEl = resolveMarkerRoot(target);
+    let id = '';
+    if (markerEl) id = extractIdFromElement(markerEl);
+    if (!id) id = getIdFromMapAtPoint(e.clientX, e.clientY);
+    if (!id && markerEl) id = tryIdFromMapForMarker(markerEl);
     if (!id) return;
 
     e.preventDefault();
     e.stopPropagation();
     if (settings.blockedIds.has(id)) {
       settings.blockedIds.delete(id);
-      marker.classList.remove(HIDE_CLASS);
+      if (markerEl) markerEl.classList.remove(HIDE_CLASS);
     } else {
       settings.blockedIds.add(id);
-      marker.classList.add(HIDE_CLASS);
+      if (markerEl) markerEl.classList.add(HIDE_CLASS);
     }
     saveBlockedIds();
   }, true);

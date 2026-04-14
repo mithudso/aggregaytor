@@ -621,6 +621,7 @@ function showFloatingPanel(contactId: string, platform: string): void {
   // that the marker is now hidden.
   panel.querySelector('.fp-block-btn')!.addEventListener('click', () => {
     const pid = fpContactId.replace(/^[a-z]+:/, '');
+    console.log('[Aggregaytor:Bridge:Sniffies] Block button clicked, pid:', pid, 'fpContactId:', fpContactId);
     // Use postMessage to cross the ISOLATED→MAIN world boundary.
     // postMessage works across worlds (unlike CustomEvent which is per-world).
     // The MAIN world listens for these via window.addEventListener('message').
@@ -637,6 +638,7 @@ function showFloatingPanel(contactId: string, platform: string): void {
     // Only do this if we're currently on a /profile/ URL (the typical case
     // when the floating panel is shown on Sniffies).
     if (location.pathname.match(/\/profile\//)) {
+      console.log('[Aggregaytor:Bridge:Sniffies] Navigating back from profile view after block');
       // Prefer history.back() when there's history to go back to;
       // fall back to navigating to the root of the platform otherwise.
       if (window.history.length > 1) {
