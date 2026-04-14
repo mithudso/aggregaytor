@@ -13,7 +13,7 @@ import type { DossierCategory } from '@aggregaytor/store';
 
 const LOG = '[Aggregaytor:LLM]';
 
-export type LLMProvider = 'gemini' | 'openai' | 'anthropic' | 'groq' | 'perplexity' | 'mistral' | 'copilot' | 'local';
+export type LLMProvider = 'gemini' | 'openai' | 'anthropic' | 'groq' | 'cerebras' | 'perplexity' | 'mistral' | 'copilot' | 'local';
 
 interface LLMConfig {
   provider: LLMProvider;
@@ -95,10 +95,13 @@ function invalidateStorageCache(key: string): void {
 }
 
 const DEFAULT_MODELS: Record<LLMProvider, string> = {
-  gemini: 'gemini-2.5-flash-lite',
+  gemini: 'gemini-2.5-flash-lite', // TODO(2026-06-17): swap to 'gemini-3.1-flash-lite-preview' before 2.5 deprecation
   openai: 'gpt-4o-mini',
   anthropic: 'claude-haiku-4-5-20251001',
   groq: 'llama-3.1-8b-instant',
+  // Cerebras: extraordinary free tier (1M tokens/day, 30 RPM) at ~2600 tok/s
+  // on Llama 4 Scout — ~10x faster than Groq. Added v0.57.9.
+  cerebras: 'llama-4-scout-17b-16e-instruct',
   perplexity: 'llama-3.1-sonar-small-128k-online',
   mistral: 'mistral-small-latest',
   copilot: 'gpt-4o-mini',
@@ -108,10 +111,11 @@ const DEFAULT_MODELS: Record<LLMProvider, string> = {
 // Known rate limits per provider (requests per minute on free/tier-1)
 // Sources: provider docs as of April 2026
 const PROVIDER_RPM: Record<string, number> = {
-  gemini: 15,       // Free: 15 RPM (gemini-2.5-flash-lite), gemini-2.0-flash deprecated June 2026
+  gemini: 15,       // Free: 15 RPM (gemini-2.5-flash-lite), gemini-2.5 deprecates 2026-06-17
   openai: 500,      // Tier 1 ($5): 500 RPM. Free tier only 3 RPM.
   anthropic: 50,    // Tier 1 ($5): 50 RPM all models
   groq: 30,         // Free: 30 RPM, 14400 RPD, very fast LPU inference
+  cerebras: 30,     // Free: 30 RPM, 1M tokens/day — the largest free daily quota in the industry
   perplexity: 50,   // Tier 0: 50 RPM (pay-as-you-go, no free tier)
   mistral: 2,       // Free "Experiment": 2 RPM (paid tiers much higher)
   copilot: 10,      // No public API — community proxy only, rate undisclosed
@@ -195,6 +199,24 @@ export interface LLMRateSettings {
   enableDossierExtract: boolean;   // allow dossier extraction calls
   enableNicknames: boolean;        // allow nickname generation calls
   enableSummaries: boolean;        // allow conversation summary calls
+  /**
+   * Anthropic prompt-cache TTL. Default 'ephemeral' = 5-minute cache.
+   * Set 'long' for the 1-hour TTL added to the Anthropic API in late 2025.
+   *
+   * Pricing: 5-min cache write is 1.25× base tokens, 1-hour is 2× — but
+   * cache reads are always 0.1× regardless of TTL. Break-even for 1h:
+   *   needs ~3 subsequent cache hits within the hour to be cheaper than 5-min.
+   *
+   * When to prefer 'long':
+   *   - Light-use pattern where auto-respond fires every 10–30 min
+   *   - Stable persona/style guide (won't change during the hour)
+   * When to keep 'short':
+   *   - Heavy burst usage where cache will be hit many times in <5 min
+   *     anyway (the 2× write premium isn't worth it)
+   *   - Frequent personality/style-guide tweaks (write cost paid, cache
+   *     invalidated before it pays off)
+   */
+  anthropicCacheTTL: 'short' | 'long';
 }
 
 const DEFAULT_RATE_SETTINGS: LLMRateSettings = {
@@ -205,6 +227,7 @@ const DEFAULT_RATE_SETTINGS: LLMRateSettings = {
   enableDossierExtract: true,
   enableNicknames: true,
   enableSummaries: true,
+  anthropicCacheTTL: 'short', // conservative default — heavy users benefit most from 5-min
 };
 
 export async function getLLMRateSettings(): Promise<LLMRateSettings> {
@@ -433,7 +456,10 @@ async function getConfigWithFailover(rateLimitedProvider?: string): Promise<LLMC
 
   // Try failover: check all stored keys
   const keys = await getAllProviderKeys();
-  const providerOrder: LLMProvider[] = ['gemini', 'anthropic', 'openai'];
+  // Failover order: prefer free-tier fast inference first, then paid.
+  // Cerebras has the biggest free daily quota (1M tokens/day) so it's
+  // the safest fallback when the primary provider 429s.
+  const providerOrder: LLMProvider[] = ['cerebras', 'groq', 'gemini', 'anthropic', 'openai'];
 
   for (const p of providerOrder) {
     if (p === rateLimitedProvider) continue;
@@ -829,6 +855,13 @@ const TIERED_MODELS: Record<string, Record<string, string>> = {
     standard: 'llama-3.1-8b-instant',    // fast + cheap
     economy: 'llama-3.1-8b-instant',
   },
+  cerebras: {
+    // Cerebras runs Llama on wafer-scale chips at ~2600 tok/s. Even the
+    // premium 70B model comes back faster than most providers' smallest.
+    premium: 'llama-3.3-70b',
+    standard: 'llama-4-scout-17b-16e-instruct',
+    economy: 'llama-3.1-8b',
+  },
   perplexity: {
     premium: 'sonar',
     standard: 'sonar',
@@ -1051,6 +1084,11 @@ async function callProvider(
 ): Promise<string> {
   totalApiCalls++;
 
+  // Pre-fetch rate settings once — needed for the Anthropic cache-TTL branch
+  // below AND cached via the SettingsCache so this is effectively a free
+  // in-memory read after the first call.
+  const rateSettings = await getLLMRateSettings();
+
   // Check response cache first (skip for high-temperature creative tasks)
   const temp = opts?.temperature ?? 0.9;
   if (temp < 0.5) { // deterministic tasks can be cached
@@ -1103,13 +1141,28 @@ async function callProvider(
     case 'anthropic': {
       const model = routedConfig.model || DEFAULT_MODELS.anthropic;
       url = 'https://api.anthropic.com/v1/messages';
-      // Use Anthropic prompt caching — cache the system prompt (90% savings on cached tokens)
+      // Anthropic prompt caching: cache the system prompt (system here already
+      // includes our stable persona/style/tier modules — see buildAutoRespondPrompt).
+      // Cached reads are 0.1x base price. TTL is configurable — see
+      // LLMRateSettings.anthropicCacheTTL. Default 'short' (5 min) is optimal
+      // for burst usage; 'long' (1h) wins for intermittent use patterns.
+      const cacheTTL = rateSettings.anthropicCacheTTL === 'long' ? '1h' : undefined;
+      const cacheControl: Record<string, any> = { type: 'ephemeral' };
+      if (cacheTTL) cacheControl.ttl = cacheTTL;
       const anthropicSystem = systemPrompt ? [
-        { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: systemPrompt, cache_control: cacheControl },
       ] : undefined;
       init = {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': routedConfig.apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': routedConfig.apiKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+          // The 1h TTL is gated behind a beta header per Anthropic's docs.
+          // Sending it unconditionally is harmless for 5-min requests.
+          ...(cacheTTL ? { 'anthropic-beta': 'extended-cache-ttl-2025-04-11' } : {}),
+        },
         body: JSON.stringify({ model, max_tokens: maxTokens, ...(anthropicSystem ? { system: anthropicSystem } : {}), messages: [{ role: 'user', content: userPrompt }] }),
       };
       break;
@@ -1118,6 +1171,23 @@ async function callProvider(
       // Groq uses OpenAI-compatible API
       const model = routedConfig.model || DEFAULT_MODELS.groq;
       url = 'https://api.groq.com/openai/v1/chat/completions';
+      const msgs: any[] = [];
+      if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
+      msgs.push({ role: 'user', content: userPrompt });
+      init = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${routedConfig.apiKey}` },
+        body: JSON.stringify({ model, messages: msgs, temperature: temp, max_tokens: maxTokens }),
+      };
+      break;
+    }
+    case 'cerebras': {
+      // Cerebras Inference — OpenAI-compatible endpoint at api.cerebras.ai.
+      // Free tier: 30 RPM, 1M tokens/day, ~2600 tok/s on Llama 4 Scout.
+      // Context window is capped at 8192 tokens on the free tier (larger
+      // on paid tiers) — keep prompts reasonably sized when routing here.
+      const model = routedConfig.model || DEFAULT_MODELS.cerebras;
+      url = 'https://api.cerebras.ai/v1/chat/completions';
       const msgs: any[] = [];
       if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
       msgs.push({ role: 'user', content: userPrompt });
@@ -1199,7 +1269,7 @@ async function callProvider(
   switch (routedConfig.provider) {
     case 'gemini': result = data?.candidates?.[0]?.content?.parts?.[0]?.text || ''; break;
     case 'anthropic': result = data?.content?.[0]?.text || ''; break;
-    case 'openai': case 'groq': case 'perplexity': case 'mistral': case 'copilot':
+    case 'openai': case 'groq': case 'cerebras': case 'perplexity': case 'mistral': case 'copilot':
       result = data?.choices?.[0]?.message?.content || ''; break;
   }
 
