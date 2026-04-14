@@ -38,6 +38,29 @@ adapter.init().then(() => console.log(`${LOG} Adapter initialized`)).catch(err =
 // Text expander — type shortcuts in chat to auto-expand
 initTextExpander();
 
+// ── Block Profile (MAIN world hook) ─────────────────────────────────────────
+// The bridge does the heavy lifting (local blocklist + DOM hide) in ISOLATED
+// world. This handler is a hook point for anything that needs MAIN-world
+// access — e.g. intercepted auth headers for a future platform-side block
+// API call. Local-only mode is the default; no A4A API is called here.
+window.addEventListener('__aggregaytor_block_profile', ((event: CustomEvent) => {
+  const { username } = event.detail || {};
+  if (!username) return;
+  console.log(`${LOG} Block hook for ${username} (local-only — nothing more to do unless platform-block is enabled)`);
+  // Toast for visual confirmation
+  try {
+    const t = document.createElement('div');
+    t.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:999999;' +
+      'background:rgba(220,38,38,0.95);color:#fff;padding:10px 14px;border-radius:8px;' +
+      'font-family:system-ui,sans-serif;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,0.4);' +
+      'transition:opacity 0.3s';
+    t.textContent = `🚫 ${username} blocked`;
+    document.body.appendChild(t);
+    setTimeout(() => { t.style.opacity = '0'; }, 1500);
+    setTimeout(() => t.remove(), 1900);
+  } catch {}
+}) as EventListener);
+
 // Auto-send handler (for auto-respond and quick phrases)
 window.addEventListener('__aggregaytor_send_message', ((event: CustomEvent) => {
   const { text } = event.detail || {};
