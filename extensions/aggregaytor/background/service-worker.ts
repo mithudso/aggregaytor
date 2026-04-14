@@ -1548,7 +1548,9 @@ async function handleMessage(msg: any): Promise<any> {
                 } catch (e: any) {
                   out.push({ id, ok: false, status: 0, error: String(e?.message || e) });
                 }
-                await new Promise(r => setTimeout(r, 2000));
+                // Jittered delay to avoid a perfectly regular enumeration pattern
+    const jittered = ENRICH_CALL_DELAY_MS + (Math.random() * 2 - 1) * ENRICH_CALL_JITTER_MS;
+    await new Promise(r => setTimeout(r, jittered));
               }
               return out;
             },
@@ -1978,7 +1980,9 @@ async function processDossierExtractions(): Promise<void> {
 
       // Small delay between contacts to avoid API spam
       if (dossierExtractionQueue.size > 0) {
-        await new Promise(r => setTimeout(r, 2000));
+        // Jittered delay to avoid a perfectly regular enumeration pattern
+    const jittered = ENRICH_CALL_DELAY_MS + (Math.random() * 2 - 1) * ENRICH_CALL_JITTER_MS;
+    await new Promise(r => setTimeout(r, jittered));
       }
     } // end while
   } finally {
@@ -2528,12 +2532,18 @@ const DEFAULT_ENRICH_STATE: EnrichState = {
   failed: 0, startedAt: 0, lastTickAt: 0, lastError: null,
 };
 const ENRICH_STORAGE_KEY = 'aggregaytor_enrich_blocked_state';
-// 20 profiles per tick × 2s per call = 40s of work per minute, leaving a
-// 20s idle gap before the next alarm. That gives 20/min = 1200/hour, which
-// finishes a 3000-profile backlog in ~2.5 hours. Well under Grindr's cascade-
-// scroll rate (humans trigger far more API calls just browsing), so no
-// rate-limit risk from this tier of enrichment alone.
-const ENRICH_BATCH_SIZE = 20;
+// 40 profiles per tick × ~1.3s per call = ~52s of work per minute, leaving
+// an ~8s buffer before the next alarm. That gives 40/min = 2400/hour, which
+// finishes a 3000-profile backlog in ~1.25 hours. Well under the rate a
+// platform's own client bursts on page load (hundreds of reads in under
+// 2 seconds is normal), so no rate-limit risk from this tier.
+//
+// The inter-call delay is jittered ±200ms in the fetcher so the request
+// pattern looks like natural browsing rather than a perfectly regular
+// enumeration, which is the kind of thing anti-abuse heuristics notice.
+const ENRICH_BATCH_SIZE = 40;
+const ENRICH_CALL_DELAY_MS = 1200; // ± 200ms jitter in the fetcher
+const ENRICH_CALL_JITTER_MS = 200;
 
 async function getEnrichState(): Promise<EnrichState> {
   try {
@@ -2553,7 +2563,7 @@ async function setEnrichState(state: EnrichState): Promise<void> {
 // from this service-worker module scope.
 
 /** Grindr: GET /api/v4/profiles/{id} with captured bearer token + cookies. */
-async function grindrBatchFetcher(batch: string[]): Promise<any> {
+async function grindrBatchFetcher(batch: string[], delayMs: number, jitterMs: number): Promise<any> {
   const captured = (window as any).__aggregaytor_get_grindr_auth?.() || null;
   if (!captured || !Object.keys(captured).length) {
     return { noAuth: true, results: [] };
@@ -2575,13 +2585,14 @@ async function grindrBatchFetcher(batch: string[]): Promise<any> {
     } catch (e: any) {
       out.push({ id, ok: false, status: 0, error: String(e?.message || e) });
     }
-    await new Promise(r => setTimeout(r, 2000));
+    const jittered = delayMs + (Math.random() * 2 - 1) * jitterMs;
+    await new Promise(r => setTimeout(r, jittered));
   }
   return { noAuth: false, results: out };
 }
 
 /** Sniffies: POST /api/user/full with session cookies (no bearer token). */
-async function sniffiesBatchFetcher(batch: string[]): Promise<any> {
+async function sniffiesBatchFetcher(batch: string[], delayMs: number, jitterMs: number): Promise<any> {
   // Sniffies doesn't use a bearer token — credentials:'include' sends the
   // session cookie which is all that's required. So "no-auth" for Sniffies
   // just means the cookie is missing / expired, which we map to session-dead.
@@ -2632,7 +2643,8 @@ async function sniffiesBatchFetcher(batch: string[]): Promise<any> {
     } catch (e: any) {
       out.push({ id, ok: false, status: 0, error: String(e?.message || e) });
     }
-    await new Promise(r => setTimeout(r, 2000));
+    const jittered = delayMs + (Math.random() * 2 - 1) * jitterMs;
+    await new Promise(r => setTimeout(r, jittered));
   }
   return { noAuth: false, results: out };
 }
@@ -2784,7 +2796,7 @@ async function runEnrichTick(): Promise<void> {
     const [result] = await chrome.scripting.executeScript({
       target: { tabId: platTab.id },
       world: 'MAIN',
-      args: [chunk],
+      args: [chunk, ENRICH_CALL_DELAY_MS, ENRICH_CALL_JITTER_MS],
       func: platformFn,
     });
 
