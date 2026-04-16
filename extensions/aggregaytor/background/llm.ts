@@ -95,7 +95,7 @@ function invalidateStorageCache(key: string): void {
 }
 
 const DEFAULT_MODELS: Record<LLMProvider, string> = {
-  gemini: 'gemini-2.5-flash-lite', // TODO(2026-06-17): swap to 'gemini-3.1-flash-lite-preview' before 2.5 deprecation
+  gemini: 'gemini-2.5-flash-lite', // Auto-swapped post-2026-06-17 — see GEMINI_DEPRECATION_DATE / applyDeprecationFallback
   openai: 'gpt-4o-mini',
   anthropic: 'claude-haiku-4-5-20251001',
   groq: 'llama-3.1-8b-instant',
@@ -107,6 +107,61 @@ const DEFAULT_MODELS: Record<LLMProvider, string> = {
   copilot: 'gpt-4o-mini',
   local: 'local',
 };
+
+// ── Deprecation fallback ────────────────────────────────────────────────────
+// Gemini 2.5 Flash family is announced for deprecation on 2026-06-17.
+// v0.57.20: add an automatic fallback so we don't ship a broken default
+// on the day after deprecation. The user can still pin any exact model
+// via config.model; this only kicks in when we'd otherwise auto-pick a
+// gemini-2.5-* model. The replacement is 3.1-flash-lite-preview — Google
+// has committed to keeping the preview models available as long as 2.5
+// is unavailable.
+//
+// Surfaces as a warning via `getDeprecationWarnings()` so the panel can
+// show a one-time banner before the swap happens.
+const GEMINI_DEPRECATION_DATE = new Date('2026-06-17T00:00:00Z');
+const GEMINI_FALLBACK_MAP: Record<string, string> = {
+  'gemini-2.5-flash-lite': 'gemini-3.1-flash-lite-preview',
+  'gemini-2.5-flash': 'gemini-3.1-flash-preview',
+};
+
+function isGeminiDeprecated(): boolean {
+  return Date.now() >= GEMINI_DEPRECATION_DATE.getTime();
+}
+
+function applyDeprecationFallback(provider: LLMProvider, model: string): string {
+  if (provider !== 'gemini') return model;
+  if (!isGeminiDeprecated()) return model;
+  return GEMINI_FALLBACK_MAP[model] || model;
+}
+
+/**
+ * Return a list of human-readable deprecation warnings relevant right now.
+ * The panel polls this so it can show an inline advisory without us needing
+ * a separate notifications system for it.
+ */
+export function getDeprecationWarnings(): { id: string; message: string; activeAfter: string; active: boolean }[] {
+  const now = Date.now();
+  const daysUntil = (d: Date) => Math.ceil((d.getTime() - now) / 86_400_000);
+  const warnings: { id: string; message: string; activeAfter: string; active: boolean }[] = [];
+  const geminiDays = daysUntil(GEMINI_DEPRECATION_DATE);
+  if (geminiDays > 0 && geminiDays <= 60) {
+    warnings.push({
+      id: 'gemini-2.5-deprecation',
+      message: `Gemini 2.5 Flash deprecates in ${geminiDays} day${geminiDays === 1 ? '' : 's'} (2026-06-17). Aggregaytor will auto-swap to gemini-3.1-flash-lite-preview on that date.`,
+      activeAfter: GEMINI_DEPRECATION_DATE.toISOString(),
+      active: false,
+    });
+  } else if (geminiDays <= 0) {
+    warnings.push({
+      id: 'gemini-2.5-deprecated',
+      message: 'Gemini 2.5 Flash is deprecated — Aggregaytor has auto-swapped to gemini-3.1-flash-lite-preview. You can pin a specific model in Settings → AI if needed.',
+      activeAfter: GEMINI_DEPRECATION_DATE.toISOString(),
+      active: true,
+    });
+  }
+  return warnings;
+}
 
 // Known rate limits per provider (requests per minute on free/tier-1)
 // Sources: provider docs as of April 2026
@@ -884,15 +939,17 @@ const TIERED_MODELS: Record<string, Record<string, string>> = {
 };
 
 function getModelForTask(config: LLMConfig, feature: string): string {
-  // If user explicitly set a model, always use it
+  // If user explicitly set a model, always use it — deprecation swapping is
+  // on auto-pick only. A user who pinned "gemini-2.5-flash" knows what they
+  // asked for, and if that model goes away the error will surface loudly.
   if (config.model) return config.model;
 
   const tier = TASK_TIER[feature] || 'standard';
   const providerModels = TIERED_MODELS[config.provider];
-  if (providerModels) {
-    return providerModels[tier] || providerModels.standard || DEFAULT_MODELS[config.provider] || '';
-  }
-  return DEFAULT_MODELS[config.provider] || '';
+  const chosen = providerModels
+    ? (providerModels[tier] || providerModels.standard || DEFAULT_MODELS[config.provider] || '')
+    : (DEFAULT_MODELS[config.provider] || '');
+  return applyDeprecationFallback(config.provider, chosen);
 }
 
 // 6. Token estimation — rough estimate to track usage
@@ -1068,6 +1125,7 @@ const FEATURE_PRIORITY: Record<string, RequestPriority> = {
   suggestions: 'interactive',
   'auto-respond': 'interactive',
   greeting: 'interactive',
+  query: 'interactive',
   nickname: 'background',
   dossier: 'background',
   summary: 'background',
@@ -1939,4 +1997,162 @@ function parseJsonArray(text: string): string[] {
     }
   }
   return ['Sure', 'Sounds good', 'What do you think?'];
+}
+
+// ── Natural-language contact query ────────────────────────────────────────
+
+/** Compact contact summary passed from the service worker to the LLM query. */
+export interface ContactQueryRow {
+  id: string;
+  name: string;
+  platform: string;
+  position?: string;
+  bodyType?: string;
+  age?: string;
+  ethnicity?: string;
+  height?: string;
+  distance?: string;
+  lastMessageAt?: string;
+  messageCount?: number;
+  unreadCount?: number;
+  bookmarked?: boolean;
+  favorited?: boolean;
+  rating?: number;
+  archived?: boolean;
+  hidden?: boolean;
+  preferenceScore?: number | null;
+  sentiment?: number | null;
+  tags?: string[];
+  notes?: string;
+  ghostCount?: number;
+  metInPerson?: boolean;
+  kinks?: string[];
+  bio?: string;
+}
+
+export interface QueryContactsResult {
+  matches: { contactId: string; reason: string }[];
+  explanation: string;
+  provider: LLMProvider;
+  error?: string;
+}
+
+/**
+ * Use an LLM to answer a natural-language query over the user's contact list.
+ *
+ * The caller (service worker) assembles ContactQueryRow[] from PouchDB —
+ * this function formats them into a compact prompt, calls the LLM, and
+ * returns ranked contact IDs with per-match reasoning.
+ */
+export async function queryContacts(
+  query: string,
+  contacts: ContactQueryRow[],
+  limit: number = 10,
+): Promise<QueryContactsResult> {
+  const config = await getBestProvider();
+  if (config.provider === 'local' || !config.apiKey) {
+    return { matches: [], explanation: 'No LLM provider configured. Set an API key in Settings → AI.', provider: 'local' };
+  }
+
+  // Build compact contact table for the prompt (one line per contact)
+  const rows = contacts.map((c, i) => {
+    const parts: string[] = [`#${i} "${c.name}" (${c.platform})`];
+    const attrs: string[] = [];
+    if (c.position) attrs.push(c.position);
+    if (c.bodyType) attrs.push(c.bodyType);
+    if (c.age) attrs.push(`age:${c.age}`);
+    if (c.ethnicity) attrs.push(c.ethnicity);
+    if (c.height) attrs.push(c.height);
+    if (c.distance) attrs.push(c.distance);
+    if (attrs.length) parts.push(attrs.join(', '));
+
+    const flags: string[] = [];
+    if (c.lastMessageAt) {
+      const ago = timeSince(c.lastMessageAt);
+      flags.push(`last msg: ${ago}`);
+    } else {
+      flags.push('never talked');
+    }
+    if (c.messageCount) flags.push(`${c.messageCount} msgs`);
+    if (c.unreadCount) flags.push(`${c.unreadCount} unread`);
+    if (c.bookmarked) flags.push('bookmarked');
+    if (c.favorited) flags.push('favorited');
+    if (c.rating) flags.push(`${c.rating}★`);
+    if (c.metInPerson) flags.push('met IRL');
+    if (c.ghostCount && c.ghostCount > 0) flags.push(`ghosted ${c.ghostCount}x`);
+    if (c.preferenceScore != null) flags.push(`pref:${Math.round(c.preferenceScore * 100)}%`);
+    if (c.sentiment != null) flags.push(`interest:${Math.round(c.sentiment * 100)}%`);
+    if (c.archived) flags.push('archived');
+    if (c.hidden) flags.push('hidden');
+    if (c.tags?.length) flags.push(`tags:[${c.tags.join(',')}]`);
+    if (flags.length) parts.push(flags.join(' | '));
+
+    if (c.notes) parts.push(`notes: ${c.notes.slice(0, 60)}`);
+    if (c.kinks?.length) parts.push(`into: ${c.kinks.join(', ')}`);
+    if (c.bio) parts.push(`bio: ${c.bio.slice(0, 80)}`);
+
+    return parts.join(' | ');
+  });
+
+  const persona = await personaModule();
+
+  const systemPrompt = [
+    'You are an assistant helping the user search and filter their dating/hookup contacts.',
+    'The user has a database of profiles from multiple platforms (Grindr, Sniffies, Adam4Adam, etc.).',
+    'Answer the query by selecting the most relevant contacts from the list below.',
+    persona,
+  ].join('\n\n');
+
+  const userPrompt = `CONTACTS (${contacts.length} total):
+${rows.join('\n')}
+
+QUERY: "${query}"
+
+Return a JSON object:
+{
+  "matches": [{"index": <number>, "reason": "<1 sentence why they match>"}],
+  "explanation": "<1 sentence summary of results>"
+}
+
+Return up to ${limit} matches, ranked by relevance. Only include contacts that actually match the query. If the query mentions "haven't talked to" or similar, prefer contacts with no messages or old messages. If the query mentions a position, body type, distance, etc., filter accordingly. Return ONLY the JSON object.`;
+
+  try {
+    const text = await coalescedCallProvider(config, systemPrompt, userPrompt, 'query', {
+      temperature: 0.2,
+      maxTokens: 1024,
+      jsonMode: true,
+    });
+
+    try {
+      const parsed = JSON.parse(text);
+      const matches = (Array.isArray(parsed.matches) ? parsed.matches : [])
+        .filter((m: any) => typeof m.index === 'number' && m.index >= 0 && m.index < contacts.length)
+        .slice(0, limit)
+        .map((m: any) => ({
+          contactId: contacts[m.index].id,
+          reason: String(m.reason || ''),
+        }));
+      return {
+        matches,
+        explanation: String(parsed.explanation || `Found ${matches.length} matches.`),
+        provider: config.provider,
+      };
+    } catch {
+      return { matches: [], explanation: `LLM returned unparseable response.`, provider: config.provider, error: text.slice(0, 200) };
+    }
+  } catch (err) {
+    return { matches: [], explanation: (err as Error).message, provider: config.provider, error: (err as Error).message };
+  }
+}
+
+function timeSince(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 0) return 'just now';
+  const min = Math.floor(ms / 60_000);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const d = Math.floor(hr / 24);
+  if (d < 30) return `${d}d ago`;
+  return `${Math.floor(d / 30)}mo ago`;
 }

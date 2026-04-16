@@ -3549,7 +3549,14 @@ if (localStorage.getItem('aggregaytor_compact') === '1') {
 }
 
 // #14 Connection status indicator
+// v0.57.20: visibility-gated. The 30s probe was firing continuously even when
+// the side panel was hidden (collapsed sidebar, other tab). A side panel that
+// the user can't see doesn't need a live health check — and `GET_UNREAD_COUNT`
+// is a full PouchDB read that can't just be ignored by the SW when things are
+// quiet. Re-runs once on `visibilitychange` so the dot is fresh the moment
+// the panel comes back into view.
 async function checkConnectionStatus() {
+  if (document.visibilityState === 'hidden') return;
   const dot = document.getElementById('connection-dot');
   if (!dot) return;
   try {
@@ -3561,6 +3568,9 @@ async function checkConnectionStatus() {
 }
 setInterval(checkConnectionStatus, 30_000);
 checkConnectionStatus();
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') checkConnectionStatus();
+});
 
 // #3 Avatar error fallback — delegated event listener
 document.addEventListener('error', (e) => {
@@ -3568,6 +3578,174 @@ document.addEventListener('error', (e) => {
     e.target.style.display = 'none';
   }
 }, true);
+
+// ── AI Query ──────────────────────────────────────────────────────────────
+// Natural-language search over contacts using LLM + profile context.
+// Toggle with the 🔎 button, Ctrl/Cmd+K, enter query + press Go or Enter.
+// v0.57.20: adds Ctrl+K/Cmd+K hotkey, "cached" badge when the SW returned
+// a 60s-cached response, safer platform inference (pre-split by platform
+// since the SW now returns the already-stripped contact id), advisory banner
+// integration.
+
+let aiQueryBusy = false;
+
+document.getElementById('open-ai-query').addEventListener('click', toggleAIQuery);
+
+function toggleAIQuery() {
+  const bar = document.getElementById('ai-query-bar');
+  const results = document.getElementById('ai-query-results');
+  const threadList = document.getElementById('thread-list');
+  if (bar.style.display === 'none') {
+    bar.style.display = '';
+    document.getElementById('ai-query-input').focus();
+  } else {
+    bar.style.display = 'none';
+    results.style.display = 'none';
+    document.getElementById('ai-query-status').style.display = 'none';
+    document.getElementById('ai-query-input').value = '';
+    threadList.style.display = '';
+  }
+}
+
+document.getElementById('ai-query-close').addEventListener('click', toggleAIQuery);
+
+document.getElementById('ai-query-go').addEventListener('click', runAIQuery);
+document.getElementById('ai-query-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runAIQuery(); }
+  if (e.key === 'Escape') toggleAIQuery();
+});
+
+// Global Ctrl/Cmd+K hotkey. Only intercept when we're not inside another
+// input — we don't want to steal keystrokes from textareas or the response
+// bar during a reply.
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    const active = document.activeElement;
+    const inText = active && (active.tagName === 'TEXTAREA' || (active.tagName === 'INPUT' && active.type === 'text'));
+    if (inText && active.id !== 'ai-query-input') return; // user is typing
+    e.preventDefault();
+    const bar = document.getElementById('ai-query-bar');
+    if (!bar) return;
+    if (bar.style.display === 'none') toggleAIQuery();
+    else document.getElementById('ai-query-input').focus();
+  }
+});
+
+async function runAIQuery() {
+  const input = document.getElementById('ai-query-input');
+  const status = document.getElementById('ai-query-status');
+  const results = document.getElementById('ai-query-results');
+  const threadList = document.getElementById('thread-list');
+  const query = input.value.trim();
+
+  if (!query || query.length < 3 || aiQueryBusy) return;
+  aiQueryBusy = true;
+
+  status.textContent = 'Querying AI...';
+  status.className = 'ai-query-status';
+  status.style.display = '';
+  results.style.display = 'none';
+  threadList.style.display = 'none';
+
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'QUERY_CONTACTS', query, limit: 20 });
+    if (!res?.ok) {
+      status.textContent = res?.error || 'Query failed';
+      status.className = 'ai-query-status error';
+      threadList.style.display = '';
+      aiQueryBusy = false;
+      return;
+    }
+
+    if (!res.matches?.length) {
+      status.textContent = res.explanation || 'No matches found.';
+      status.className = 'ai-query-status';
+      threadList.style.display = '';
+      aiQueryBusy = false;
+      return;
+    }
+
+    // Fetch contact docs for avatars/display names. v0.57.20: the SW now
+    // returns thread-facing ids (e.g. "grindr:12345"), not the PouchDB
+    // "contact:…" form, so we derive platform by a single split and can
+    // pass the id straight to openThread() without any further massaging.
+    const contactDocs = new Map();
+    await Promise.all(res.matches.map(async (m) => {
+      try {
+        const r = await chrome.runtime.sendMessage({ type: 'GET_CONTACT', contactId: m.contactId });
+        if (r?.ok && r.contact) contactDocs.set(m.contactId, r.contact);
+      } catch {}
+    }));
+
+    const cachedBadge = res.cached ? '<span class="ai-query-cached-badge" title="Served from 60s cache">cached</span>' : '';
+    const candidateNote = (typeof res.totalCandidates === 'number' && typeof res.sentToLLM === 'number' && res.totalCandidates > res.sentToLLM)
+      ? ` · reviewed top ${res.sentToLLM} of ${res.totalCandidates}`
+      : '';
+    status.innerHTML = `${esc(res.explanation || '')} <span style="color:#6b7280">(${esc(String(res.provider || ''))}${esc(candidateNote)})</span>${cachedBadge}`;
+    status.className = 'ai-query-status';
+
+    results.innerHTML = `<div class="ai-query-explanation">${esc(res.explanation)}${cachedBadge}</div>` +
+      res.matches.map((m, i) => {
+        const c = contactDocs.get(m.contactId);
+        const name = c?.displayName || stripPrefix(m.contactId);
+        const avatar = c?.avatarUrl || '';
+        // The returned id is "{platform}:{userId}" — split once and take the
+        // first component. Falls back to the contact doc's platform field.
+        const plat = c?.platform || String(m.contactId).split(':')[0] || '';
+        return `<div class="ai-query-result" data-contact-id="${esc(m.contactId)}" data-platform="${esc(plat)}" data-name="${esc(name)}">
+          <span class="ai-query-result-rank">${i + 1}</span>
+          ${avatar ? `<img class="ai-query-result-avatar" src="${esc(avatar)}" alt="">` : '<div class="ai-query-result-avatar"></div>'}
+          <div class="ai-query-result-info">
+            <div class="ai-query-result-name">${esc(name)} <span class="platform-tag">${esc(plat)}</span></div>
+            <div class="ai-query-result-reason">${esc(m.reason)}</div>
+          </div>
+        </div>`;
+      }).join('');
+    results.style.display = '';
+
+    // Click to open thread
+    results.querySelectorAll('.ai-query-result').forEach(el => {
+      el.addEventListener('click', () => {
+        openThread(el.dataset.contactId, el.dataset.platform, el.dataset.name);
+      });
+    });
+  } catch (err) {
+    status.textContent = String(err?.message || 'Query failed');
+    status.className = 'ai-query-status error';
+    threadList.style.display = '';
+  }
+  aiQueryBusy = false;
+}
+
+// ── Deprecation Advisory Banner ─────────────────────────────────────────────
+// v0.57.20: surface LLM-provider deprecations to the user in-panel so they
+// can pin a different provider before the auto-fallback kicks in.
+async function loadAdvisoryBanner() {
+  const banner = document.getElementById('advisory-banner');
+  if (!banner) return;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_DEPRECATION_WARNINGS' });
+    if (!res?.ok || !res.warnings?.length) { banner.style.display = 'none'; return; }
+    // Respect user-dismissed banner IDs for the current day.
+    const dismissed = JSON.parse(localStorage.getItem('aggregaytor_advisory_dismissed') || '{}');
+    const today = new Date().toISOString().slice(0, 10);
+    const active = res.warnings.find(w => dismissed[w.id] !== today);
+    if (!active) { banner.style.display = 'none'; return; }
+    banner.className = 'advisory-banner' + (active.active ? ' active' : '');
+    banner.innerHTML = `<span class="advisory-text">⚠ ${esc(active.message)}</span>` +
+      `<button class="advisory-close" data-banner-id="${esc(active.id)}" title="Dismiss for today">✕</button>`;
+    banner.style.display = '';
+    banner.querySelector('.advisory-close').addEventListener('click', (e) => {
+      const id = e.currentTarget.dataset.bannerId;
+      const next = { ...dismissed, [id]: today };
+      try { localStorage.setItem('aggregaytor_advisory_dismissed', JSON.stringify(next)); } catch {}
+      banner.style.display = 'none';
+    });
+  } catch {
+    banner.style.display = 'none';
+  }
+}
+loadAdvisoryBanner();
 
 loadThreads();
 loadDrafts();

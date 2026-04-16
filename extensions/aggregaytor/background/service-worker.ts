@@ -21,8 +21,9 @@ import {
   exportAllData, importAllData, exportBlocked, importBlocked,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
-import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS, clearLLMCaches } from './llm.js';
-import { seedIndex, indexMessages, removeFromIndex, clearIndex, searchMessages as fulltextSearch, isIndexReady, getIndexSize, SEARCH_INDEX_MAX_DOCS } from './search-index.js';
+import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS, clearLLMCaches, queryContacts, getDeprecationWarnings } from './llm.js';
+import type { ContactQueryRow } from './llm.js';
+import { seedIndex, indexMessages, removeFromIndex, clearIndex, searchMessages as fulltextSearch, isIndexReady, getIndexSize, getEvictedCount, getLastEvictionAt, SEARCH_INDEX_MAX_DOCS } from './search-index.js';
 import { getDossier, upsertDossier, setAutoExtractedField } from '@aggregaytor/store';
 import { handleDebugCommand } from './debug-bridge.js';
 
@@ -98,6 +99,15 @@ function invalidateThreadCache(): void {
   threadSummaryCache = null;
 }
 
+// ── Natural-language Query Cache ────────────────────────────────────────────
+// Cache successful AI-query answers for 60s so rapid re-runs of the exact
+// same query (double-click Go, provider comparison, etc.) don't burn another
+// LLM call. Intentionally small + FIFO-bounded — the typical session has
+// maybe 5–10 distinct queries.
+const queryContactsCache = new Map<string, { time: number; result: any }>();
+const QUERY_CONTACTS_CACHE_TTL = 60_000;
+const QUERY_CONTACTS_CACHE_MAX = 20;
+
 function safeNotify(id: string, opts: chrome.notifications.NotificationOptions): void {
   try {
     chrome.notifications.create(id, opts, () => {
@@ -168,6 +178,7 @@ async function handleMessage(msg: any): Promise<any> {
         searchIndexReady: isIndexReady(),
         searchIndexSize: getIndexSize(),
         searchIndexCap: SEARCH_INDEX_MAX_DOCS,
+        searchIndexEvicted: getEvictedCount(),
       };
       return { ok: true, stats, uptimeMin: Math.round(uptimeMin * 10) / 10, memory: memoryStats };
     }
@@ -1896,7 +1907,12 @@ async function handleMessage(msg: any): Promise<any> {
     /** Return search-index health: ready, size, cap, and what fraction of
      *  the cap is consumed. Surfaced in settings so users can tell whether
      *  full-text search is operating on the fast path or falling back to
-     *  the PouchDB scan. */
+     *  the PouchDB scan.
+     *
+     *  v0.57.20: also returns lifetime evictedCount and lastEvictionAt so
+     *  the UI can distinguish "index hit cap once during seeding" from "index
+     *  is dropping docs on every write". A high evictedCount means some
+     *  searches will silently fall back to the slow scan for old messages. */
     case 'GET_SEARCH_INDEX_INFO': {
       return {
         ok: true,
@@ -1906,7 +1922,132 @@ async function handleMessage(msg: any): Promise<any> {
         utilization: SEARCH_INDEX_MAX_DOCS > 0
           ? Math.round((getIndexSize() / SEARCH_INDEX_MAX_DOCS) * 1000) / 10
           : 0,
+        evictedCount: getEvictedCount(),
+        lastEvictionAt: getLastEvictionAt() || null,
       };
+    }
+
+    // ── Natural-language contact query ──
+    //
+    // v0.57.20: several correctness fixes here.
+    //  - The returned `contactId` for each match is the *thread-facing*
+    //    "{platform}:{userId}" form, not the PouchDB _id ("contact:…"). Pre-fix
+    //    the panel passed the raw _id into openThread() and every downstream
+    //    handler (MARK_THREAD_READ, NAVIGATE_TO_CONVERSATION) silently
+    //    mis-routed because they expect the stripped form.
+    //  - Removed a dead destructured fourth promise (`msgCountResult` was
+    //    always a null resolve and never read) — noise during review.
+    //  - Added a simple 60-second in-memory cache so re-running the exact
+    //    same query doesn't burn another LLM call.
+    case 'QUERY_CONTACTS': {
+      const end = swPerfTrack('queryContacts');
+      try {
+        const query = String(msg.query || '').trim();
+        if (!query) return { ok: false, error: 'Empty query' };
+        const limit = Math.min(Math.max(msg.limit || 10, 1), 50);
+
+        // Short-circuit: identical query within the last 60s → reuse result.
+        // This catches the common "user types → hits Go → instantly hits Go
+        // again" double-click pattern and the "paste same query to compare
+        // providers" workflow.
+        const cacheKey = `${query}|${limit}`;
+        const cached = queryContactsCache.get(cacheKey);
+        if (cached && Date.now() - cached.time < QUERY_CONTACTS_CACHE_TTL) {
+          end();
+          return { ok: true, ...cached.result, cached: true };
+        }
+
+        // Gather contacts, thread metas, and dossiers in parallel
+        const db = await getDB();
+        const [contacts, metas, dossierResult] = await Promise.all([
+          getAllContacts(),
+          getAllThreadMeta(),
+          db.allDocs({ startkey: 'dossier:', endkey: 'dossier:\uffff', include_docs: true }),
+        ]);
+
+        // Build lookup maps
+        const metaMap = new Map<string, any>();
+        for (const m of metas) metaMap.set(m.contactId, m);
+        const dossierMap = new Map<string, any>();
+        for (const row of dossierResult.rows) {
+          if (row.doc) dossierMap.set((row.doc as any).contactId, row.doc);
+        }
+
+        // Assemble compact rows for the LLM (skip hidden/archived unless query mentions them)
+        const queryLower = query.toLowerCase();
+        const includeArchived = /archived|hidden|all/.test(queryLower);
+
+        const rows: ContactQueryRow[] = [];
+        for (const c of contacts) {
+          // Thread-facing id (e.g. "grindr:12345") — this is what
+          // openThread() / MARK_THREAD_READ / NAVIGATE_TO_CONVERSATION etc
+          // expect. `c._id` carries an extra "contact:" prefix that only
+          // PouchDB cares about.
+          const threadId = `${c.platform}:${c.platformUserId}`;
+          const meta = metaMap.get(threadId);
+          const dossier = dossierMap.get(threadId);
+
+          // Skip archived/hidden unless the query specifically asks for them
+          if (!includeArchived && (meta?.archived || meta?.hidden)) continue;
+
+          rows.push({
+            id: threadId,
+            name: c.displayName || c.platformUserId,
+            platform: c.platform,
+            position: dossier?.position || (c.metadata as any)?.position || '',
+            bodyType: dossier?.bodyType || (c.metadata as any)?.bodyType || '',
+            age: (c.metadata as any)?.age || dossier?.birthYear || '',
+            ethnicity: (c.metadata as any)?.ethnicity || '',
+            height: (c.metadata as any)?.height || '',
+            distance: meta?.distance || (c.metadata as any)?.distance || '',
+            lastMessageAt: c.lastMessageAt || '',
+            unreadCount: c.unreadCount || 0,
+            bookmarked: meta?.bookmarked || false,
+            favorited: meta?.favorited || false,
+            rating: meta?.rating || 0,
+            archived: meta?.archived || false,
+            hidden: meta?.hidden || false,
+            preferenceScore: meta?.preferenceScore ?? null,
+            sentiment: meta?.sentiment?.overall ?? null,
+            tags: meta?.tags || [],
+            notes: meta?.notes || '',
+            ghostCount: dossier?.ghostCount || 0,
+            metInPerson: dossier?.metInPerson || false,
+            kinks: dossier?.kinks || [],
+            bio: ((c.metadata as any)?.aboutMe || (c.metadata as any)?.bio || '').slice(0, 100),
+          });
+        }
+
+        // Cap at 300 contacts to keep prompt within token limits.
+        // Sort by preference score desc so the LLM sees the best candidates first.
+        rows.sort((a, b) => (b.preferenceScore ?? -1) - (a.preferenceScore ?? -1));
+        const capped = rows.slice(0, 300);
+
+        const result = await queryContacts(query, capped, limit);
+        // Cache only successful results — don't hide transient errors from
+        // the user by serving them from cache on retry.
+        if (result && !result.error) {
+          queryContactsCache.set(cacheKey, { time: Date.now(), result });
+          // FIFO trim — this map is small but let's keep it predictable.
+          if (queryContactsCache.size > QUERY_CONTACTS_CACHE_MAX) {
+            const oldest = queryContactsCache.keys().next();
+            if (!oldest.done) queryContactsCache.delete(oldest.value as string);
+          }
+        }
+        end();
+        return { ok: true, ...result, totalCandidates: rows.length, sentToLLM: capped.length };
+      } catch (err) {
+        end();
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+
+    // ── Deprecation warnings ──
+    // Returns an array of time-bound warnings (Gemini 2.5 deprecation, etc.)
+    // so the side panel can render an advisory without needing its own
+    // schedule-tracking logic. v0.57.20.
+    case 'GET_DEPRECATION_WARNINGS': {
+      return { ok: true, warnings: getDeprecationWarnings() };
     }
 
     // Debug commands (from MCP server or dev tools)

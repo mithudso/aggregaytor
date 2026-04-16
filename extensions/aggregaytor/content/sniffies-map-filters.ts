@@ -599,6 +599,33 @@ function resolveMarkerId(marker: HTMLElement, clientX?: number, clientY?: number
   return tryIdFromMapForMarker(marker);
 }
 
+/**
+ * Resolve a profile ID from a click event on a map marker, trying DOM,
+ * MapLibre canvas query, and marker centre-point in priority order.
+ * Returns null if no ID could be resolved.
+ */
+function resolveProfileIdAtEvent(e: MouseEvent): { id: string; markerEl: HTMLElement | null; source: string } | null {
+  const target = e.target as HTMLElement;
+  if (!target) return null;
+
+  const markerEl = resolveMarkerRoot(target);
+  let id = '';
+  let source = '';
+  if (markerEl) {
+    id = extractIdFromElement(markerEl);
+    if (id) source = 'dom';
+  }
+  if (!id) {
+    id = getIdFromMapAtPoint(e.clientX, e.clientY);
+    if (id) source = 'map-query';
+  }
+  if (!id && markerEl) {
+    id = tryIdFromMapForMarker(markerEl);
+    if (id) source = 'marker-centre';
+  }
+  return id ? { id, markerEl, source } : null;
+}
+
 function setupClickHandlers(): void {
   // Middle-click behavior:
   // - In/near chat input → quick-send first available phrase
@@ -629,26 +656,8 @@ function setupClickHandlers(): void {
       return;
     }
 
-    // Try DOM-based ID resolution first (fastest path for picture profiles)
-    let id = '';
-    let source = '';
-    if (markerEl) {
-      id = extractIdFromElement(markerEl);
-      if (id) source = 'dom';
-    }
-    // Fall back to MapLibre canvas query — this catches anonymous profiles
-    // that are drawn as map features without any .maplibregl-marker DOM node.
-    if (!id) {
-      id = getIdFromMapAtPoint(e.clientX, e.clientY);
-      if (id) source = 'map-query';
-    }
-    // Last resort: use the marker's centre point if we had a DOM marker
-    if (!id && markerEl) {
-      id = tryIdFromMapForMarker(markerEl);
-      if (id) source = 'marker-centre';
-    }
-
-    if (!id) {
+    const resolved = resolveProfileIdAtEvent(e);
+    if (!resolved) {
       console.log('[Aggregaytor:MapFilters] Middle-click: no ID resolved', {
         hasMarkerEl: !!markerEl,
         hasMap: !!findMap(),
@@ -660,8 +669,58 @@ function setupClickHandlers(): void {
 
     e.preventDefault();
     e.stopPropagation();
-    console.log('[Aggregaytor:MapFilters] Blocking via middle-click:', id, `(source: ${source})`);
-    blockById(id, markerEl);
+    console.log('[Aggregaytor:MapFilters] Blocking via middle-click:', resolved.id, `(source: ${resolved.source})`);
+    blockById(resolved.id, resolved.markerEl);
+  }, true);
+
+  // Shift+right-click = same as middle-click (trackpad users without a
+  // middle button can still quick-hide). We must suppress both the mousedown
+  // default action AND the contextmenu event that would otherwise show the
+  // browser right-click menu.
+  //
+  // v0.57.20: the two handlers (mousedown + contextmenu) both ran the full
+  // DOM→canvas→marker-centre resolver, which can be surprisingly expensive
+  // on dense clusters (queryRenderedFeatures + getComputedStyle scans).
+  // Memoise the resolution result across the two handlers in a single
+  // shift+right-click gesture using an event-stamp lookup.
+  let _lastShiftRightClickResult: { timestamp: number; resolved: ReturnType<typeof resolveProfileIdAtEvent> } | null = null;
+  function resolveShiftRightClick(e: MouseEvent): ReturnType<typeof resolveProfileIdAtEvent> {
+    const now = performance.now();
+    // A single gesture fires mousedown → contextmenu within a few ms.
+    // Re-use the cached resolution within a 200ms window.
+    if (_lastShiftRightClickResult && now - _lastShiftRightClickResult.timestamp < 200) {
+      return _lastShiftRightClickResult.resolved;
+    }
+    const resolved = resolveProfileIdAtEvent(e);
+    _lastShiftRightClickResult = { timestamp: now, resolved };
+    return resolved;
+  }
+
+  document.addEventListener('mousedown', (e) => {
+    if (e.button !== 2 || !e.shiftKey) return; // right-click with shift only
+
+    const target = e.target as HTMLElement;
+    if (!target) return;
+
+    const resolved = resolveShiftRightClick(e);
+    if (!resolved) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    console.log('[Aggregaytor:MapFilters] Blocking via shift+right-click:', resolved.id, `(source: ${resolved.source})`);
+    blockById(resolved.id, resolved.markerEl);
+  }, true);
+
+  // Suppress the native context menu when shift is held AND we're over a
+  // resolvable marker — otherwise the browser menu appears after the
+  // mousedown fires. Checked lazily per event, so non-shift right-clicks
+  // behave normally (native context menu still works).
+  document.addEventListener('contextmenu', (e) => {
+    if (!e.shiftKey) return;
+    const resolved = resolveShiftRightClick(e as MouseEvent);
+    if (!resolved) return;
+    e.preventDefault();
+    e.stopPropagation();
   }, true);
 
   // Shift+click = toggle block (works on anonymous markers too via canvas query)

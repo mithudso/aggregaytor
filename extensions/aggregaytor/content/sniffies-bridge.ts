@@ -729,6 +729,323 @@ function hideFloatingPanel(): void {
   fpContactId = '';
 }
 
+// ── Inline Profile Actions ─────────────────────────────────────────────────
+// Injected directly into the Sniffies profile DOM (.his-profile) as an
+// alternative to the floating panel. More reliable since it's anchored to
+// the profile container rather than floating over it.
+
+const PROFILE_ACTIONS_ID = 'aggregaytor-profile-actions';
+const PROFILE_ACTIONS_CSS_ID = 'aggregaytor-profile-actions-css';
+
+function injectProfileActionsCSS(): void {
+  if (document.getElementById(PROFILE_ACTIONS_CSS_ID)) return;
+  const s = document.createElement('style');
+  s.id = PROFILE_ACTIONS_CSS_ID;
+  s.textContent = `
+    #${PROFILE_ACTIONS_ID} {
+      display:flex; flex-wrap:wrap; gap:6px; align-items:center;
+      padding:8px 12px; margin:6px 0;
+      background:rgba(15,20,25,0.85); border:1px solid rgba(59,130,246,0.25);
+      border-radius:8px; font-family:system-ui,sans-serif; font-size:12px; color:#e7e9ea;
+    }
+    #${PROFILE_ACTIONS_ID} .pa-btn {
+      background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12);
+      border-radius:6px; padding:4px 10px; color:#e7e9ea; cursor:pointer;
+      font-size:11px; font-family:inherit; transition:background 0.15s;
+    }
+    #${PROFILE_ACTIONS_ID} .pa-btn:hover { background:rgba(59,130,246,0.2); border-color:rgba(59,130,246,0.4); }
+    #${PROFILE_ACTIONS_ID} .pa-btn.danger { border-color:rgba(239,68,68,0.3); color:#f87171; }
+    #${PROFILE_ACTIONS_ID} .pa-btn.danger:hover { background:rgba(239,68,68,0.15); }
+    #${PROFILE_ACTIONS_ID} .pa-btn:disabled { opacity:0.5; cursor:default; }
+    #${PROFILE_ACTIONS_ID} .pa-stars { display:flex; gap:1px; margin-left:auto; }
+    #${PROFILE_ACTIONS_ID} .pa-star { font-size:15px; cursor:pointer; color:#4b5563; user-select:none; background:none; border:none; padding:0 1px; }
+    #${PROFILE_ACTIONS_ID} .pa-star.active { color:#fbbf24; }
+    #${PROFILE_ACTIONS_ID} .pa-star:hover { color:#f59e0b; }
+    #${PROFILE_ACTIONS_ID} .pa-notes-wrap {
+      width:100%; margin-top:4px;
+    }
+    #${PROFILE_ACTIONS_ID} .pa-notes-input {
+      width:100%; box-sizing:border-box; background:rgba(255,255,255,0.05);
+      border:1px solid rgba(255,255,255,0.1); border-radius:5px;
+      padding:5px 8px; color:#e7e9ea; font-size:11px; font-family:inherit;
+      resize:vertical; min-height:28px; outline:none;
+    }
+    #${PROFILE_ACTIONS_ID} .pa-notes-input:focus { border-color:rgba(59,130,246,0.5); }
+    #${PROFILE_ACTIONS_ID} .pa-status { font-size:9px; color:#22c55e; min-height:11px; margin-top:2px; }
+  `;
+  (document.head || document.documentElement).appendChild(s);
+}
+
+/**
+ * Find the Sniffies profile container DOM element.
+ * Checks `.his-profile` (Angular profile overlay) and `#sniffies-infowindow`.
+ */
+function findProfileContainer(): HTMLElement | null {
+  const hisProfile = document.querySelector('.his-profile') as HTMLElement | null;
+  if (hisProfile) {
+    const cs = window.getComputedStyle(hisProfile);
+    if (cs.visibility !== 'hidden' && cs.display !== 'none') {
+      // Find the scrollable content area inside
+      const scrollable = hisProfile.querySelector('div[style*="overflow"], [class*="content"], [class*="scroll"]') as HTMLElement | null;
+      if (scrollable && scrollable.getBoundingClientRect().height > 100) return scrollable;
+      return hisProfile;
+    }
+  }
+  const iw = document.querySelector('#sniffies-infowindow') as HTMLElement | null;
+  if (iw) {
+    const cs = window.getComputedStyle(iw);
+    if (cs.visibility !== 'hidden' && cs.display !== 'none') return iw;
+  }
+  return null;
+}
+
+/** Remove previously injected profile actions. */
+function removeProfileActions(): void {
+  document.getElementById(PROFILE_ACTIONS_ID)?.remove();
+}
+
+/**
+ * Inject action buttons (hide, notes, stars) directly into the Sniffies
+ * profile DOM. Called after a short delay on profile URL navigation so the
+ * Angular DOM has time to render.
+ */
+function injectProfileActions(contactId: string, platform: string): void {
+  removeProfileActions();
+  injectProfileActionsCSS();
+
+  const container = findProfileContainer();
+  if (!container) return;
+
+  const profileId = contactId.replace(/^[a-z]+:/, '');
+  const el = document.createElement('div');
+  el.id = PROFILE_ACTIONS_ID;
+
+  // Check if already blocked in the local map-filter blocklist
+  let blockedIds: string[] = [];
+  try { blockedIds = JSON.parse(localStorage.getItem('aggregaytor_map_blocked') || '[]'); } catch {}
+  const isBlocked = blockedIds.includes(profileId);
+
+  el.innerHTML = `
+    <button class="pa-btn danger pa-hide-btn" ${isBlocked ? 'disabled' : ''}>${isBlocked ? '🚫 Hidden' : '🚫 Hide'}</button>
+    <button class="pa-btn pa-notes-btn">📝 Notes</button>
+    <div class="pa-stars">
+      <button class="pa-star" data-star="1">★</button>
+      <button class="pa-star" data-star="2">★</button>
+      <button class="pa-star" data-star="3">★</button>
+      <button class="pa-star" data-star="4">★</button>
+      <button class="pa-star" data-star="5">★</button>
+    </div>
+    <div class="pa-notes-wrap" style="display:none">
+      <textarea class="pa-notes-input" placeholder="Notes about this person..."></textarea>
+      <div class="pa-status"></div>
+    </div>
+  `;
+
+  // Insert at the top of the profile container
+  if (container.firstChild) container.insertBefore(el, container.firstChild);
+  else container.appendChild(el);
+
+  // ── Hide button ──
+  const hideBtn = el.querySelector('.pa-hide-btn') as HTMLButtonElement;
+  hideBtn.addEventListener('click', () => {
+    window.postMessage({ type: '__aggregaytor_block', profileId }, '*');
+    chrome.runtime.sendMessage({ type: 'PROFILE_BLOCKED', contactId, platform }).catch(() => {});
+    hideBtn.textContent = '🚫 Hidden';
+    hideBtn.disabled = true;
+    showBlockToast(profileId);
+  });
+
+  // ── Notes toggle + editor ──
+  const notesWrap = el.querySelector('.pa-notes-wrap') as HTMLElement;
+  const notesInput = el.querySelector('.pa-notes-input') as HTMLTextAreaElement;
+  const notesStatus = el.querySelector('.pa-status') as HTMLElement;
+  el.querySelector('.pa-notes-btn')!.addEventListener('click', () => {
+    notesWrap.style.display = notesWrap.style.display === 'none' ? '' : 'none';
+    if (notesWrap.style.display !== 'none') notesInput.focus();
+  });
+
+  let noteTimer: ReturnType<typeof setTimeout> | null = null;
+  notesInput.addEventListener('input', () => {
+    if (noteTimer) clearTimeout(noteTimer);
+    noteTimer = setTimeout(() => {
+      chrome.runtime.sendMessage({
+        type: 'UPSERT_THREAD_META', contactId, platform,
+        updates: { notes: notesInput.value },
+      }).catch(() => {});
+      notesStatus.textContent = 'Saved';
+      setTimeout(() => { notesStatus.textContent = ''; }, 1500);
+    }, 800);
+  });
+
+  // ── Star rating ──
+  const stars = el.querySelectorAll('.pa-star');
+  stars.forEach(star => {
+    star.addEventListener('click', () => {
+      const r = parseInt((star as HTMLElement).dataset.star || '0');
+      const cur = el.querySelectorAll('.pa-star.active').length;
+      const nr = r === cur ? 0 : r;
+      stars.forEach((s, i) => s.classList.toggle('active', i < nr));
+      chrome.runtime.sendMessage({ type: 'SET_RATING', contactId, platform, rating: nr }).catch(() => {});
+    });
+  });
+
+  // ── Load existing data ──
+  chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId }).then((res: any) => {
+    const m = res?.meta || {};
+    notesInput.value = m.notes || '';
+    if (m.notes) notesWrap.style.display = '';
+    const rating = m.rating || 0;
+    stars.forEach((s, i) => s.classList.toggle('active', i < rating));
+  }).catch(() => {});
+}
+
+// ── Top Filter Bar ─────────────────────────────────────────────────────────
+// A compact horizontal strip injected at the very top of the Sniffies page
+// providing quick-toggle position filters + hide counts. Complementary to
+// the full floating filter panel.
+
+const FILTER_BAR_ID = 'aggregaytor-top-filter-bar';
+const FILTER_BAR_CSS_ID = 'aggregaytor-top-filter-bar-css';
+
+function injectFilterBarCSS(): void {
+  if (document.getElementById(FILTER_BAR_CSS_ID)) return;
+  const s = document.createElement('style');
+  s.id = FILTER_BAR_CSS_ID;
+  s.textContent = `
+    #${FILTER_BAR_ID} {
+      position:fixed; top:0; left:0; right:0; z-index:99998;
+      display:flex; align-items:center; gap:4px; padding:4px 10px;
+      background:rgba(15,20,25,0.92); border-bottom:1px solid rgba(59,130,246,0.2);
+      font-family:system-ui,sans-serif; font-size:10px; color:#9ca3af;
+      backdrop-filter:blur(6px); flex-wrap:wrap;
+    }
+    #${FILTER_BAR_ID} .fb-label { font-weight:600; color:#93c5fd; margin-right:2px; font-size:10px; }
+    #${FILTER_BAR_ID} .fb-chip {
+      display:inline-flex; align-items:center; gap:2px; padding:2px 6px;
+      background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08);
+      border-radius:10px; cursor:pointer; user-select:none;
+      transition:background 0.12s, border-color 0.12s; font-size:10px;
+    }
+    #${FILTER_BAR_ID} .fb-chip input { display:none; }
+    #${FILTER_BAR_ID} .fb-chip:hover { background:rgba(59,130,246,0.10); border-color:rgba(59,130,246,0.25); }
+    #${FILTER_BAR_ID} .fb-chip.on { background:rgba(59,130,246,0.18); border-color:rgba(59,130,246,0.55); color:#bfdbfe; }
+    #${FILTER_BAR_ID} .fb-sep { width:1px; height:14px; background:rgba(255,255,255,0.1); margin:0 2px; }
+    #${FILTER_BAR_ID} .fb-hide-count { font-size:9px; color:#6b7280; margin-left:auto; }
+    #${FILTER_BAR_ID} .fb-close { background:none; border:none; color:#6b7280; cursor:pointer; font-size:12px; margin-left:4px; padding:0 2px; }
+    #${FILTER_BAR_ID} .fb-close:hover { color:#e7e9ea; }
+    #${FILTER_BAR_ID} .fb-undo {
+      background:none; border:1px solid rgba(255,255,255,0.1); border-radius:6px;
+      color:#9ca3af; cursor:pointer; font-size:10px; padding:2px 6px;
+    }
+    #${FILTER_BAR_ID} .fb-undo:hover { background:rgba(255,255,255,0.06); color:#e7e9ea; }
+  `;
+  (document.head || document.documentElement).appendChild(s);
+}
+
+// v0.57.20: track the paddingTop value that was on <body> before we applied
+// our offset, so removeTopFilterBar() can restore it rather than clobbering
+// any user/Sniffies-applied padding back to ''. This matters because some
+// Sniffies layouts set `padding-top: env(safe-area-inset-top)` on iOS —
+// resetting to '' there loses the inset and tiles the map under the
+// status bar.
+let _originalBodyPaddingTop: string | null = null;
+
+function showTopFilterBar(): void {
+  if (document.getElementById(FILTER_BAR_ID)) return;
+  injectFilterBarCSS();
+
+  const settings = JSON.parse(localStorage.getItem('aggregaytor_map_filter_settings') || '{}');
+  const blockedCount = (() => { try { return JSON.parse(localStorage.getItem('aggregaytor_map_blocked') || '[]').length; } catch { return 0; } })();
+
+  const positions = [
+    { key: 'hideBottom',     label: 'Btm' },
+    { key: 'hideVersBottom', label: 'V-Btm' },
+    { key: 'hideVers',       label: 'Vers' },
+    { key: 'hideVersTop',    label: 'V-Top' },
+    { key: 'hideTop',        label: 'Top' },
+    { key: 'hideSide',       label: 'Side' },
+    { key: 'hideUnspecified', label: '?' },
+  ];
+  const extras = [
+    { key: 'showChatAgeBadges', label: '🕐 Ages' },
+    { key: 'excludeEnabled', label: '🚫 Text' },
+    { key: 'includeEnabled', label: '⭐ Text' },
+  ];
+
+  const bar = document.createElement('div');
+  bar.id = FILTER_BAR_ID;
+
+  bar.innerHTML = `
+    <span class="fb-label">Filter:</span>
+    ${positions.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}>${p.label}</label>`).join('')}
+    <span class="fb-sep"></span>
+    ${extras.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}>${p.label}</label>`).join('')}
+    <span class="fb-sep"></span>
+    <button class="fb-undo" title="Undo last hide">Undo</button>
+    <span class="fb-hide-count">${blockedCount} hidden</span>
+    <button class="fb-close" title="Close filter bar">✕</button>
+  `;
+
+  document.body.appendChild(bar);
+
+  // Preserve whatever padding was already on the body, then push content down.
+  if (_originalBodyPaddingTop === null) {
+    _originalBodyPaddingTop = document.body.style.paddingTop || '';
+  }
+  document.body.style.paddingTop = `${bar.offsetHeight}px`;
+
+  // ── Auto-apply on toggle ──
+  function applyFromBar() {
+    const update: Record<string, unknown> = {};
+    bar.querySelectorAll('input[data-key]').forEach((cb) => {
+      const el = cb as HTMLInputElement;
+      update[el.dataset.key as string] = el.checked;
+      el.closest('.fb-chip')!.classList.toggle('on', el.checked);
+    });
+    // Merge with existing settings (preserve text terms, blocked list, etc.)
+    const prev = JSON.parse(localStorage.getItem('aggregaytor_map_filter_settings') || '{}');
+    delete (prev as any).blockedIds;
+    const merged = { ...prev, ...update };
+    delete (merged as any).blockedIds;
+    localStorage.setItem('aggregaytor_map_filter_settings', JSON.stringify(merged));
+    window.postMessage({ type: '__aggregaytor_map_filter_settings', update: merged }, '*');
+  }
+
+  bar.querySelectorAll('input[data-key]').forEach(cb => {
+    cb.addEventListener('change', applyFromBar);
+  });
+
+  // Undo last hide
+  bar.querySelector('.fb-undo')!.addEventListener('click', () => {
+    window.postMessage({ type: '__aggregaytor_undo_hide' }, '*');
+    // Update count after a brief delay
+    setTimeout(() => {
+      try {
+        const count = JSON.parse(localStorage.getItem('aggregaytor_map_blocked') || '[]').length;
+        const countEl = bar.querySelector('.fb-hide-count');
+        if (countEl) countEl.textContent = `${count} hidden`;
+      } catch {}
+    }, 300);
+  });
+
+  // Close bar
+  bar.querySelector('.fb-close')!.addEventListener('click', () => {
+    bar.remove();
+    document.body.style.paddingTop = _originalBodyPaddingTop ?? '';
+    _originalBodyPaddingTop = null;
+    try { localStorage.setItem('aggregaytor_top_filter_bar_hidden', 'true'); } catch {}
+  });
+}
+
+function removeTopFilterBar(): void {
+  const bar = document.getElementById(FILTER_BAR_ID);
+  if (bar) {
+    bar.remove();
+    document.body.style.paddingTop = _originalBodyPaddingTop ?? '';
+    _originalBodyPaddingTop = null;
+  }
+}
+
 /** Show a brief toast in the bottom-right to confirm a block action. */
 function showBlockToast(profileId: string): void {
   const ID = 'aggregaytor-block-toast';
@@ -855,6 +1172,7 @@ function showMapFilterPanel(): void {
       </div>
 
       <div class="fp-hint">Changes save automatically as you type.</div>
+      <button class="fp-action-btn" id="fp-show-topbar" style="margin-top:4px;width:100%;font-size:10px">Show top filter bar</button>
       <div class="fp-save-state" id="fp-save-state"></div>
     </div>`;
 
@@ -962,6 +1280,12 @@ function showMapFilterPanel(): void {
   panel.querySelector('#fp-exclude-terms')?.addEventListener('blur', () => collectAndApply('Saved'));
   panel.querySelector('#fp-include-terms')?.addEventListener('blur', () => collectAndApply('Saved'));
 
+  // Show top filter bar button
+  panel.querySelector('#fp-show-topbar')?.addEventListener('click', () => {
+    try { localStorage.removeItem('aggregaytor_top_filter_bar_hidden'); } catch {}
+    showTopFilterBar();
+  });
+
   // Sync on first render in case settings drifted between panel opens
   collectAndApply('Synced');
 }
@@ -981,6 +1305,19 @@ function showMapFilterPanel(): void {
 let lastUrl = location.href;
 
 /** Check if the URL has changed since last poll and handle the new route. */
+// v0.57.20: track the pending profile-action retry timers so a rapid SPA
+// navigation (user flicks through profiles on the map) doesn't stack up
+// closures that each try to re-render actions for a profile the user has
+// already left. Without cancellation, clicking through 5 profiles in 2s
+// could leave behind 10 pending retries that all fight over the DOM.
+const _profileActionTimers: ReturnType<typeof setTimeout>[] = [];
+function clearProfileActionTimers(): void {
+  while (_profileActionTimers.length) {
+    const t = _profileActionTimers.pop();
+    if (t) clearTimeout(t);
+  }
+}
+
 function checkUrlChange() {
   if (!contextValid) return;
   const url = location.href;
@@ -996,12 +1333,30 @@ function checkUrlChange() {
     } catch {}
     // Show floating quick-action panel on the page
     showFloatingPanel(contactId, 'sniffies');
+    // Also inject actions directly into the profile DOM (more reliable than
+    // the floating panel). Delay to allow Angular to render the profile view.
+    // Cancel any pending retries from a previous profile — otherwise we'd
+    // paint actions for stale contacts over the current profile container.
+    clearProfileActionTimers();
+    removeProfileActions();
+    _profileActionTimers.push(setTimeout(() => injectProfileActions(contactId, 'sniffies'), 600));
+    // Retry once more in case the DOM was slow to render.
+    _profileActionTimers.push(setTimeout(() => {
+      if (!document.getElementById(PROFILE_ACTIONS_ID)) injectProfileActions(contactId, 'sniffies');
+    }, 1500));
   } else {
-    // Left profile view — show map filter panel instead of profile actions
+    // Left profile view — clean up profile-specific UI
     hideFloatingPanel();
+    clearProfileActionTimers();
+    removeProfileActions();
     // Show map filter controls on the map view
     if (url.match(/sniffies\.com\/?(\?|$|#)/i) || url.match(/sniffies\.com\/map/i)) {
       showMapFilterPanel();
+      // Show top filter bar unless the user explicitly closed it
+      const barHidden = localStorage.getItem('aggregaytor_top_filter_bar_hidden') === 'true';
+      if (!barHidden) showTopFilterBar();
+    } else {
+      removeTopFilterBar();
     }
     try {
       chrome.runtime.sendMessage({ type: 'PROFILE_CLOSED', platform: 'sniffies' }).catch(() => {});
@@ -1183,6 +1538,12 @@ try {
 // when the user clicks a profile or opens a conversation within the SPA.
 setInterval(checkUrlChange, 3000);
 window.addEventListener('popstate', checkUrlChange);
+
+// Show top filter bar on initial load if we're on the map view
+if (location.href.match(/sniffies\.com\/?(\?|$|#)/i) || location.href.match(/sniffies\.com\/map/i)) {
+  const barHidden = localStorage.getItem('aggregaytor_top_filter_bar_hidden') === 'true';
+  if (!barHidden) setTimeout(() => showTopFilterBar(), 1000);
+}
 
 // ── Quick Phrase Capture (Alt+Shift+Right-Click) ──────────────────────────
 // When the user Alt+Shift+right-clicks in a chat, capture selected text

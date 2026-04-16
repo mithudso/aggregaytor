@@ -76,6 +76,16 @@ let _index: any = null;
 const _indexedIds: string[] = [];
 const _indexedSet = new Set<string>();
 let _seeded = false;
+// v0.57.20: lifetime counter of messages evicted due to cap overflow. Exposed
+// via getEvictedCount() so the settings UI can tell users "you're at the cap —
+// search only covers the most recent 20k of your 25k messages". Previously
+// this was invisible and heavy users could see stale/incomplete search
+// results without any hint that the index was dropping docs.
+let _evictedCount = 0;
+// Also track the most recent eviction so the UI can show "last pruned 3m
+// ago". A running counter without a timestamp makes the stat useless for
+// diagnosing whether evictions are chronic or a one-time seeding artifact.
+let _lastEvictionAt = 0;
 
 /** Create the FlexSearch instance with tuned defaults. */
 function createIndex(): any {
@@ -116,8 +126,12 @@ function addOne(doc: IndexableMessage): void {
       if (evictId) {
         _index.remove(evictId);
         _indexedSet.delete(evictId);
+        _evictedCount++;
       }
     }
+    // Note the time of the most recent eviction once per cap breach so the
+    // diagnostic UI can show how fresh the eviction pressure is.
+    if (_evictedCount > 0) _lastEvictionAt = Date.now();
   } catch (err) {
     // A malformed body (very rare — we sanity-check above) can throw inside
     // FlexSearch's tokenizer. Drop the bad doc and continue.
@@ -207,6 +221,8 @@ export function clearIndex(): void {
   _indexedIds.length = 0;
   _indexedSet.clear();
   _seeded = false;
+  _evictedCount = 0;
+  _lastEvictionAt = 0;
 }
 
 /**
@@ -258,4 +274,23 @@ export function isIndexReady(): boolean {
 /** Current index size (for GET_SW_PERF). */
 export function getIndexSize(): number {
   return _indexedIds.length;
+}
+
+/**
+ * Lifetime count of messages evicted from the index because it hit the cap.
+ * A non-zero value means the user has more messages than the index can hold
+ * (SEARCH_INDEX_MAX_DOCS) and some searches will transparently fall back to
+ * the slower PouchDB scan for docs outside the window.
+ */
+export function getEvictedCount(): number {
+  return _evictedCount;
+}
+
+/**
+ * Unix-ms timestamp of the most recent eviction, or 0 if nothing has ever
+ * been evicted. Useful for distinguishing chronic cap pressure from a
+ * one-time burst during seeding.
+ */
+export function getLastEvictionAt(): number {
+  return _lastEvictionAt;
 }
