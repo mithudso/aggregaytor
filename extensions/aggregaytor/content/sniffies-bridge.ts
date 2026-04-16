@@ -971,6 +971,12 @@ function showTopFilterBar(): void {
     { key: 'excludeEnabled', label: '🚫 Text' },
     { key: 'includeEnabled', label: '⭐ Text' },
   ];
+  // "Waiting on response" filters — hide profiles whose most recent message
+  // is mine (outbound). The marker reappears the moment they reply.
+  const chatHistory = [
+    { key: 'hideRecentChats', label: '⏳ <24h' },
+    { key: 'hideAnyChats', label: '⏳ Ghosted' },
+  ];
 
   const bar = document.createElement('div');
   bar.id = FILTER_BAR_ID;
@@ -978,6 +984,8 @@ function showTopFilterBar(): void {
   bar.innerHTML = `
     <span class="fb-label">Filter:</span>
     ${positions.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}>${p.label}</label>`).join('')}
+    <span class="fb-sep"></span>
+    ${chatHistory.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}" title="${p.key === 'hideRecentChats' ? 'Hide profiles where you sent a message in the last 24h that they haven\'t replied to. They reappear the moment they respond.' : 'Hide any profile where your last message went unanswered (ghosted). They reappear the moment they respond.'}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}>${p.label}</label>`).join('')}
     <span class="fb-sep"></span>
     ${extras.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}>${p.label}</label>`).join('')}
     <span class="fb-sep"></span>
@@ -1544,6 +1552,35 @@ if (location.href.match(/sniffies\.com\/?(\?|$|#)/i) || location.href.match(/sni
   const barHidden = localStorage.getItem('aggregaytor_top_filter_bar_hidden') === 'true';
   if (!barHidden) setTimeout(() => showTopFilterBar(), 1000);
 }
+
+// ── Seed Chat Timestamps + Direction for Map Filters ───────────────────────
+// map-filters.ts (MAIN world) uses chatTimestamps + chatLastDirection to
+// drive the "waiting on response" filters (hide profiles where the last
+// message is mine and they haven't replied yet). Without a seed it would
+// only know about live-session messages.
+//
+// Format written: { [profileId]: { ts: <ms>, dir: 'in' | 'out' } }
+// Re-seeded every 60s so newly-received responses flip the direction and
+// unhide the marker without requiring a page reload.
+function seedChatTimestamps(): void {
+  if (!contextValid) return;
+  chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} }).then((res: any) => {
+    if (!res?.ok || !Array.isArray(res.summaries)) return;
+    const map: Record<string, { ts: number; dir: 'in' | 'out' }> = {};
+    for (const s of res.summaries) {
+      if (s.platform !== 'sniffies') continue;
+      const id = String(s.contactId || '').replace(/^sniffies:/, '').toLowerCase();
+      const ts = s.lastMessage?.timestamp ? Date.parse(s.lastMessage.timestamp) : 0;
+      const dir = s.lastMessage?.direction;
+      if (id && ts > 0 && (dir === 'in' || dir === 'out')) {
+        map[id] = { ts, dir };
+      }
+    }
+    try { localStorage.setItem('aggregaytor_sniffies_chat_ts', JSON.stringify(map)); } catch {}
+  }).catch(() => {});
+}
+setTimeout(seedChatTimestamps, 2000);      // initial seed after 2s
+setInterval(seedChatTimestamps, 60_000);    // refresh every 60s
 
 // ── Quick Phrase Capture (Alt+Shift+Right-Click) ──────────────────────────
 // When the user Alt+Shift+right-clicks in a chat, capture selected text

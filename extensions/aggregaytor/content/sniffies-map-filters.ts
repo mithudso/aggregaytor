@@ -46,6 +46,9 @@ interface MapFilterSettings {
   includeEnabled: boolean;
   // Chat age badges
   showChatAgeBadges: boolean;
+  // Chat-history hiding
+  hideRecentChats: boolean;   // hide profiles chatted within last 24h
+  hideAnyChats: boolean;      // hide profiles ever chatted
   // Manual blocks
   blockedIds: Set<string>;
 }
@@ -74,7 +77,8 @@ const idToMarker = new Map<string, HTMLElement>();
 const markerAttitudes = new Map<string, string>();
 const manualAttitudes = new Map<string, string>(); // user-corrected attitudes
 const markerProfileText = new Map<string, string>();
-const chatTimestamps = new Map<string, number>(); // profileId → last chat ms
+const chatTimestamps = new Map<string, number>(); // profileId → last chat ms (any direction, for badges)
+const chatLastDirection = new Map<string, 'in' | 'out'>(); // profileId → direction of most recent message
 const chatPreviews = new Map<string, Array<{ dir: string; text: string; ts: number }>>(); // recent messages
 const badgeElements = new Map<string, HTMLElement>(); // profileId → badge div
 const hideHistory: string[] = []; // stack of recently hidden IDs for undo
@@ -88,6 +92,8 @@ let settings: MapFilterSettings = {
   excludeTerms: [], includeTerms: [],
   excludeEnabled: false, includeEnabled: false,
   showChatAgeBadges: false,
+  hideRecentChats: false,
+  hideAnyChats: false,
   blockedIds: new Set(),
 };
 
@@ -534,6 +540,27 @@ function applyFilters(): void {
       }
     }
 
+    // Priority 2.5: waiting-on-response filters.
+    // These hide profiles where the most recent message is from the user
+    // (outbound) — i.e., we're waiting on their reply. Once they respond,
+    // the most recent direction flips to 'in' and the marker reappears.
+    // - hideAnyChats:    hide any profile whose last message is mine (any age)
+    // - hideRecentChats: hide only if my unanswered message is <24h old
+    if (settings.hideAnyChats || settings.hideRecentChats) {
+      const lastDir = chatLastDirection.get(id);
+      const lastTs = chatTimestamps.get(id);
+      if (lastDir === 'out' && lastTs) {
+        if (settings.hideAnyChats) {
+          marker.classList.add(HIDE_CLASS);
+          continue;
+        }
+        if (settings.hideRecentChats && (Date.now() - lastTs) < 24 * 60 * 60 * 1000) {
+          marker.classList.add(HIDE_CLASS);
+          continue;
+        }
+      }
+    }
+
     // Priority 3: attitude hiding (uses manual override if set)
     const att = getEffectiveAttitude(id);
     if (shouldHideAttitude(att)) {
@@ -839,7 +866,16 @@ window.addEventListener('__aggregaytor_chat_timestamp', ((event: CustomEvent) =>
   const { profileId, timestamp, body, direction } = event.detail || {};
   if (!profileId || !timestamp) return;
   const id = profileId.toLowerCase();
-  chatTimestamps.set(id, timestamp);
+  // Only update timestamp + direction if this message is newer than what we
+  // have — the adapter may emit messages out of order (e.g. history scrape
+  // after a live message), and we want the most-recent-wins invariant.
+  const prevTs = chatTimestamps.get(id) || 0;
+  if (timestamp >= prevTs) {
+    chatTimestamps.set(id, timestamp);
+    if (direction === 'in' || direction === 'out') {
+      chatLastDirection.set(id, direction);
+    }
+  }
   // Also store message for chat preview popup
   if (body) {
     if (!chatPreviews.has(id)) chatPreviews.set(id, []);
@@ -883,6 +919,30 @@ export function initMapFilters(): void {
       const entries = JSON.parse(raw);
       if (Array.isArray(entries)) {
         for (const [k, v] of entries) manualAttitudes.set(k, v);
+      }
+    }
+  } catch {}
+
+  // Seed chat timestamps + directions from cache written by the bridge.
+  // Format: { [profileId]: { ts: number, dir: 'in' | 'out' } }
+  // Without this, the chat-history filters would only know about messages
+  // received during this session — historical chats would slip through.
+  try {
+    const raw = localStorage.getItem('aggregaytor_sniffies_chat_ts');
+    if (raw) {
+      const map = JSON.parse(raw);
+      if (map && typeof map === 'object') {
+        for (const [id, val] of Object.entries(map)) {
+          const key = id.toLowerCase();
+          if (val && typeof val === 'object' && typeof (val as any).ts === 'number') {
+            chatTimestamps.set(key, (val as any).ts);
+            const d = (val as any).dir;
+            if (d === 'in' || d === 'out') chatLastDirection.set(key, d);
+          } else if (typeof val === 'number') {
+            // Legacy format (pre-direction): treat as unknown direction
+            chatTimestamps.set(key, val);
+          }
+        }
       }
     }
   } catch {}
