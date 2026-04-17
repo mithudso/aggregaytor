@@ -156,6 +156,15 @@ window.addEventListener('message', (event) => {
       detail: event.data.update,
     }));
   }
+  if (event.data.type === '__aggregaytor_chat_activity_seed') {
+    // Bridge seeds chat activity from the SW every 60s. Relay here so the
+    // MAIN-world map-filters picks up historical {myLastTs, theirLastTs}
+    // and the "waiting on response" chips start working immediately
+    // (without needing a page reload).
+    window.dispatchEvent(new CustomEvent('__aggregaytor_chat_activity_seed', {
+      detail: event.data.activity,
+    }));
+  }
 });
 
 // ── Auto-Send Mechanism ────────────────────────────────────────────────────

@@ -34,12 +34,14 @@ function parseRelativeTime(text: string): string {
   if (!text) return new Date().toISOString();
   const t = text.trim().toLowerCase();
   const now = Date.now();
-  // Match patterns like "5m ago", "2 hours ago", "3 months ago", "a minute ago"
   const match = t.match(/(\d+)\s*(s|sec|second|m|min|minute|h|hr|hour|d|day|w|week|mo|month|y|year)s?\s*(?:ago)?/i)
     || t.match(/(a|an)\s+(minute|hour|day|week|month|year)s?\s*(?:ago)?/i);
   if (!match) {
     if (t.includes('just now') || t.includes('now')) return new Date(now).toISOString();
     if (t.includes('yesterday')) return new Date(now - 86400000).toISOString();
+    if (t.length > 0 && t.length < 30) {
+      console.warn(`${LOG} parseRelativeTime: unparseable "${t}", defaulting to now`);
+    }
     return new Date().toISOString();
   }
   const num = match[1] === 'a' || match[1] === 'an' ? 1 : parseInt(match[1], 10);
@@ -542,12 +544,12 @@ function injectFloatingCSS(): void {
 
 function showFloatingPanel(contactId: string, platform: string): void {
   if (!contactId || !contextValid) return;
-  if (document.getElementById(FP_ID) && fpContactId === contactId) return;
+  const existing = document.getElementById(FP_ID);
+  if (existing && fpContactId === contactId) return;
   fpContactId = contactId;
   fpPlatform = platform;
 
   injectFloatingCSS();
-  const existing = document.getElementById(FP_ID);
   if (existing) existing.remove();
 
   const panel = document.createElement('div');
@@ -579,7 +581,7 @@ function showFloatingPanel(contactId: string, platform: string): void {
       </div>
       <div class="fp-phrases" id="fp-phrases"></div>
       <div class="fp-notes-area" id="fp-notes-area" style="display:none">
-        <textarea class="fp-notes-input" id="fp-notes-input" placeholder="Add notes..."></textarea>
+        <textarea class="fp-notes-input" id="fp-notes-input" placeholder="Add notes..." maxlength="10000"></textarea>
         <div class="fp-status" id="fp-status"></div>
       </div>
     </div>`;
@@ -708,7 +710,8 @@ function showFloatingPanel(contactId: string, platform: string): void {
     const phrases = (data.aggregaytor_quick_phrases || ['Hey there!', "What's up?", 'Looking?']).slice(0, 3);
     const c = panel.querySelector('#fp-phrases') as HTMLElement;
     if (!c) return;
-    c.innerHTML = phrases.map((p: string) => `<button class="fp-phrase-btn" title="${p}">${p.length > 18 ? p.slice(0, 16) + '…' : p}</button>`).join('');
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    c.innerHTML = phrases.map((p: string) => `<button class="fp-phrase-btn" title="${esc(p)}">${esc(p.length > 18 ? p.slice(0, 16) + '…' : p)}</button>`).join('');
     c.querySelectorAll('.fp-phrase-btn').forEach((btn, i) => {
       btn.addEventListener('click', () => {
         // Use postMessage to cross ISOLATED→MAIN world boundary
@@ -836,7 +839,7 @@ function injectProfileActions(contactId: string, platform: string): void {
       <button class="pa-star" data-star="5">★</button>
     </div>
     <div class="pa-notes-wrap" style="display:none">
-      <textarea class="pa-notes-input" placeholder="Notes about this person..."></textarea>
+      <textarea class="pa-notes-input" placeholder="Notes about this person..." maxlength="10000"></textarea>
       <div class="pa-status"></div>
     </div>
   `;
@@ -981,8 +984,9 @@ function showTopFilterBar(): void {
   const bar = document.createElement('div');
   bar.id = FILTER_BAR_ID;
 
+  const activeCount = [...positions, ...chatHistory, ...extras].filter(p => settings[p.key]).length;
   bar.innerHTML = `
-    <span class="fb-label">Filter:</span>
+    <span class="fb-label">Filter${activeCount ? ` (${activeCount})` : ''}:</span>
     ${positions.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}>${p.label}</label>`).join('')}
     <span class="fb-sep"></span>
     ${chatHistory.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}" title="${p.key === 'hideRecentChats' ? 'Hide profiles where you sent a message in the last 24h that they haven\'t replied to. They reappear the moment they respond.' : 'Hide any profile where your last message went unanswered (ghosted). They reappear the moment they respond.'}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}>${p.label}</label>`).join('')}
@@ -1005,11 +1009,15 @@ function showTopFilterBar(): void {
   // ── Auto-apply on toggle ──
   function applyFromBar() {
     const update: Record<string, unknown> = {};
+    let onCount = 0;
     bar.querySelectorAll('input[data-key]').forEach((cb) => {
       const el = cb as HTMLInputElement;
       update[el.dataset.key as string] = el.checked;
       el.closest('.fb-chip')!.classList.toggle('on', el.checked);
+      if (el.checked) onCount++;
     });
+    const label = bar.querySelector('.fb-label');
+    if (label) label.textContent = `Filter${onCount ? ` (${onCount})` : ''}:`;
     // Merge with existing settings (preserve text terms, blocked list, etc.)
     const prev = JSON.parse(localStorage.getItem('aggregaytor_map_filter_settings') || '{}');
     delete (prev as any).blockedIds;
@@ -1033,7 +1041,7 @@ function showTopFilterBar(): void {
         const countEl = bar.querySelector('.fb-hide-count');
         if (countEl) countEl.textContent = `${count} hidden`;
       } catch {}
-    }, 300);
+    }, 200);
   });
 
   // Close bar
@@ -1553,33 +1561,52 @@ if (location.href.match(/sniffies\.com\/?(\?|$|#)/i) || location.href.match(/sni
   if (!barHidden) setTimeout(() => showTopFilterBar(), 1000);
 }
 
-// ── Seed Chat Timestamps + Direction for Map Filters ───────────────────────
-// map-filters.ts (MAIN world) uses chatTimestamps + chatLastDirection to
-// drive the "waiting on response" filters (hide profiles where the last
-// message is mine and they haven't replied yet). Without a seed it would
-// only know about live-session messages.
+// ── Seed Chat Activity for Map Filters ─────────────────────────────────────
+// map-filters.ts (MAIN world) uses a per-profile {myLastTs, theirLastTs}
+// record to drive the "waiting on response" filters. Without a seed it
+// would only know about messages received during this session.
 //
-// Format written: { [profileId]: { ts: <ms>, dir: 'in' | 'out' } }
-// Re-seeded every 60s so newly-received responses flip the direction and
-// unhide the marker without requiring a page reload.
+// Format written: { [profileId]: { my: <ms>, them: <ms> } }
+// Re-seeded every 60s so newly-received responses flip the "waiting"
+// predicate and unhide the marker without requiring a page reload.
+//
+// Uses GET_CHAT_ACTIVITY which scans the full Sniffies message corpus in
+// the SW to produce per-direction timestamps (vs. GET_THREAD_SUMMARIES
+// which only gives the single most-recent message's direction).
 function seedChatTimestamps(): void {
   if (!contextValid) return;
-  chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} }).then((res: any) => {
-    if (!res?.ok || !Array.isArray(res.summaries)) return;
-    const map: Record<string, { ts: number; dir: 'in' | 'out' }> = {};
-    for (const s of res.summaries) {
-      if (s.platform !== 'sniffies') continue;
-      const id = String(s.contactId || '').replace(/^sniffies:/, '').toLowerCase();
-      const ts = s.lastMessage?.timestamp ? Date.parse(s.lastMessage.timestamp) : 0;
-      const dir = s.lastMessage?.direction;
-      if (id && ts > 0 && (dir === 'in' || dir === 'out')) {
-        map[id] = { ts, dir };
+  const t0 = performance.now();
+  chrome.runtime.sendMessage({ type: 'GET_CHAT_ACTIVITY', platform: 'sniffies' }).then((res: any) => {
+    if (!res?.ok) {
+      console.warn(`${LOG} GET_CHAT_ACTIVITY failed:`, res?.error || 'no response');
+      return;
+    }
+    if (!res.activity || typeof res.activity !== 'object') {
+      console.warn(`${LOG} GET_CHAT_ACTIVITY returned invalid shape:`, typeof res.activity);
+      return;
+    }
+    const map: Record<string, { my: number; them: number }> = {};
+    let profileCount = 0;
+    for (const [id, val] of Object.entries(res.activity)) {
+      const v = val as { myLastTs?: number; theirLastTs?: number };
+      const my = typeof v.myLastTs === 'number' ? v.myLastTs : 0;
+      const them = typeof v.theirLastTs === 'number' ? v.theirLastTs : 0;
+      if (my > 0 || them > 0) {
+        map[String(id).toLowerCase()] = { my, them };
+        profileCount++;
       }
     }
+    // Write to localStorage so fresh page loads have the data at init.
     try { localStorage.setItem('aggregaytor_sniffies_chat_ts', JSON.stringify(map)); } catch {}
+    // Also push live to the MAIN-world map-filters so the current session
+    // picks up historical data immediately (without waiting for a page
+    // reload). postMessage crosses the ISOLATED→MAIN world boundary.
+    window.postMessage({ type: '__aggregaytor_chat_activity_seed', activity: map }, '*');
+    const elapsed = Math.round(performance.now() - t0);
+    console.log(`${LOG} Seeded chat activity for ${profileCount} Sniffies profiles (${elapsed}ms)`);
   }).catch(() => {});
 }
-setTimeout(seedChatTimestamps, 2000);      // initial seed after 2s
+setTimeout(seedChatTimestamps, 1500);      // initial seed after 1.5s
 setInterval(seedChatTimestamps, 60_000);    // refresh every 60s
 
 // ── Quick Phrase Capture (Alt+Shift+Right-Click) ──────────────────────────

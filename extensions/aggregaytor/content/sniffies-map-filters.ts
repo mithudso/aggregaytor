@@ -77,9 +77,46 @@ const idToMarker = new Map<string, HTMLElement>();
 const markerAttitudes = new Map<string, string>();
 const manualAttitudes = new Map<string, string>(); // user-corrected attitudes
 const markerProfileText = new Map<string, string>();
-const chatTimestamps = new Map<string, number>(); // profileId → last chat ms (any direction, for badges)
-const chatLastDirection = new Map<string, 'in' | 'out'>(); // profileId → direction of most recent message
-const chatPreviews = new Map<string, Array<{ dir: string; text: string; ts: number }>>(); // recent messages
+/**
+ * Per-profile chat activity — separate timestamps for my last outbound
+ * and their last inbound message. Modeled after the old userscript's
+ * `chatActivity` Map (v0.7.46), which enables nuanced queries like
+ * "waiting on response for >N days" without losing either direction.
+ *
+ * - myLastTs:    timestamp of the user's most recent outbound message (0 = never)
+ * - theirLastTs: timestamp of the contact's most recent inbound message (0 = never)
+ *
+ * Derived helpers (not stored): anyLastTs = max(my, theirs); waitingOnThem =
+ * my > their && my > 0.
+ */
+interface ChatActivity { myLastTs: number; theirLastTs: number; }
+const chatActivity = new Map<string, ChatActivity>();
+const CHAT_ACTIVITY_MAX = 5000;
+
+function getActivity(id: string): ChatActivity {
+  let a = chatActivity.get(id);
+  if (!a) {
+    a = { myLastTs: 0, theirLastTs: 0 };
+    chatActivity.set(id, a);
+    if (chatActivity.size > CHAT_ACTIVITY_MAX) {
+      const oldest = chatActivity.keys().next();
+      if (!oldest.done) chatActivity.delete(oldest.value as string);
+    }
+  }
+  return a;
+}
+function anyLastTs(id: string): number {
+  const a = chatActivity.get(id);
+  if (!a) return 0;
+  return Math.max(a.myLastTs, a.theirLastTs);
+}
+function waitingOnResponse(id: string): boolean {
+  const a = chatActivity.get(id);
+  if (!a || !a.myLastTs) return false;
+  return a.myLastTs > a.theirLastTs;
+}
+const chatPreviews = new Map<string, Array<{ dir: string; text: string; ts: number }>>();
+const CHAT_PREVIEWS_MAX = 500;
 const badgeElements = new Map<string, HTMLElement>(); // profileId → badge div
 const hideHistory: string[] = []; // stack of recently hidden IDs for undo
 const hoverBound = new WeakSet<HTMLElement>(); // prevent duplicate hover listeners
@@ -418,7 +455,7 @@ function formatAge(ms: number): string {
 }
 
 function updateBadge(id: string, marker: HTMLElement): void {
-  const chatTs = chatTimestamps.get(id);
+  const chatTs = anyLastTs(id);
   if (!chatTs || !settings.showChatAgeBadges) {
     const existing = badgeElements.get(id);
     if (existing) { existing.style.display = 'none'; }
@@ -435,7 +472,8 @@ function updateBadge(id: string, marker: HTMLElement): void {
   }
 
   const age = Date.now() - chatTs;
-  badge.textContent = formatAge(age);
+  const waiting = waitingOnResponse(id);
+  badge.textContent = `${waiting ? '→' : '←'}${formatAge(age)}`;
   badge.style.display = '';
 }
 
@@ -520,14 +558,25 @@ window.addEventListener('__aggregaytor_block_by_map_filter', ((event: CustomEven
 function applyFilters(): void {
   if (!filterEnabled) return;
   scanMarkers();
+  if (idToMarker.size === 0) return;
+
+  // Diagnostic counters — surfaced at the end of this pass so you can tell
+  // from the console how each filter is performing.
+  let nMarkers = 0;
+  let nHiddenByBlock = 0, nHiddenByText = 0, nHiddenByAttitude = 0;
+  let nHiddenByWaiting24h = 0, nHiddenByWaitingEver = 0;
+  let nWaiting = 0, nActivityEntries = 0;
+  nActivityEntries = chatActivity.size;
 
   for (const [id, marker] of idToMarker) {
+    nMarkers++;
     // Remove all classes first
     marker.classList.remove(HIDE_CLASS, HIGHLIGHT_CLASS, HIGHLIGHT_ATTITUDE_CLASS);
 
     // Priority 1: manually blocked
     if (settings.blockedIds.has(id)) {
       marker.classList.add(HIDE_CLASS);
+      nHiddenByBlock++;
       continue;
     }
 
@@ -536,28 +585,31 @@ function applyFilters(): void {
       const text = markerProfileText.get(id) || '';
       if (matchesTerms(text, settings.excludeTerms)) {
         marker.classList.add(HIDE_CLASS);
+        nHiddenByText++;
         continue;
       }
     }
 
     // Priority 2.5: waiting-on-response filters.
-    // These hide profiles where the most recent message is from the user
-    // (outbound) — i.e., we're waiting on their reply. Once they respond,
-    // the most recent direction flips to 'in' and the marker reappears.
-    // - hideAnyChats:    hide any profile whose last message is mine (any age)
+    // Uses the independent myLastTs / theirLastTs stored in chatActivity.
+    // A profile is "waiting on response" when myLastTs > theirLastTs —
+    // i.e., my most recent outbound is newer than their most recent inbound
+    // (or they've never replied at all).
+    // - hideAnyChats:    hide any waiting profile (any age)
     // - hideRecentChats: hide only if my unanswered message is <24h old
-    if (settings.hideAnyChats || settings.hideRecentChats) {
-      const lastDir = chatLastDirection.get(id);
-      const lastTs = chatTimestamps.get(id);
-      if (lastDir === 'out' && lastTs) {
-        if (settings.hideAnyChats) {
-          marker.classList.add(HIDE_CLASS);
-          continue;
-        }
-        if (settings.hideRecentChats && (Date.now() - lastTs) < 24 * 60 * 60 * 1000) {
-          marker.classList.add(HIDE_CLASS);
-          continue;
-        }
+    const waiting = waitingOnResponse(id);
+    if (waiting) nWaiting++;
+    if ((settings.hideAnyChats || settings.hideRecentChats) && waiting) {
+      if (settings.hideAnyChats) {
+        marker.classList.add(HIDE_CLASS);
+        nHiddenByWaitingEver++;
+        continue;
+      }
+      const a = chatActivity.get(id)!;
+      if (settings.hideRecentChats && (Date.now() - a.myLastTs) < 24 * 60 * 60 * 1000) {
+        marker.classList.add(HIDE_CLASS);
+        nHiddenByWaiting24h++;
+        continue;
       }
     }
 
@@ -565,6 +617,7 @@ function applyFilters(): void {
     const att = getEffectiveAttitude(id);
     if (shouldHideAttitude(att)) {
       marker.classList.add(HIDE_CLASS);
+      nHiddenByAttitude++;
       continue;
     }
 
@@ -585,7 +638,53 @@ function applyFilters(): void {
     // Hover preview bindings (chat preview popup)
     ensureHoverBindings(id, marker);
   }
+
+  // Diagnostic summary — logged on every applyFilters pass so you can tell
+  // why (or why not) profiles are being hidden. Gated behind a chip being
+  // on or block-activity being nonzero to avoid console spam on idle maps.
+  if (settings.hideAnyChats || settings.hideRecentChats || nHiddenByBlock || nHiddenByText || nHiddenByAttitude) {
+    console.log('[Aggregaytor:MapFilters] applyFilters:', {
+      markers: nMarkers,
+      activity: nActivityEntries,
+      waiting: nWaiting,
+      hiddenByBlock: nHiddenByBlock,
+      hiddenByText: nHiddenByText,
+      hiddenByAttitude: nHiddenByAttitude,
+      hiddenByWaiting24h: nHiddenByWaiting24h,
+      hiddenByWaitingEver: nHiddenByWaitingEver,
+      chips: {
+        hideRecentChats: settings.hideRecentChats,
+        hideAnyChats: settings.hideAnyChats,
+      },
+    });
+  }
 }
+
+/**
+ * Debug helper — dump the current state of chatActivity for a specific
+ * profile. Exposed on window so you can inspect from DevTools:
+ *   __aggregaytor_debug_activity('6774d0599604ddad18d1e874')
+ */
+(window as any).__aggregaytor_debug_activity = (profileId: string) => {
+  const id = String(profileId || '').toLowerCase().replace(/^sniffies:/, '');
+  const a = chatActivity.get(id);
+  if (!a) {
+    console.log(`[Aggregaytor:MapFilters] No activity for ${id}`);
+    return null;
+  }
+  const now = Date.now();
+  const info = {
+    id,
+    myLastTs: a.myLastTs,
+    theirLastTs: a.theirLastTs,
+    myAgeHrs: a.myLastTs ? Math.round((now - a.myLastTs) / 3_600_000 * 10) / 10 : null,
+    theirAgeHrs: a.theirLastTs ? Math.round((now - a.theirLastTs) / 3_600_000 * 10) / 10 : null,
+    waitingOnResponse: waitingOnResponse(id),
+    onMap: idToMarker.has(id),
+  };
+  console.log('[Aggregaytor:MapFilters] Activity:', info);
+  return info;
+};
 
 // ── Click Handlers ─────────────────────────────────────────────────────────
 
@@ -770,6 +869,8 @@ function setupClickHandlers(): void {
       if (markerEl) markerEl.classList.remove(HIDE_CLASS);
     } else {
       settings.blockedIds.add(id);
+      hideHistory.push(id);
+      if (hideHistory.length > 50) hideHistory.shift();
       if (markerEl) markerEl.classList.add(HIDE_CLASS);
     }
     saveBlockedIds();
@@ -861,27 +962,53 @@ window.addEventListener('__aggregaytor_contact_data', ((event: CustomEvent) => {
   }
 }) as EventListener);
 
-// Chat timestamp + preview updates from adapter messages
+// Chat activity seed from the SW (relayed by the bridge every 60s, first
+// seed ~1.5s after page load). Merges per-profile {my, them} timestamps
+// into the in-memory chatActivity map, taking the max with existing values
+// so a live message that arrived between seeds isn't stomped by older data.
+// Triggers an immediate applyFilters() so the chips start working the
+// moment the first seed lands — no page reload required.
+window.addEventListener('__aggregaytor_chat_activity_seed', ((event: CustomEvent) => {
+  const seed = event.detail;
+  if (!seed || typeof seed !== 'object') return;
+  let mergedCount = 0;
+  for (const [id, val] of Object.entries(seed)) {
+    const v = val as { my?: number; them?: number };
+    const key = String(id).toLowerCase();
+    const a = getActivity(key);
+    if (typeof v.my === 'number' && v.my > a.myLastTs) a.myLastTs = v.my;
+    if (typeof v.them === 'number' && v.them > a.theirLastTs) a.theirLastTs = v.them;
+    mergedCount++;
+  }
+  console.log(`[Aggregaytor:MapFilters] Merged chat activity seed for ${mergedCount} profiles`);
+  applyFilters();
+}) as EventListener);
+
+// Chat timestamp + preview updates from adapter messages.
+// Each event carries one message's direction + timestamp. We update the
+// per-direction max so out-of-order delivery (history scrape after a live
+// message) still converges to the correct state.
 window.addEventListener('__aggregaytor_chat_timestamp', ((event: CustomEvent) => {
   const { profileId, timestamp, body, direction } = event.detail || {};
   if (!profileId || !timestamp) return;
   const id = profileId.toLowerCase();
-  // Only update timestamp + direction if this message is newer than what we
-  // have — the adapter may emit messages out of order (e.g. history scrape
-  // after a live message), and we want the most-recent-wins invariant.
-  const prevTs = chatTimestamps.get(id) || 0;
-  if (timestamp >= prevTs) {
-    chatTimestamps.set(id, timestamp);
-    if (direction === 'in' || direction === 'out') {
-      chatLastDirection.set(id, direction);
-    }
+  const a = getActivity(id);
+  if (direction === 'out' && timestamp > a.myLastTs) {
+    a.myLastTs = timestamp;
+  } else if (direction === 'in' && timestamp > a.theirLastTs) {
+    a.theirLastTs = timestamp;
   }
   // Also store message for chat preview popup
   if (body) {
-    if (!chatPreviews.has(id)) chatPreviews.set(id, []);
+    if (!chatPreviews.has(id)) {
+      chatPreviews.set(id, []);
+      if (chatPreviews.size > CHAT_PREVIEWS_MAX) {
+        const oldest = chatPreviews.keys().next();
+        if (!oldest.done) chatPreviews.delete(oldest.value as string);
+      }
+    }
     const msgs = chatPreviews.get(id)!;
     msgs.push({ dir: direction || 'in', text: String(body).slice(0, 100), ts: timestamp });
-    // Keep only last 20 messages per contact
     if (msgs.length > 20) msgs.splice(0, msgs.length - 20);
   }
 }) as EventListener);
@@ -923,10 +1050,15 @@ export function initMapFilters(): void {
     }
   } catch {}
 
-  // Seed chat timestamps + directions from cache written by the bridge.
-  // Format: { [profileId]: { ts: number, dir: 'in' | 'out' } }
-  // Without this, the chat-history filters would only know about messages
-  // received during this session — historical chats would slip through.
+  // Seed chat activity from cache written by the bridge.
+  //
+  // Current format: { [profileId]: { my: number, them: number } }
+  // Legacy format 1 (v0.57.21): { [profileId]: { ts: number, dir: 'in'|'out' } }
+  // Legacy format 2 (v0.57.20): { [profileId]: number }
+  //
+  // Without this seed, the chat-history filters would only know about
+  // messages received during this session — historical chats would slip
+  // through until the adapter happens to re-emit them.
   try {
     const raw = localStorage.getItem('aggregaytor_sniffies_chat_ts');
     if (raw) {
@@ -934,13 +1066,25 @@ export function initMapFilters(): void {
       if (map && typeof map === 'object') {
         for (const [id, val] of Object.entries(map)) {
           const key = id.toLowerCase();
-          if (val && typeof val === 'object' && typeof (val as any).ts === 'number') {
-            chatTimestamps.set(key, (val as any).ts);
-            const d = (val as any).dir;
-            if (d === 'in' || d === 'out') chatLastDirection.set(key, d);
+          if (val && typeof val === 'object') {
+            const v = val as any;
+            if (typeof v.my === 'number' || typeof v.them === 'number') {
+              // Current richer format
+              const a = getActivity(key);
+              if (typeof v.my === 'number') a.myLastTs = v.my;
+              if (typeof v.them === 'number') a.theirLastTs = v.them;
+            } else if (typeof v.ts === 'number') {
+              // Legacy {ts,dir} — map dir into my/their slot we know about
+              const a = getActivity(key);
+              if (v.dir === 'out') a.myLastTs = v.ts;
+              else if (v.dir === 'in') a.theirLastTs = v.ts;
+            }
           } else if (typeof val === 'number') {
-            // Legacy format (pre-direction): treat as unknown direction
-            chatTimestamps.set(key, val);
+            // Legacy plain-ts format (direction unknown). Stored in
+            // theirLastTs so it still drives the age badge but never
+            // triggers the waiting-on-response filter (which requires
+            // myLastTs > 0).
+            getActivity(key).theirLastTs = val;
           }
         }
       }

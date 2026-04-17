@@ -97,6 +97,7 @@ async function getDeviceCredentialKey(): Promise<CryptoKey> {
 
 function invalidateThreadCache(): void {
   threadSummaryCache = null;
+  chatActivityCache = null;
 }
 
 // ── Natural-language Query Cache ────────────────────────────────────────────
@@ -107,6 +108,9 @@ function invalidateThreadCache(): void {
 const queryContactsCache = new Map<string, { time: number; result: any }>();
 const QUERY_CONTACTS_CACHE_TTL = 60_000;
 const QUERY_CONTACTS_CACHE_MAX = 20;
+
+let chatActivityCache: { data: Record<string, { myLastTs: number; theirLastTs: number }>; time: number; platform: string } | null = null;
+const CHAT_ACTIVITY_CACHE_TTL = 30_000;
 
 function safeNotify(id: string, opts: chrome.notifications.NotificationOptions): void {
   try {
@@ -174,6 +178,10 @@ async function handleMessage(msg: any): Promise<any> {
         recentContactUpserts: recentContactUpserts.size,
         threadCacheHasData: !!threadSummaryCache,
         threadCacheAgeMs: threadSummaryCache ? Date.now() - threadSummaryCache.time : 0,
+        chatActivityCacheHasData: !!chatActivityCache,
+        chatActivityCacheAgeMs: chatActivityCache ? Date.now() - chatActivityCache.time : 0,
+        chatActivityCacheProfiles: chatActivityCache ? Object.keys(chatActivityCache.data).length : 0,
+        queryContactsCacheSize: queryContactsCache.size,
         dossierQueueSize: dossierExtractionQueue.size,
         searchIndexReady: isIndexReady(),
         searchIndexSize: getIndexSize(),
@@ -407,15 +415,15 @@ async function handleMessage(msg: any): Promise<any> {
       return { ok: true, count: scraped };
     }
     case 'CLEAR_THREAD_MESSAGES': {
-      // Delete every message for a contact in a single bulkDocs round-trip
-      // instead of N sequential db.remove() calls. For threads with hundreds
-      // of messages this drops deletion time from O(N) per-round-trip to O(1).
       invalidateThreadCache();
       const db = await getDB();
-      const result = await db.find({ selector: { docType: 'message', contactId: msg.contactId } });
+      const result = await db.find({ selector: { docType: 'message', contactId: msg.contactId }, limit: 50_000 });
       if (!result.docs.length) return { ok: true, count: 0 };
-      const ids = result.docs.map((d: any) => d._id);
-      const tombstones = result.docs.map((d: any) => ({ _id: d._id, _rev: d._rev, _deleted: true }));
+      const ids = result.docs.map((d: any) => d._id).filter(Boolean);
+      const tombstones = result.docs
+        .filter((d: any) => d._id && d._rev)
+        .map((d: any) => ({ _id: d._id, _rev: d._rev, _deleted: true }));
+      if (!tombstones.length) return { ok: true, count: 0 };
       await db.bulkDocs(tombstones);
       // Keep the search index in sync so deleted-message ids don't surface
       // in future queries with no matching PouchDB doc.
@@ -434,7 +442,7 @@ async function handleMessage(msg: any): Promise<any> {
         maybeResumeEnrich(msg.platform).catch(() => {});
       }
       await upsertThreadMeta(msg.contactId, msg.platform, { blockedByThem: true, archived: true });
-      chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform: msg.platform, count: 0 }).catch(() => {})
+      chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform: msg.platform, count: 0 }).catch(() => {});
       // Immediate preference training — blocking is a strong negative signal.
       // We also mirror the flag onto the contact record's metadata so future
       // autoTrainFromSignals scans see it via the md.isBlocked path even if
@@ -476,7 +484,7 @@ async function handleMessage(msg: any): Promise<any> {
     }
     case 'ACTIVE_PROFILE_CHANGED': {
       // Relay to side panel so it can highlight the active conversation
-      chrome.runtime.sendMessage({ type: 'ACTIVE_PROFILE_CHANGED', contactId: msg.contactId, platform: msg.platform }).catch(() => {})
+      chrome.runtime.sendMessage({ type: 'ACTIVE_PROFILE_CHANGED', contactId: msg.contactId, platform: msg.platform }).catch(() => {});
       return { ok: true };
     }
     case 'UPDATE_DELETE_COUNT': {
@@ -492,7 +500,7 @@ async function handleMessage(msg: any): Promise<any> {
     }
     case 'PROFILE_CLOSED': {
       // Relay to side panel so it goes back to inbox
-      chrome.runtime.sendMessage({ type: 'PROFILE_CLOSED', platform: msg.platform }).catch(() => {})
+      chrome.runtime.sendMessage({ type: 'PROFILE_CLOSED', platform: msg.platform }).catch(() => {});
       return { ok: true };
     }
 
@@ -676,7 +684,7 @@ async function handleMessage(msg: any): Promise<any> {
           requireInteraction: true, priority: 2,
         });
         // Flash the side panel
-        chrome.runtime.sendMessage({ type: 'COMMITMENT_ALERT', contactId: msg.contactId, contactName: msg.contactName }).catch(() => {})
+        chrome.runtime.sendMessage({ type: 'COMMITMENT_ALERT', contactId: msg.contactId, contactName: msg.contactName }).catch(() => {});
       }
 
       return { ok: true, sentiment, preference, summary };
@@ -1560,9 +1568,8 @@ async function handleMessage(msg: any): Promise<any> {
                 } catch (e: any) {
                   out.push({ id, ok: false, status: 0, error: String(e?.message || e) });
                 }
-                // Jittered delay to avoid a perfectly regular enumeration pattern
-    const jittered = ENRICH_CALL_DELAY_MS + (Math.random() * 2 - 1) * ENRICH_CALL_JITTER_MS;
-    await new Promise(r => setTimeout(r, jittered));
+                const jittered = ENRICH_CALL_DELAY_MS + (Math.random() * 2 - 1) * ENRICH_CALL_JITTER_MS;
+                await new Promise(r => setTimeout(r, jittered));
               }
               return out;
             },
@@ -1939,6 +1946,55 @@ async function handleMessage(msg: any): Promise<any> {
     //    always a null resolve and never read) — noise during review.
     //  - Added a simple 60-second in-memory cache so re-running the exact
     //    same query doesn't burn another LLM call.
+    /**
+     * Return per-profile chat activity timestamps for a given platform.
+     *
+     * Used by the Sniffies map-filter bridge (re-seeded every 60s) to drive
+     * the "waiting on response" filters. Returns the last inbound AND last
+     * outbound timestamp per contact so the MAIN-world filter can answer
+     * questions like "my last message went unanswered for >N days" without
+     * needing to requery the DB on every filter scan.
+     */
+    case 'GET_CHAT_ACTIVITY': {
+      const end = swPerfTrack('getChatActivity');
+      try {
+        const platform = String(msg.platform || 'sniffies');
+        // Cache for 30s — the bridge re-seeds every 60s, so a 30s cache
+        // means at most one real PouchDB scan per seed cycle while still
+        // picking up newly-stored messages within half a minute.
+        if (chatActivityCache && chatActivityCache.platform === platform &&
+            (Date.now() - chatActivityCache.time) < CHAT_ACTIVITY_CACHE_TTL) {
+          swPerfTrack('getChatActivity:cached')();
+          end();
+          return { ok: true, activity: chatActivityCache.data };
+        }
+        const db = await getDB();
+        const r = await db.find({
+          selector: { docType: 'message', platform },
+          limit: 20_000,
+        });
+        const activity: Record<string, { myLastTs: number; theirLastTs: number }> = {};
+        for (const m of r.docs as any[]) {
+          const id = String(m.contactId || '').replace(/^contact:/, '').replace(/^[a-z]+:/, '').toLowerCase();
+          if (!id) continue;
+          const ts = Date.parse(m.timestamp) || 0;
+          if (!ts) continue;
+          if (!activity[id]) activity[id] = { myLastTs: 0, theirLastTs: 0 };
+          if (m.direction === 'out') {
+            if (ts > activity[id].myLastTs) activity[id].myLastTs = ts;
+          } else if (m.direction === 'in') {
+            if (ts > activity[id].theirLastTs) activity[id].theirLastTs = ts;
+          }
+        }
+        chatActivityCache = { data: activity, time: Date.now(), platform };
+        end();
+        return { ok: true, activity };
+      } catch (err) {
+        end();
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+
     case 'QUERY_CONTACTS': {
       const end = swPerfTrack('queryContacts');
       try {
@@ -2062,7 +2118,7 @@ async function handleMessage(msg: any): Promise<any> {
 async function handleIncomingMessages(messages: UnifiedMessage[], platform: Platform): Promise<any> {
   const result = await upsertMessages(messages);
   await updateBadgeCount();
-  chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform, count: result.created }).catch(() => {})
+  chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform, count: result.created }).catch(() => {});
 
   // Keep the full-text search index in sync with every write. The indexing
   // call is cheap (~1ms for a batch of 20 messages) and must happen even
@@ -2199,11 +2255,9 @@ async function processDossierExtractions(): Promise<void> {
       console.warn(`${LOG} Dossier extraction failed for ${contactId}:`, err);
     }
 
-      // Small delay between contacts to avoid API spam
       if (dossierExtractionQueue.size > 0) {
-        // Jittered delay to avoid a perfectly regular enumeration pattern
-    const jittered = ENRICH_CALL_DELAY_MS + (Math.random() * 2 - 1) * ENRICH_CALL_JITTER_MS;
-    await new Promise(r => setTimeout(r, jittered));
+        const jittered = ENRICH_CALL_DELAY_MS + (Math.random() * 2 - 1) * ENRICH_CALL_JITTER_MS;
+        await new Promise(r => setTimeout(r, jittered));
       }
     } // end while
   } finally {
@@ -2336,7 +2390,7 @@ async function processAutoResponds(): Promise<void> {
           message: `${contactName}: "${result.response.slice(0, 100)}"`,
           requireInteraction: result.tier === 'high',
         });
-        chrome.runtime.sendMessage({ type: 'DRAFTS_UPDATED' }).catch(() => {})
+        chrome.runtime.sendMessage({ type: 'DRAFTS_UPDATED' }).catch(() => {});
         console.log(`${LOG} Draft created (${result.tier} tier): "${result.response.slice(0, 40)}..."`);
       }
     } catch (err) {

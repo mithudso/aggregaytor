@@ -313,6 +313,7 @@ try {
 } catch {}
 
 const blockQueue: string[] = [];
+const blockQueueSet = new Set<string>();
 const recentBlockTimestamps: number[] = []; // rolling hour window
 let blockSessionDead = false;
 let blockBackoffUntil = 0;
@@ -431,6 +432,7 @@ async function processBlockQueue(): Promise<void> {
       }
 
       const profileId = blockQueue.shift()!;
+      blockQueueSet.delete(profileId);
       const auth = getCapturedAuth('grindr.com');
       if (!auth) {
         // Don't drop the click. Put the id BACK on the queue and wait for
@@ -499,7 +501,8 @@ async function processBlockQueue(): Promise<void> {
 }
 
 function enqueueBlock(profileId: string): void {
-  if (blockQueue.includes(profileId)) return; // dedupe
+  if (blockQueueSet.has(profileId)) return;
+  blockQueueSet.add(profileId);
   blockQueue.push(profileId);
   processBlockQueue();
 }

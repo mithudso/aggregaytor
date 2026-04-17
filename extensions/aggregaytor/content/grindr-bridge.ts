@@ -248,7 +248,7 @@ let keepaliveInterval: ReturnType<typeof setInterval> | null = null;
 function startSessionKeepalive(): void {
   if (keepaliveInterval) return;
   keepaliveInterval = setInterval(() => {
-    if (!contextValid) return;
+    if (!contextValid || document.hidden) return;
     try {
       // Method 1: Dispatch a visibilitychange event to trick Grindr into
       // thinking the tab just became visible (resets inactivity timer)
