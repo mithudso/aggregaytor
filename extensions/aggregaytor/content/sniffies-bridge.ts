@@ -515,6 +515,7 @@ window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
 const FP_ID = 'aggregaytor-floating-actions';
 let fpContactId = '';
 let fpPlatform = '';
+let _fpDragCleanup: (() => void) | null = null;
 
 function injectFloatingCSS(): void {
   if (document.getElementById('aggregaytor-fp-css')) return;
@@ -555,9 +556,19 @@ function showFloatingPanel(contactId: string, platform: string): void {
   const panel = document.createElement('div');
   panel.id = FP_ID;
 
-  // Load position
+  // Load position with bounds validation
   let pos = { x: 20, y: 120 };
-  try { const s = localStorage.getItem('aggregaytor_fp_pos'); if (s) pos = JSON.parse(s); } catch {}
+  try {
+    const s = localStorage.getItem('aggregaytor_fp_pos');
+    if (s) {
+      const parsed = JSON.parse(s);
+      if (typeof parsed.x === 'number' && typeof parsed.y === 'number' &&
+          isFinite(parsed.x) && isFinite(parsed.y)) {
+        pos.x = Math.max(0, Math.min(parsed.x, window.innerWidth - 100));
+        pos.y = Math.max(0, Math.min(parsed.y, window.innerHeight - 40));
+      }
+    }
+  } catch {}
   panel.style.left = `${pos.x}px`;
   panel.style.top = `${pos.y}px`;
 
@@ -588,7 +599,7 @@ function showFloatingPanel(contactId: string, platform: string): void {
 
   document.body.appendChild(panel);
 
-  // Drag
+  // Drag — named handlers so hideFloatingPanel can clean them up
   let dragging = false, dx = 0, dy = 0;
   panel.querySelector('.fp-header')!.addEventListener('mousedown', (e: Event) => {
     const me = e as MouseEvent;
@@ -598,16 +609,22 @@ function showFloatingPanel(contactId: string, platform: string): void {
     dx = me.clientX - r.left; dy = me.clientY - r.top;
     me.preventDefault();
   });
-  document.addEventListener('mousemove', (e: MouseEvent) => {
+  const onDragMove = (e: MouseEvent) => {
     if (!dragging) return;
-    panel.style.left = `${Math.max(0, e.clientX - dx)}px`;
-    panel.style.top = `${Math.max(0, e.clientY - dy)}px`;
-  });
-  document.addEventListener('mouseup', () => {
+    panel.style.left = `${Math.max(0, Math.min(e.clientX - dx, window.innerWidth - 100))}px`;
+    panel.style.top = `${Math.max(0, Math.min(e.clientY - dy, window.innerHeight - 40))}px`;
+  };
+  const onDragEnd = () => {
     if (!dragging) return;
     dragging = false;
     try { localStorage.setItem('aggregaytor_fp_pos', JSON.stringify({ x: parseInt(panel.style.left), y: parseInt(panel.style.top) })); } catch {}
-  });
+  };
+  document.addEventListener('mousemove', onDragMove);
+  document.addEventListener('mouseup', onDragEnd);
+  _fpDragCleanup = () => {
+    document.removeEventListener('mousemove', onDragMove);
+    document.removeEventListener('mouseup', onDragEnd);
+  };
 
   // Minimize — collapse to just the header bar
   panel.querySelector('.fp-minimize-btn')!.addEventListener('click', () => {
@@ -730,6 +747,7 @@ function showFloatingPanel(contactId: string, platform: string): void {
 function hideFloatingPanel(): void {
   document.getElementById(FP_ID)?.remove();
   fpContactId = '';
+  if (_fpDragCleanup) { _fpDragCleanup(); _fpDragCleanup = null; }
 }
 
 // ── Inline Profile Actions ─────────────────────────────────────────────────
@@ -989,7 +1007,7 @@ function showTopFilterBar(): void {
     <span class="fb-label">Filter${activeCount ? ` (${activeCount})` : ''}:</span>
     ${positions.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}>${p.label}</label>`).join('')}
     <span class="fb-sep"></span>
-    ${chatHistory.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}" title="${p.key === 'hideRecentChats' ? 'Hide profiles where you sent a message in the last 24h that they haven\'t replied to. They reappear the moment they respond.' : 'Hide any profile where your last message went unanswered (ghosted). They reappear the moment they respond.'}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}>${p.label}</label>`).join('')}
+    ${chatHistory.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}" title="${p.key === 'hideRecentChats' ? 'Hide profiles you\'ve chatted with in the last 24h, in either direction. Use this to declutter the map of people you\'re already talking to.' : 'Hide profiles where your last message went unanswered (waiting on their reply), any age. They reappear the moment they respond.'}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}><span class="fb-chip-label" data-chip="${p.key}">${p.label}</span></label>`).join('')}
     <span class="fb-sep"></span>
     ${extras.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}>${p.label}</label>`).join('')}
     <span class="fb-sep"></span>
@@ -1051,6 +1069,35 @@ function showTopFilterBar(): void {
     _originalBodyPaddingTop = null;
     try { localStorage.setItem('aggregaytor_top_filter_bar_hidden', 'true'); } catch {}
   });
+
+  // Listen for filter stats broadcasts from the MAIN-world map-filters
+  // and update the waiting-on-response chip labels in real time. This
+  // makes it obvious when the filter is actually doing something —
+  // previously with only ~41 waiting profiles out of 3000+ and <5
+  // visible on screen at a time, it felt like the filter wasn't working.
+  const statsListener = (event: MessageEvent) => {
+    if (!event.data || event.data.type !== '__aggregaytor_filter_stats') return;
+    const s = event.data.stats;
+    if (!s) return;
+    const bar = document.getElementById(FILTER_BAR_ID);
+    if (!bar) { window.removeEventListener('message', statsListener); return; }
+    // Update chip labels — show "⏳ <24h (3)" when 3 markers are hidden
+    const chip24 = bar.querySelector('[data-chip="hideRecentChats"]');
+    const chipEver = bar.querySelector('[data-chip="hideAnyChats"]');
+    if (chip24) {
+      chip24.textContent = s.hiddenByWaiting24h > 0 ? `⏳ <24h (${s.hiddenByWaiting24h})` : '⏳ <24h';
+    }
+    if (chipEver) {
+      chipEver.textContent = s.hiddenByWaitingEver > 0 ? `⏳ Ghosted (${s.hiddenByWaitingEver})` : '⏳ Ghosted';
+    }
+    // Also update the right-side "N hidden" counter to show the total
+    // across all filter types (block + text + attitude + waiting).
+    const total = (s.hiddenByBlock || 0) + (s.hiddenByText || 0) + (s.hiddenByAttitude || 0)
+                + (s.hiddenByWaiting24h || 0) + (s.hiddenByWaitingEver || 0);
+    const countEl = bar.querySelector('.fb-hide-count');
+    if (countEl) countEl.textContent = `${total} hidden${s.waiting ? ` · ${s.waiting} waiting` : ''}`;
+  };
+  window.addEventListener('message', statsListener);
 }
 
 function removeTopFilterBar(): void {
@@ -1327,11 +1374,19 @@ let lastUrl = location.href;
 // already left. Without cancellation, clicking through 5 profiles in 2s
 // could leave behind 10 pending retries that all fight over the DOM.
 const _profileActionTimers: ReturnType<typeof setTimeout>[] = [];
+const _PROFILE_ACTION_TIMERS_MAX = 10;
 function clearProfileActionTimers(): void {
   while (_profileActionTimers.length) {
     const t = _profileActionTimers.pop();
     if (t) clearTimeout(t);
   }
+}
+function addProfileActionTimer(t: ReturnType<typeof setTimeout>): void {
+  if (_profileActionTimers.length >= _PROFILE_ACTION_TIMERS_MAX) {
+    const old = _profileActionTimers.shift();
+    if (old) clearTimeout(old);
+  }
+  _profileActionTimers.push(t);
 }
 
 function checkUrlChange() {
@@ -1355,9 +1410,8 @@ function checkUrlChange() {
     // paint actions for stale contacts over the current profile container.
     clearProfileActionTimers();
     removeProfileActions();
-    _profileActionTimers.push(setTimeout(() => injectProfileActions(contactId, 'sniffies'), 600));
-    // Retry once more in case the DOM was slow to render.
-    _profileActionTimers.push(setTimeout(() => {
+    addProfileActionTimer(setTimeout(() => injectProfileActions(contactId, 'sniffies'), 600));
+    addProfileActionTimer(setTimeout(() => {
       if (!document.getElementById(PROFILE_ACTIONS_ID)) injectProfileActions(contactId, 'sniffies');
     }, 1500));
   } else {
@@ -1537,7 +1591,7 @@ try {
             setTimeout(() => {
               (window as any).__aggregaytor_scrape_pending = false;
               scrapeChatPanel();
-            }, 400);
+            }, 800);
           }
           return;
         }
@@ -1573,8 +1627,20 @@ if (location.href.match(/sniffies\.com\/?(\?|$|#)/i) || location.href.match(/sni
 // Uses GET_CHAT_ACTIVITY which scans the full Sniffies message corpus in
 // the SW to produce per-direction timestamps (vs. GET_THREAD_SUMMARIES
 // which only gives the single most-recent message's direction).
+// In-flight guard — setInterval fires every 60s regardless of whether the
+// previous call completed. Before the allDocs optimization, scans took up
+// to 400s and 6+ overlapping seeds would pile up, paralysing PouchDB.
+// This flag ensures at most one seed is running at a time; subsequent
+// ticks are skipped if the previous hasn't returned yet.
+let seedInFlight = false;
+
 function seedChatTimestamps(): void {
   if (!contextValid) return;
+  if (seedInFlight) {
+    console.log(`${LOG} Skipping seed — previous still in flight`);
+    return;
+  }
+  seedInFlight = true;
   const t0 = performance.now();
   chrome.runtime.sendMessage({ type: 'GET_CHAT_ACTIVITY', platform: 'sniffies' }).then((res: any) => {
     if (!res?.ok) {
@@ -1589,8 +1655,8 @@ function seedChatTimestamps(): void {
     let profileCount = 0;
     for (const [id, val] of Object.entries(res.activity)) {
       const v = val as { myLastTs?: number; theirLastTs?: number };
-      const my = typeof v.myLastTs === 'number' ? v.myLastTs : 0;
-      const them = typeof v.theirLastTs === 'number' ? v.theirLastTs : 0;
+      const my = typeof v.myLastTs === 'number' && isFinite(v.myLastTs) ? v.myLastTs : 0;
+      const them = typeof v.theirLastTs === 'number' && isFinite(v.theirLastTs) ? v.theirLastTs : 0;
       if (my > 0 || them > 0) {
         map[String(id).toLowerCase()] = { my, them };
         profileCount++;
@@ -1604,7 +1670,11 @@ function seedChatTimestamps(): void {
     window.postMessage({ type: '__aggregaytor_chat_activity_seed', activity: map }, '*');
     const elapsed = Math.round(performance.now() - t0);
     console.log(`${LOG} Seeded chat activity for ${profileCount} Sniffies profiles (${elapsed}ms)`);
-  }).catch(() => {});
+  }).catch((err: Error) => {
+    console.warn(`${LOG} seedChatTimestamps error:`, err?.message || err);
+  }).finally(() => {
+    seedInFlight = false;
+  });
 }
 setTimeout(seedChatTimestamps, 1500);      // initial seed after 1.5s
 setInterval(seedChatTimestamps, 60_000);    // refresh every 60s

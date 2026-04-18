@@ -98,6 +98,7 @@ async function getDeviceCredentialKey(): Promise<CryptoKey> {
 function invalidateThreadCache(): void {
   threadSummaryCache = null;
   chatActivityCache = null;
+  queryContactsCache.clear();
 }
 
 // ── Natural-language Query Cache ────────────────────────────────────────────
@@ -175,20 +176,24 @@ async function handleMessage(msg: any): Promise<any> {
       // them filled to the cap indicates an exceptionally heavy user.
       const memoryStats = {
         autoTrainedSet: autoTrainedSet.size,
+        autoTrainedSetCap: AUTO_TRAIN_SET_CAP,
         recentContactUpserts: recentContactUpserts.size,
+        recentContactUpsertsCap: 500,
         threadCacheHasData: !!threadSummaryCache,
         threadCacheAgeMs: threadSummaryCache ? Date.now() - threadSummaryCache.time : 0,
         chatActivityCacheHasData: !!chatActivityCache,
         chatActivityCacheAgeMs: chatActivityCache ? Date.now() - chatActivityCache.time : 0,
         chatActivityCacheProfiles: chatActivityCache ? Object.keys(chatActivityCache.data).length : 0,
         queryContactsCacheSize: queryContactsCache.size,
+        queryContactsCacheCap: QUERY_CONTACTS_CACHE_MAX,
         dossierQueueSize: dossierExtractionQueue.size,
         searchIndexReady: isIndexReady(),
         searchIndexSize: getIndexSize(),
         searchIndexCap: SEARCH_INDEX_MAX_DOCS,
         searchIndexEvicted: getEvictedCount(),
       };
-      return { ok: true, stats, uptimeMin: Math.round(uptimeMin * 10) / 10, memory: memoryStats };
+      const uptimeHrs = Math.round(uptimeMin / 6) / 10;
+      return { ok: true, stats, uptimeMin: Math.round(uptimeMin * 10) / 10, uptimeHrs, memory: memoryStats };
     }
     case 'ADAPTER_MESSAGES': {
       invalidateThreadCache();
@@ -260,9 +265,6 @@ async function handleMessage(msg: any): Promise<any> {
     }
     case 'MARK_THREAD_READ': { const c = await markThreadRead(msg.threadId); invalidateThreadCache(); await updateBadgeCount(); return { ok: true, count: c }; }
     case 'MARK_ALL_READ': {
-      // New in v0.57.7 — mark every unread inbound message as read in a single
-      // bulkDocs call. Useful for the sidepanel's "clear badge" action and
-      // for users returning from vacation with hundreds of unreads.
       const db = await getDB();
       const result = await db.find({ selector: { docType: 'message', read: false, direction: 'in' }, limit: 10_000 });
       const docs = result.docs as any[];
@@ -346,10 +348,11 @@ async function handleMessage(msg: any): Promise<any> {
       return { ok: true, messages: matches.slice(0, limit), scanned: docs.length, path: 'scan' };
     }
     case 'CLEAR_ALL_DATA': {
-      // Destroy and recreate the entire database
       await destroyDB();
-      await getDB(); // force recreation
-      clearIndex(); // drop the search index — it's now pointing at dead ids
+      await getDB();
+      clearIndex();
+      autoTrainedSet.clear();
+      recentContactUpserts.clear();
       console.log(`${LOG} Cleared all data — database destroyed and recreated`);
       await updateBadgeCount();
       // Re-seed global chat contact
@@ -515,7 +518,12 @@ async function handleMessage(msg: any): Promise<any> {
     case 'DELETE_REMINDER': { await deleteReminder(msg.id); return { ok: true }; }
 
     // LLM
-    case 'GENERATE_SUGGESTIONS': return { ok: true, ...(await generateSuggestions(msg.messages, msg.contactName, msg.platform, msg.contactId)) };
+    case 'GENERATE_SUGGESTIONS': {
+      const end = swPerfTrack('generateSuggestions');
+      const result = await generateSuggestions(msg.messages, msg.contactName, msg.platform, msg.contactId);
+      end();
+      return { ok: true, ...result };
+    }
     case 'GET_LLM_CONFIG': return { ok: true, config: await getLLMConfig() };
     case 'SAVE_LLM_CONFIG': { await saveLLMConfig(msg.config); return { ok: true }; }
     case 'SET_LOG_LEVEL': {
@@ -694,6 +702,7 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_DOSSIER': return { ok: true, dossier: await getDossier(msg.contactId) };
     case 'UPSERT_DOSSIER': return { ok: true, dossier: await upsertDossier(msg.contactId, msg.platform, msg.updates) };
     case 'EXTRACT_DOSSIER': {
+      const end = swPerfTrack('extractDossier');
       const messages = await getMessagesByContact(msg.contactId, { limit: 100 });
       const existing = await getDossier(msg.contactId) || {};
       const extracted = await extractDossierFields(
@@ -705,6 +714,7 @@ async function handleMessage(msg: any): Promise<any> {
       for (const [field, value] of Object.entries(extracted)) {
         await setAutoExtractedField(msg.contactId, msg.platform, field, value, 'llm-extraction');
       }
+      end();
       return { ok: true, extracted, fieldCount: Object.keys(extracted).length };
     }
 
@@ -1908,6 +1918,7 @@ async function handleMessage(msg: any): Promise<any> {
         permissions: m.permissions || [],
         hostPermissions: m.host_permissions || [],
         uptimeMin: Math.round((Date.now() - swPerfStart) / 60_000),
+        uptimeHrs: Math.round((Date.now() - swPerfStart) / 360_000) / 10,
       };
     }
 
@@ -1969,12 +1980,21 @@ async function handleMessage(msg: any): Promise<any> {
           return { ok: true, activity: chatActivityCache.data };
         }
         const db = await getDB();
-        const r = await db.find({
-          selector: { docType: 'message', platform },
-          limit: 20_000,
+        // Key-range scan over `msg:{platform}:` — bypasses the Mango query
+        // planner and hits the B-tree directly. Empirically ~50× faster
+        // than `db.find({selector: {docType, platform}})` which was taking
+        // 300-400s on heavy users with ~20k messages and piling up
+        // overlapping seeds behind the 60s re-seed interval.
+        const keyPrefix = `msg:${platform}:`;
+        const r = await db.allDocs({
+          startkey: keyPrefix,
+          endkey: keyPrefix + '\uffff',
+          include_docs: true,
         });
         const activity: Record<string, { myLastTs: number; theirLastTs: number }> = {};
-        for (const m of r.docs as any[]) {
+        for (const row of r.rows) {
+          const m = row.doc as any;
+          if (!m || m.docType !== 'message') continue;
           const id = String(m.contactId || '').replace(/^contact:/, '').replace(/^[a-z]+:/, '').toLowerCase();
           if (!id) continue;
           const ts = Date.parse(m.timestamp) || 0;

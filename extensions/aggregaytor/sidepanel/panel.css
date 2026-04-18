@@ -25,10 +25,7 @@ body {
   width: 100%; padding: 5px 8px; border-radius: 6px; font-size: 11px;
   border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.06); color: #e7e9ea; margin-bottom: 6px;
 }
-.settings-textarea {
-  width: 100%; padding: 5px 8px; border-radius: 6px; font-size: 11px;
-  border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.06); color: #e7e9ea; margin-bottom: 6px; resize: vertical; font-family: inherit;
-}
+/* .settings-textarea base styles defined in Settings Layout Helpers section below */
 .settings-num { width: 50px; display: inline-block; margin: 0; }
 .settings-btn {
   padding: 5px 12px; border-radius: 6px; font-size: 11px; cursor: pointer;
@@ -291,7 +288,7 @@ body {
 .thread-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1px; }
 .thread-name { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .thread-time { font-size: 10px; color: #6b7280; flex-shrink: 0; margin-left: 6px; }
-.thread-preview { font-size: 12px; color: #9ca3af; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 3px; }
+.thread-preview { font-size: 12px; color: #b0b8c4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 3px; }
 .thread-distance { font-size: 10px; color: #6b7280; margin-left: 4px; flex-shrink: 0; }
 .thread-name.strikethrough { text-decoration: line-through; color: #6b7280; }
 .thread-item.blocked { opacity: 0.5; }
@@ -611,6 +608,21 @@ body {
 .view-inbox .thread-detail, .view-inbox .response-bar, .view-inbox .suggestions,
 .view-inbox .notes-section, .view-inbox .reminder-section { display: none; }
 .view-inbox .header-actions { display: none; }
+
+/* Thread-view header wraps so the 8 per-thread action buttons (Bookmark,
+   Notes, Dossier, Reminder, Archive, Hide, Greet, Autorespond) drop onto
+   their own row — otherwise they share the single header row with the
+   title + global settings buttons and their labels get truncated in
+   icon-text mode ("Dossi", "Remi", "Autorespo"). */
+.view-thread .header { flex-wrap: wrap; row-gap: 4px; }
+.view-thread .header-actions {
+  flex-basis: 100%;
+  justify-content: flex-start;
+  gap: 4px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255,255,255,0.04);
+  flex-wrap: wrap;
+}
 .view-thread .thread-list, .view-thread .global-controls, .view-thread .filter-bar { display: none; }
 .view-thread .thread-detail { display: flex; }
 .view-thread .response-bar { display: flex; }
@@ -896,7 +908,7 @@ body {
   width: 100%; background: rgba(255,255,255,0.05);
   border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;
   padding: 8px 10px; color: #e7e9ea; font-size: 12px;
-  font-family: inherit; resize: vertical;
+  font-family: inherit; resize: vertical; margin-bottom: 6px;
 }
 .settings-textarea:focus { border-color: rgba(59,130,246,0.5); outline: none; }
 .filter-grid {
@@ -1051,3 +1063,15 @@ body {
   cursor: pointer; font-size: 12px; padding: 0 2px;
 }
 .advisory-banner .advisory-close:hover { opacity: 1; }
+
+/* ── Focus-visible for keyboard navigation (accessibility) ─────────── */
+:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+}
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible,
+.thread-item:focus-visible, .platform-chip:focus-visible, .suggestion-chip:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 1px;
+}
+.thread-list, .message-list, .search-results { scroll-behavior: smooth; }

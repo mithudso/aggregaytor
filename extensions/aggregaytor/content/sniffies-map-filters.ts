@@ -75,8 +75,19 @@ const BLOCKED_KEY = 'aggregaytor_map_blocked';
 
 const idToMarker = new Map<string, HTMLElement>();
 const markerAttitudes = new Map<string, string>();
-const manualAttitudes = new Map<string, string>(); // user-corrected attitudes
+const MARKER_ATTITUDES_MAX = 5000;
+const manualAttitudes = new Map<string, string>();
+const MANUAL_ATTITUDES_MAX = 1000;
 const markerProfileText = new Map<string, string>();
+const MARKER_PROFILE_TEXT_MAX = 5000;
+
+function cappedMapSet<V>(map: Map<string, V>, key: string, value: V, cap: number): void {
+  map.set(key, value);
+  if (map.size > cap) {
+    const oldest = map.keys().next();
+    if (!oldest.done) map.delete(oldest.value as string);
+  }
+}
 /**
  * Per-profile chat activity — separate timestamps for my last outbound
  * and their last inbound message. Modeled after the old userscript's
@@ -135,6 +146,7 @@ let settings: MapFilterSettings = {
 };
 
 let filterEnabled = false;
+let _diagLogSkip = 0;
 
 // ── CSS Injection ──────────────────────────────────────────────────────────
 
@@ -576,6 +588,7 @@ function applyFilters(): void {
     // Priority 1: manually blocked
     if (settings.blockedIds.has(id)) {
       marker.classList.add(HIDE_CLASS);
+      const b = badgeElements.get(id); if (b) b.style.display = 'none';
       nHiddenByBlock++;
       continue;
     }
@@ -585,30 +598,43 @@ function applyFilters(): void {
       const text = markerProfileText.get(id) || '';
       if (matchesTerms(text, settings.excludeTerms)) {
         marker.classList.add(HIDE_CLASS);
+        const b = badgeElements.get(id); if (b) b.style.display = 'none';
         nHiddenByText++;
         continue;
       }
     }
 
-    // Priority 2.5: waiting-on-response filters.
-    // Uses the independent myLastTs / theirLastTs stored in chatActivity.
-    // A profile is "waiting on response" when myLastTs > theirLastTs —
-    // i.e., my most recent outbound is newer than their most recent inbound
-    // (or they've never replied at all).
-    // - hideAnyChats:    hide any waiting profile (any age)
-    // - hideRecentChats: hide only if my unanswered message is <24h old
+    // Priority 2.5: chat-history filters.
+    //
+    // The two chips have DIFFERENT semantics by design:
+    //
+    //   ⏳ <24h      — Hide any profile with chat activity in the last 24h,
+    //                  regardless of who spoke last. Purpose: declutter the
+    //                  map of people you're already actively chatting with.
+    //                  Uses anyLastTs = max(myLastTs, theirLastTs).
+    //
+    //   ⏳ Ghosted   — Hide profiles where you're waiting on a response
+    //                  (myLastTs > theirLastTs). Any age. Purpose: hide
+    //                  unanswered conversations so you focus on fresh
+    //                  prospects. Marker reappears when they reply.
+    //
+    // Attribution: <24h is checked first because its scope is narrower;
+    // a profile caught by <24h doesn't also get counted under Ghosted.
     const waiting = waitingOnResponse(id);
     if (waiting) nWaiting++;
-    if ((settings.hideAnyChats || settings.hideRecentChats) && waiting) {
-      if (settings.hideAnyChats) {
+    if (settings.hideAnyChats || settings.hideRecentChats) {
+      const lastAny = anyLastTs(id);
+      const within24h = lastAny > 0 && (Date.now() - lastAny) < 24 * 60 * 60 * 1000;
+      if (settings.hideRecentChats && within24h) {
         marker.classList.add(HIDE_CLASS);
-        nHiddenByWaitingEver++;
+        const b = badgeElements.get(id); if (b) b.style.display = 'none';
+        nHiddenByWaiting24h++;
         continue;
       }
-      const a = chatActivity.get(id)!;
-      if (settings.hideRecentChats && (Date.now() - a.myLastTs) < 24 * 60 * 60 * 1000) {
+      if (settings.hideAnyChats && waiting) {
         marker.classList.add(HIDE_CLASS);
-        nHiddenByWaiting24h++;
+        const b = badgeElements.get(id); if (b) b.style.display = 'none';
+        nHiddenByWaitingEver++;
         continue;
       }
     }
@@ -617,6 +643,7 @@ function applyFilters(): void {
     const att = getEffectiveAttitude(id);
     if (shouldHideAttitude(att)) {
       marker.classList.add(HIDE_CLASS);
+      const b = badgeElements.get(id); if (b) b.style.display = 'none';
       nHiddenByAttitude++;
       continue;
     }
@@ -642,22 +669,29 @@ function applyFilters(): void {
   // Diagnostic summary — logged on every applyFilters pass so you can tell
   // why (or why not) profiles are being hidden. Gated behind a chip being
   // on or block-activity being nonzero to avoid console spam on idle maps.
-  if (settings.hideAnyChats || settings.hideRecentChats || nHiddenByBlock || nHiddenByText || nHiddenByAttitude) {
-    console.log('[Aggregaytor:MapFilters] applyFilters:', {
-      markers: nMarkers,
-      activity: nActivityEntries,
-      waiting: nWaiting,
-      hiddenByBlock: nHiddenByBlock,
-      hiddenByText: nHiddenByText,
-      hiddenByAttitude: nHiddenByAttitude,
-      hiddenByWaiting24h: nHiddenByWaiting24h,
-      hiddenByWaitingEver: nHiddenByWaitingEver,
-      chips: {
-        hideRecentChats: settings.hideRecentChats,
-        hideAnyChats: settings.hideAnyChats,
-      },
-    });
+  const stats = {
+    markers: nMarkers,
+    activity: nActivityEntries,
+    waiting: nWaiting,
+    hiddenByBlock: nHiddenByBlock,
+    hiddenByText: nHiddenByText,
+    hiddenByAttitude: nHiddenByAttitude,
+    hiddenByWaiting24h: nHiddenByWaiting24h,
+    hiddenByWaitingEver: nHiddenByWaitingEver,
+    chips: {
+      hideRecentChats: settings.hideRecentChats,
+      hideAnyChats: settings.hideAnyChats,
+    },
+  };
+  if ((settings.hideAnyChats || settings.hideRecentChats || nHiddenByBlock || nHiddenByText || nHiddenByAttitude)
+      && ++_diagLogSkip >= 6) {
+    _diagLogSkip = 0;
+    console.log('[Aggregaytor:MapFilters] applyFilters:', stats);
   }
+  // Broadcast to the ISOLATED-world bridge so the top filter bar can show
+  // live hidden counts per chip. postMessage crosses the MAIN→ISOLATED
+  // boundary (bridge listens via window.addEventListener('message')).
+  try { window.postMessage({ type: '__aggregaytor_filter_stats', stats }, '*'); } catch {}
 }
 
 /**
@@ -954,10 +988,10 @@ window.addEventListener('__aggregaytor_contact_data', ((event: CustomEvent) => {
     const id = (c.platformUserId || '').toLowerCase();
     if (!id) continue;
     if (c.metadata?.position || c.metadata?.attitude) {
-      markerAttitudes.set(id, String(c.metadata.position || c.metadata.attitude));
+      cappedMapSet(markerAttitudes, id, String(c.metadata.position || c.metadata.attitude), MARKER_ATTITUDES_MAX);
     }
     if (c.metadata?.profileText) {
-      markerProfileText.set(id, String(c.metadata.profileText));
+      cappedMapSet(markerProfileText, id, String(c.metadata.profileText), MARKER_PROFILE_TEXT_MAX);
     }
   }
 }) as EventListener);
@@ -1008,8 +1042,11 @@ window.addEventListener('__aggregaytor_chat_timestamp', ((event: CustomEvent) =>
       }
     }
     const msgs = chatPreviews.get(id)!;
-    msgs.push({ dir: direction || 'in', text: String(body).slice(0, 100), ts: timestamp });
-    if (msgs.length > 20) msgs.splice(0, msgs.length - 20);
+    const isDup = msgs.some(m => m.ts === timestamp && m.dir === (direction || 'in'));
+    if (!isDup) {
+      msgs.push({ dir: direction || 'in', text: String(body).slice(0, 100), ts: timestamp });
+      if (msgs.length > 20) msgs.splice(0, msgs.length - 20);
+    }
   }
 }) as EventListener);
 
@@ -1023,7 +1060,7 @@ window.addEventListener('__aggregaytor_undo_hide', (() => {
 window.addEventListener('__aggregaytor_set_attitude', ((event: CustomEvent) => {
   const { profileId, attitude } = event.detail || {};
   if (!profileId || !attitude) return;
-  manualAttitudes.set(profileId.toLowerCase(), attitude);
+  cappedMapSet(manualAttitudes, profileId.toLowerCase(), attitude, MANUAL_ATTITUDES_MAX);
   // Persist
   try {
     localStorage.setItem('aggregaytor_manual_attitudes', JSON.stringify([...manualAttitudes.entries()]));
@@ -1091,10 +1128,10 @@ export function initMapFilters(): void {
     }
   } catch {}
 
-  // Start periodic scan
-  setInterval(applyFilters, SCAN_INTERVAL_MS);
+  // Start periodic scan — wrapped in rAF to avoid layout thrashing
+  setInterval(() => requestAnimationFrame(applyFilters), SCAN_INTERVAL_MS);
   // Initial scan after DOM settles
-  setTimeout(applyFilters, 3000);
+  setTimeout(() => requestAnimationFrame(applyFilters), 3000);
 
   console.log('[Aggregaytor:MapFilters] Initialized — scanning every 5s');
 }
