@@ -18,6 +18,7 @@ const LOG = '[Aggregaytor:Grindr]';
 // pairs from API responses into window.__grindr_hash_map. We use that global
 // map for lookups, plus maintain our own as a supplement.
 const photoHashToProfileId = new Map<string, string>();
+const PHOTO_HASH_MAP_MAX = 10_000;
 
 // Getter that checks both the adapter's global map and our local one
 function lookupProfileId(hash: string): string {
@@ -30,35 +31,38 @@ function lookupProfileId(hash: string): string {
   return photoHashToProfileId.get(hash) || '';
 }
 
+function cappedHashSet(hash: string, pid: string): void {
+  photoHashToProfileId.set(hash, pid);
+  if (photoHashToProfileId.size > PHOTO_HASH_MAP_MAX) {
+    const oldest = photoHashToProfileId.keys().next();
+    if (!oldest.done) photoHashToProfileId.delete(oldest.value);
+  }
+}
+
 function indexProfileFromPayload(obj: Record<string, unknown>): void {
   const pid = String(obj.profileId || obj.profileID || '');
   if (!pid || !/^\d+$/.test(pid)) return;
 
-  // Index the primary photo hash
   const hash = String(obj.photoHash || obj.profileImageMediaHash || obj.mediahash || obj.primaryPhotoHash || '');
   if (hash && hash !== 'undefined' && hash !== 'null') {
-    photoHashToProfileId.set(hash, pid);
+    cappedHashSet(hash, pid);
   }
 
-  // Index from photoMediaHashes array — THIS IS THE KEY FIELD.
-  // The cascade API (/api/v3/cascade/) uses items[].data.photoMediaHashes
-  // (an array of hash strings), NOT profileImageMediaHash.
   const photoMediaHashes = obj.photoMediaHashes;
   if (Array.isArray(photoMediaHashes)) {
     for (const h of photoMediaHashes) {
       if (typeof h === 'string' && h.length > 10) {
-        photoHashToProfileId.set(h, pid);
+        cappedHashSet(h, pid);
       }
     }
   }
 
-  // Also index from medias array (individual profile API format)
   const medias = obj.medias;
   if (Array.isArray(medias)) {
     for (const m of medias) {
       const mHash = String((m as any)?.mediaHash || '');
       if (mHash && mHash !== 'undefined') {
-        photoHashToProfileId.set(mHash, pid);
+        cappedHashSet(mHash, pid);
       }
     }
   }
@@ -97,7 +101,7 @@ adapter.on('messages', (event) => {
   // Index profileIds from message metadata for middle-click block lookup
   for (const m of event.payload as any[]) {
     if (m.metadata?.profileId && m.metadata?.conversationId) {
-      photoHashToProfileId.set(m.metadata.conversationId, m.metadata.profileId);
+      cappedHashSet(m.metadata.conversationId, m.metadata.profileId);
     }
   }
   sendToBridge({
@@ -113,7 +117,7 @@ adapter.on('contacts', (event) => {
   for (const c of event.payload as any[]) {
     if (c.avatarUrl && c.platformUserId) {
       const hashMatch = c.avatarUrl.match(/\/([a-f0-9]{32,})/i);
-      if (hashMatch) photoHashToProfileId.set(hashMatch[1], c.platformUserId);
+      if (hashMatch) cappedHashSet(hashMatch[1], c.platformUserId);
     }
   }
   sendToBridge({
@@ -192,7 +196,7 @@ window.addEventListener('__aggregaytor_block_by_hash', (async (event: CustomEven
           const match = href.match(/\/chat\/(\d+)/);
           if (match) {
             profileId = match[1];
-            photoHashToProfileId.set(photoHash, profileId);
+            cappedHashSet(photoHash, profileId);
             break;
           }
         }
@@ -432,7 +436,6 @@ async function processBlockQueue(): Promise<void> {
       }
 
       const profileId = blockQueue.shift()!;
-      blockQueueSet.delete(profileId);
       const auth = getCapturedAuth('grindr.com');
       if (!auth) {
         // Don't drop the click. Put the id BACK on the queue and wait for
@@ -458,12 +461,10 @@ async function processBlockQueue(): Promise<void> {
       recentBlockTimestamps.push(Date.now());
 
       if (result.ok) {
+        blockQueueSet.delete(profileId);
         console.log(`${LOG} Hide/block ok for ${profileId}`);
         sendToBridge({ type: 'PROFILE_BLOCKED', contactId: `grindr:${profileId}`, platform: 'grindr' });
         removeBlockedCardFromDom(profileId);
-        // Any successful call proves the session is alive — clear the
-        // dead-session flag so a previous stale 401 doesn't keep
-        // blocking the queue forever.
         if (blockSessionDead) {
           console.log(`${LOG} Canary succeeded — clearing session-dead flag.`);
           blockSessionDead = false;
@@ -471,22 +472,21 @@ async function processBlockQueue(): Promise<void> {
         }
       } else if (result.sessionDead) {
         blockSessionDead = true;
-        // Put this profileId back on the queue so we retry after session recovery
         blockQueue.unshift(profileId);
         console.warn(`${LOG} Session dead (${result.status}). ${blockQueue.length} pending.`);
         showGrindrToast(
           `Grindr forced a re-login (${result.status}). ${blockQueue.length} block(s) paused until you're logged back in.`,
           'err',
         );
-        watchForLoginForm(); // starts watching for re-login UI
+        watchForLoginForm();
         break;
       } else if (result.status === 429) {
-        // Rate limited — exponential backoff, keep item on queue
         blockQueue.unshift(profileId);
         blockBackoffUntil = Date.now() + 30_000;
         console.warn(`${LOG} 429 rate limited — backing off 30s`);
         showGrindrToast('Grindr rate-limited. Backing off 30s…', 'warn');
       } else {
+        blockQueueSet.delete(profileId);
         console.warn(`${LOG} Block failed (${result.status}) for ${profileId} — dropping`);
       }
 
@@ -643,28 +643,40 @@ async function attemptAutoFill(): Promise<void> {
   }
 }
 
+let loginWatchTimeout: ReturnType<typeof setTimeout> | null = null;
+
 function watchForLoginForm(): void {
-  // Debounce via existing observer
   if (loginWatchObserver) return;
-  // Immediate check
-  if (isLoginScreen()) { attemptAutoFill(); }
-  // DOM mutation watcher for SPA transitions back to the login screen
+  if (isLoginScreen()) { attemptAutoFill(); return; }
   loginWatchObserver = new MutationObserver(() => {
     if (isLoginScreen()) {
-      // Disconnect the observer while we fill to avoid re-trigger loops
       loginWatchObserver?.disconnect();
       loginWatchObserver = null;
+      if (loginWatchTimeout) { clearTimeout(loginWatchTimeout); loginWatchTimeout = null; }
       attemptAutoFill();
-      // After a minute, re-enable watching in case we need another attempt
       setTimeout(() => watchForLoginForm(), 60_000);
     }
   });
   loginWatchObserver.observe(document.body, { childList: true, subtree: true });
+  loginWatchTimeout = setTimeout(() => {
+    if (loginWatchObserver) {
+      loginWatchObserver.disconnect();
+      loginWatchObserver = null;
+    }
+    loginWatchTimeout = null;
+  }, 30_000);
 }
 
-// Start watching immediately on page load — covers the case where the user
-// arrives at grindr.com already logged out.
 watchForLoginForm();
+
+// Periodic cleanup of recentBlockTimestamps to prevent unbounded growth
+// when the block queue is idle (timestamps only pruned during queue processing).
+setInterval(() => {
+  const hourAgo = Date.now() - 3600_000;
+  while (recentBlockTimestamps.length && recentBlockTimestamps[0] < hourAgo) {
+    recentBlockTimestamps.shift();
+  }
+}, 60_000);
 
 // Auto-send handler
 window.addEventListener('__aggregaytor_send_message', ((event: CustomEvent) => {

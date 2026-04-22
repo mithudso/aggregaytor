@@ -2,6 +2,8 @@
  * grindr-bridge.ts — ISOLATED world bridge for Grindr Web.
  */
 
+import { showFloatingPanel, hideFloatingPanel } from './floating-actions.js';
+
 const LOG = '[Aggregaytor:Bridge:Grindr]';
 let contextValid = true;
 
@@ -48,11 +50,21 @@ try {
       sendResponse({ ok: true });
       return true;
     }
+    if (message.type === 'SET_LOG_LEVEL') {
+      window.dispatchEvent(new CustomEvent('__aggregaytor_set_log_level', { detail: message.level }));
+      sendResponse({ ok: true });
+      return true;
+    }
     if (message.type === 'TEXT_EXPANDER_SETTINGS') {
       window.dispatchEvent(new CustomEvent('__aggregaytor_text_expander_settings', {
         detail: { substitutions: message.substitutions },
       }));
       try { localStorage.setItem('aggregaytor_text_substitutions', JSON.stringify(message.substitutions)); } catch {}
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (message.type === 'SHOW_FLOATING_PANEL') {
+      showFloatingPanel(message.contactId, message.platform || 'grindr');
       sendResponse({ ok: true });
       return true;
     }
@@ -245,26 +257,29 @@ document.addEventListener('auxclick', (e) => {
 // session. We simulate minimal activity to keep the auth token alive.
 let keepaliveInterval: ReturnType<typeof setInterval> | null = null;
 
+let keepaliveSkipCount = 0;
+
 function startSessionKeepalive(): void {
   if (keepaliveInterval) return;
   keepaliveInterval = setInterval(() => {
-    if (!contextValid || document.hidden) return;
+    if (!contextValid) return;
+    if (document.hidden) {
+      keepaliveSkipCount++;
+      if (keepaliveSkipCount < 3) return;
+      keepaliveSkipCount = 0;
+    }
     try {
-      // Method 1: Dispatch a visibilitychange event to trick Grindr into
-      // thinking the tab just became visible (resets inactivity timer)
       document.dispatchEvent(new Event('visibilitychange'));
       document.dispatchEvent(new Event('focus'));
       window.dispatchEvent(new Event('focus'));
 
-      // Method 2: Touch a lightweight API endpoint to refresh the session.
-      // The profile endpoint is a simple GET that keeps auth alive.
       fetch('https://web.grindr.com/api/v3/me', {
         method: 'GET',
         credentials: 'include',
         headers: { 'Accept': 'application/json' },
       }).catch(() => {});
     } catch {}
-  }, 4 * 60_000); // Every 4 minutes
+  }, 4 * 60_000);
 }
 
 startSessionKeepalive();

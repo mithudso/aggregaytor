@@ -121,17 +121,17 @@ function addOne(doc: IndexableMessage): void {
     // Enforce the cap by evicting the oldest-indexed doc. We don't bother
     // evicting by timestamp here — insertion order is a good enough proxy
     // for most users, and it's O(1) vs O(n log n) for a timestamp sort.
+    let evictedThisCall = false;
     while (_indexedIds.length > SEARCH_INDEX_MAX_DOCS) {
       const evictId = _indexedIds.shift();
       if (evictId) {
         _index.remove(evictId);
         _indexedSet.delete(evictId);
         _evictedCount++;
+        evictedThisCall = true;
       }
     }
-    // Note the time of the most recent eviction once per cap breach so the
-    // diagnostic UI can show how fresh the eviction pressure is.
-    if (_evictedCount > 0) _lastEvictionAt = Date.now();
+    if (evictedThisCall) _lastEvictionAt = Date.now();
   } catch (err) {
     // A malformed body (very rare — we sanity-check above) can throw inside
     // FlexSearch's tokenizer. Drop the bad doc and continue.

@@ -30,6 +30,7 @@ let panelEl: HTMLElement | null = null;
 let isCollapsed = false;
 let isDragging = false;
 let dragOffset = { x: 0, y: 0 };
+let _dragCleanup: (() => void) | null = null;
 
 // ── CSS ──────────────────────────────────────────────────────────────────────
 
@@ -88,6 +89,7 @@ function injectCSS(): void {
     .fp-star {
       font-size: 14px; cursor: pointer; color: #4b5563;
       user-select: none; transition: color 0.1s;
+      background: none; border: none; padding: 0 1px;
     }
     .fp-star.active { color: #fbbf24; }
     .fp-star:hover { color: #f59e0b; }
@@ -106,13 +108,22 @@ function injectCSS(): void {
     }
     .fp-notes-label { font-size: 10px; color: #6b7280; margin-bottom: 3px; }
     .fp-notes-input {
-      width: 100%; background: rgba(255,255,255,0.05);
+      width: 100%; box-sizing: border-box; background: rgba(255,255,255,0.05);
       border: 1px solid rgba(255,255,255,0.1); border-radius: 5px;
       padding: 5px 7px; color: #e7e9ea; font-size: 11px;
       font-family: inherit; resize: vertical; min-height: 36px;
     }
     .fp-notes-input:focus { border-color: rgba(59,130,246,0.5); outline: none; }
     .fp-status { font-size: 9px; color: #22c55e; margin-top: 3px; min-height: 12px; }
+    #${PANEL_ID} button:focus-visible, #${PANEL_ID} textarea:focus-visible {
+      outline: 2px solid #60a5fa;
+      outline-offset: 1px;
+    }
+    #${PANEL_ID} .fp-star:focus-visible {
+      outline: 2px solid #f59e0b;
+      outline-offset: 1px;
+      border-radius: 2px;
+    }
   `;
   (document.head || document.documentElement).appendChild(style);
 }
@@ -123,11 +134,17 @@ function createPanel(): HTMLElement {
   const panel = document.createElement('div');
   panel.id = PANEL_ID;
 
-  // Load saved position or default
   let pos = { x: 20, y: 120 };
   try {
     const saved = localStorage.getItem(POS_KEY);
-    if (saved) pos = JSON.parse(saved);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (typeof parsed.x === 'number' && typeof parsed.y === 'number' &&
+          isFinite(parsed.x) && isFinite(parsed.y)) {
+        pos.x = Math.max(0, Math.min(parsed.x, window.innerWidth - 100));
+        pos.y = Math.max(0, Math.min(parsed.y, window.innerHeight - 40));
+      }
+    }
   } catch {}
   panel.style.left = `${pos.x}px`;
   panel.style.top = `${pos.y}px`;
@@ -151,17 +168,17 @@ function createPanel(): HTMLElement {
         <button class="fp-action-btn danger fp-block-btn">🚫 Hide</button>
         <button class="fp-action-btn fp-notes-toggle-btn">📝 Notes</button>
         <div class="fp-stars" id="fp-stars">
-          <span class="fp-star" data-star="1">★</span>
-          <span class="fp-star" data-star="2">★</span>
-          <span class="fp-star" data-star="3">★</span>
-          <span class="fp-star" data-star="4">★</span>
-          <span class="fp-star" data-star="5">★</span>
+          <button class="fp-star" data-star="1" aria-label="1 star">★</button>
+          <button class="fp-star" data-star="2" aria-label="2 stars">★</button>
+          <button class="fp-star" data-star="3" aria-label="3 stars">★</button>
+          <button class="fp-star" data-star="4" aria-label="4 stars">★</button>
+          <button class="fp-star" data-star="5" aria-label="5 stars">★</button>
         </div>
       </div>
       <div class="fp-phrases" id="fp-phrases"></div>
       <div class="fp-notes-area" id="fp-notes-area" style="display:none">
         <div class="fp-notes-label">Notes</div>
-        <textarea class="fp-notes-input" id="fp-notes-input" placeholder="Add notes..."></textarea>
+        <textarea class="fp-notes-input" id="fp-notes-input" placeholder="Add notes..." maxlength="10000"></textarea>
         <div class="fp-status" id="fp-status"></div>
       </div>
     </div>
@@ -187,15 +204,14 @@ function setupDrag(panel: HTMLElement): void {
     e.preventDefault();
   });
 
-  document.addEventListener('mousemove', (e: MouseEvent) => {
+  const onDragMove = (e: MouseEvent) => {
     if (!isDragging) return;
     const x = Math.max(0, Math.min(e.clientX - dragOffset.x, window.innerWidth - 100));
     const y = Math.max(0, Math.min(e.clientY - dragOffset.y, window.innerHeight - 40));
     panel.style.left = `${x}px`;
     panel.style.top = `${y}px`;
-  });
-
-  document.addEventListener('mouseup', () => {
+  };
+  const onDragEnd = () => {
     if (!isDragging) return;
     isDragging = false;
     try {
@@ -204,7 +220,13 @@ function setupDrag(panel: HTMLElement): void {
         y: parseInt(panel.style.top),
       }));
     } catch {}
-  });
+  };
+  document.addEventListener('mousemove', onDragMove);
+  document.addEventListener('mouseup', onDragEnd);
+  _dragCleanup = () => {
+    document.removeEventListener('mousemove', onDragMove);
+    document.removeEventListener('mouseup', onDragEnd);
+  };
 }
 
 // ── Actions ──────────────────────────────────────────────────────────────────
@@ -312,8 +334,10 @@ async function populatePanel(panel: HTMLElement, contactId: string, platform: st
     const phrases = (data.aggregaytor_quick_phrases || ['Hey there!', "What's up?", 'Looking?']).slice(0, 3);
     const container = panel.querySelector('#fp-phrases') as HTMLElement;
     if (container) {
+      const escAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       container.innerHTML = phrases.map((p: string) =>
-        `<button class="fp-phrase-btn" title="${p}">${p.length > 20 ? p.slice(0, 18) + '...' : p}</button>`
+        `<button class="fp-phrase-btn" title="${escAttr(p)}">${p.length > 20 ? escHtml(p.slice(0, 18)) + '...' : escHtml(p)}</button>`
       ).join('');
       container.querySelectorAll('.fp-phrase-btn').forEach((btn, i) => {
         btn.addEventListener('click', () => {
@@ -357,4 +381,5 @@ export function hideFloatingPanel(): void {
   if (el) el.remove();
   panelEl = null;
   currentContactId = '';
+  if (_dragCleanup) { _dragCleanup(); _dragCleanup = null; }
 }

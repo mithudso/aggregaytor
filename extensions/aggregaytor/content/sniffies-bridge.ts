@@ -34,14 +34,29 @@ function parseRelativeTime(text: string): string {
   if (!text) return new Date().toISOString();
   const t = text.trim().toLowerCase();
   const now = Date.now();
-  const match = t.match(/(\d+)\s*(s|sec|second|m|min|minute|h|hr|hour|d|day|w|week|mo|month|y|year)s?\s*(?:ago)?/i)
+
+  // "a few seconds/minutes/hours ago" — Sniffies UI uses this for very
+  // recent messages. Approximate conservatively: seconds→10s, minutes→3m,
+  // hours→2h. Not perfect but better than warning + defaulting to now().
+  const fewMatch = t.match(/(a few|several|some|couple(?:\s+of)?)\s+(second|minute|hour|day)s?\s*(?:ago)?/i);
+  if (fewMatch) {
+    const unit = fewMatch[2].toLowerCase();
+    if (unit.startsWith('s')) return new Date(now - 10_000).toISOString();
+    if (unit.startsWith('m')) return new Date(now - 180_000).toISOString();
+    if (unit.startsWith('h')) return new Date(now - 7_200_000).toISOString();
+    if (unit.startsWith('d')) return new Date(now - 2 * 86400_000).toISOString();
+  }
+
+  const match = t.match(/(\d+)\s*(second|sec|month|mo|minute|min|hour|hr|week|year|day|s|m|h|d|w|y)s?\s*(?:ago)?/i)
     || t.match(/(a|an)\s+(minute|hour|day|week|month|year)s?\s*(?:ago)?/i);
   if (!match) {
     if (t.includes('just now') || t.includes('now')) return new Date(now).toISOString();
     if (t.includes('yesterday')) return new Date(now - 86400000).toISOString();
-    if (t.length > 0 && t.length < 30) {
-      console.warn(`${LOG} parseRelativeTime: unparseable "${t}", defaulting to now`);
-    }
+    // Silently default to now() for unparseable strings. The previous warn
+    // was firing on "a few seconds ago" for every scraped chat row and
+    // flooding the console — the fewMatch branch above handles that case
+    // now, and anything else unparseable is rare enough that defaulting
+    // silently to the current time is a reasonable fallback.
     return new Date().toISOString();
   }
   const num = match[1] === 'a' || match[1] === 'an' ? 1 : parseInt(match[1], 10);
@@ -539,6 +554,8 @@ function injectFloatingCSS(): void {
     .fp-notes-input{width:100%;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:5px;padding:5px 7px;color:#e7e9ea;font-size:11px;font-family:inherit;resize:vertical;min-height:32px;box-sizing:border-box}
     .fp-notes-input:focus{border-color:rgba(59,130,246,0.5);outline:none}
     .fp-status{font-size:9px;color:#22c55e;margin-top:2px;min-height:11px}
+    #${FP_ID} button:focus-visible,#${FP_ID} .fp-phrase-btn:focus-visible{outline:2px solid #60a5fa;outline-offset:1px}
+    #${FP_ID} .fp-star:focus-visible{outline:2px solid #f59e0b;outline-offset:1px;border-radius:2px}
   `;
   (document.head || document.documentElement).appendChild(s);
 }
@@ -632,8 +649,10 @@ function showFloatingPanel(contactId: string, platform: string): void {
     try { localStorage.setItem('aggregaytor_fp_collapsed', String(c)); } catch {}
   });
 
-  // Close — hide the panel entirely (can be re-opened from side panel)
   panel.querySelector('.fp-close-btn')!.addEventListener('click', () => hideFloatingPanel());
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && document.getElementById(FP_ID)) hideFloatingPanel();
+  }, { once: true });
 
   // Block — hide the profile on Sniffies map AND mark in aggregator.
   // When the user is viewing a profile (which is when this panel is shown),
@@ -959,6 +978,8 @@ function injectFilterBarCSS(): void {
       color:#9ca3af; cursor:pointer; font-size:10px; padding:2px 6px;
     }
     #${FILTER_BAR_ID} .fb-undo:hover { background:rgba(255,255,255,0.06); color:#e7e9ea; }
+    #${FILTER_BAR_ID} .fb-chip:focus-within { outline:2px solid #60a5fa; outline-offset:1px; border-radius:10px; }
+    #${FILTER_BAR_ID} .fb-undo:focus-visible, #${FILTER_BAR_ID} .fb-close:focus-visible { outline:2px solid #60a5fa; outline-offset:1px; }
   `;
   (document.head || document.documentElement).appendChild(s);
 }
@@ -1120,6 +1141,8 @@ function showBlockToast(profileId: string): void {
     'background:rgba(220,38,38,0.95);color:#fff;padding:10px 16px;' +
     'border-radius:8px;font-family:system-ui,sans-serif;font-size:13px;' +
     'box-shadow:0 4px 12px rgba(0,0,0,0.4);transition:opacity 0.3s';
+  toast.setAttribute('role', 'status');
+  toast.setAttribute('aria-live', 'polite');
   toast.textContent = `🚫 Profile blocked${profileId ? ' (' + profileId.slice(0, 8) + '…)' : ''}`;
   document.body.appendChild(toast);
   setTimeout(() => { toast.style.opacity = '0'; }, 1600);
@@ -1137,14 +1160,23 @@ function showMapFilterPanel(): void {
   panel.id = FP_ID;
 
   let pos = { x: 20, y: 120 };
-  try { const s = localStorage.getItem('aggregaytor_fp_pos'); if (s) pos = JSON.parse(s); } catch {}
+  try {
+    const s = localStorage.getItem('aggregaytor_fp_pos');
+    if (s) {
+      const parsed = JSON.parse(s);
+      if (typeof parsed.x === 'number' && typeof parsed.y === 'number' &&
+          isFinite(parsed.x) && isFinite(parsed.y)) {
+        pos.x = Math.max(0, Math.min(parsed.x, window.innerWidth - 100));
+        pos.y = Math.max(0, Math.min(parsed.y, window.innerHeight - 40));
+      }
+    }
+  } catch {}
   panel.style.left = `${pos.x}px`;
   panel.style.top = `${pos.y}px`;
 
   const collapsed = localStorage.getItem('aggregaytor_fp_collapsed') === 'true';
   if (collapsed) panel.classList.add('collapsed');
 
-  // Load current filter settings
   const settings = JSON.parse(localStorage.getItem('aggregaytor_map_filter_settings') || '{}');
 
   // Inject the CSS for the redesigned filter panel (only once per page load).
@@ -1551,7 +1583,12 @@ function scrapeChatPanel() {
     } catch { /* skip individual row parse errors */ }
   });
 
-  console.log(`[Aggregaytor:Bridge:Sniffies] Chat panel scraped: ${contacts.length} contacts, ${messages.length} messages from ${rows.length} rows`);
+  // Only log non-empty scrapes — the scraper runs on every URL change
+  // and the Sniffies /chat panel is often empty, producing
+  // "0 contacts, 0 messages from 0 rows" many times per session.
+  if (contacts.length || messages.length || rows.length) {
+    console.log(`[Aggregaytor:Bridge:Sniffies] Chat panel scraped: ${contacts.length} contacts, ${messages.length} messages from ${rows.length} rows`);
+  }
 
   // Send scraped contacts and messages to the service worker
   if (contacts.length) {
@@ -1633,6 +1670,7 @@ if (location.href.match(/sniffies\.com\/?(\?|$|#)/i) || location.href.match(/sni
 // This flag ensures at most one seed is running at a time; subsequent
 // ticks are skipped if the previous hasn't returned yet.
 let seedInFlight = false;
+let _lastSeedProfileCount = -1;  // skip log when count unchanged
 
 function seedChatTimestamps(): void {
   if (!contextValid) return;
@@ -1669,7 +1707,13 @@ function seedChatTimestamps(): void {
     // reload). postMessage crosses the ISOLATED→MAIN world boundary.
     window.postMessage({ type: '__aggregaytor_chat_activity_seed', activity: map }, '*');
     const elapsed = Math.round(performance.now() - t0);
-    console.log(`${LOG} Seeded chat activity for ${profileCount} Sniffies profiles (${elapsed}ms)`);
+    // Only log when the profile count changes or the scan is slow (>500ms).
+    // Steady-state noise was one line per minute with no useful signal —
+    // now we only surface genuine state changes or performance regressions.
+    if (profileCount !== _lastSeedProfileCount || elapsed > 500) {
+      console.log(`${LOG} Seeded chat activity for ${profileCount} Sniffies profiles (${elapsed}ms)`);
+      _lastSeedProfileCount = profileCount;
+    }
   }).catch((err: Error) => {
     console.warn(`${LOG} seedChatTimestamps error:`, err?.message || err);
   }).finally(() => {

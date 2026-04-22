@@ -178,7 +178,7 @@ async function handleMessage(msg: any): Promise<any> {
         autoTrainedSet: autoTrainedSet.size,
         autoTrainedSetCap: AUTO_TRAIN_SET_CAP,
         recentContactUpserts: recentContactUpserts.size,
-        recentContactUpsertsCap: 500,
+        recentContactUpsertsCap: RECENT_CONTACT_UPSERTS_CAP,
         threadCacheHasData: !!threadSummaryCache,
         threadCacheAgeMs: threadSummaryCache ? Date.now() - threadSummaryCache.time : 0,
         chatActivityCacheHasData: !!chatActivityCache,
@@ -1803,11 +1803,11 @@ async function handleMessage(msg: any): Promise<any> {
     }
 
     case 'CAPTURE_QUICK_PHRASE': {
-      // Save captured text as a quick phrase in chrome.storage
       const data = await chrome.storage.local.get('aggregaytor_quick_phrases');
       const phrases: string[] = data.aggregaytor_quick_phrases || [];
       if (msg.text && !phrases.includes(msg.text)) {
         phrases.push(msg.text);
+        if (phrases.length > 100) phrases.splice(0, phrases.length - 100);
         await chrome.storage.local.set({ aggregaytor_quick_phrases: phrases });
       }
       return { ok: true, count: phrases.length };
@@ -2230,50 +2230,46 @@ async function processDossierExtractions(): Promise<void> {
       const colonIdx = entry.lastIndexOf(':');
       if (colonIdx < 0) continue; // malformed queue entry
       const [contactId, platform] = [entry.substring(0, colonIdx), entry.substring(colonIdx + 1)];
-    try {
-      const allMessages = await getMessagesByContact(contactId, { limit: 50 });
-      if (allMessages.length < 3) continue;
+      try {
+        const allMessages = await getMessagesByContact(contactId, { limit: 50 });
+        if (allMessages.length < 3) continue;
 
-      // Incremental: only use NEW inbound messages since last extraction
-      const inbound = allMessages.filter(m => m.direction === 'in');
-      const existing = await getDossier(contactId) || {};
-      const lastExtract = (existing as any).updatedAt || '';
-      const newMessages = lastExtract
-        ? inbound.filter(m => m.timestamp > lastExtract)
-        : inbound;
+        const inbound = allMessages.filter(m => m.direction === 'in');
+        const existing = await getDossier(contactId) || {};
+        const lastExtract = (existing as any).updatedAt || '';
+        const newMessages = lastExtract
+          ? inbound.filter(m => m.timestamp > lastExtract)
+          : inbound;
 
-      if (newMessages.length < 3) continue; // need at least 3 new messages to justify LLM call
+        if (newMessages.length < 3) continue;
 
-      // Use local extraction first (free, no LLM), then LLM for remaining
-      const { extractDossierFields: llmExtract } = await import('./llm.js');
-      const { localDossierExtraction } = await import('./llm.js');
+        const { extractDossierFields: llmExtract } = await import('./llm.js');
+        const { localDossierExtraction } = await import('./llm.js');
 
-      // Step 1: Local regex extraction (always, no cost)
-      const localResult = localDossierExtraction(newMessages.map(m => ({ direction: m.direction, body: m.body, timestamp: m.timestamp })));
-      for (const [field, value] of Object.entries(localResult)) {
-        await setAutoExtractedField(contactId, platform as Platform, field, value, 'local-pattern');
-      }
-
-      // Step 2: LLM extraction only if enough new content and LLM enabled
-      const rateSettings = await getLLMRateSettings();
-      if (rateSettings.enableDossierExtract && newMessages.length >= 5) {
-        const contactName = contactId.replace(/^[a-z]+:/, '').slice(0, 10);
-        const extracted = await llmExtract(
-          newMessages.map(m => ({ direction: m.direction, body: m.body, timestamp: m.timestamp })),
-          contactName, existing,
-        );
-        for (const [field, value] of Object.entries(extracted)) {
-          await setAutoExtractedField(contactId, platform as Platform, field, value, 'llm-extraction');
+        const localResult = localDossierExtraction(newMessages.map(m => ({ direction: m.direction, body: m.body, timestamp: m.timestamp })));
+        for (const [field, value] of Object.entries(localResult)) {
+          await setAutoExtractedField(contactId, platform as Platform, field, value, 'local-pattern');
         }
-        if (Object.keys(extracted).length) {
-          console.log(`${LOG} Auto-extracted ${Object.keys(extracted).length} dossier fields for ${contactId} (${Object.keys(localResult).length} local + ${Object.keys(extracted).length} LLM)`);
+
+        const rateSettings = await getLLMRateSettings();
+        if (rateSettings.enableDossierExtract && newMessages.length >= 5) {
+          const contactName = contactId.replace(/^[a-z]+:/, '').slice(0, 10);
+          const extracted = await llmExtract(
+            newMessages.map(m => ({ direction: m.direction, body: m.body, timestamp: m.timestamp })),
+            contactName, existing,
+          );
+          for (const [field, value] of Object.entries(extracted)) {
+            await setAutoExtractedField(contactId, platform as Platform, field, value, 'llm-extraction');
+          }
+          if (Object.keys(extracted).length) {
+            console.log(`${LOG} Auto-extracted ${Object.keys(extracted).length} dossier fields for ${contactId} (${Object.keys(localResult).length} local + ${Object.keys(extracted).length} LLM)`);
+          }
+        } else if (Object.keys(localResult).length) {
+          console.log(`${LOG} Local-extracted ${Object.keys(localResult).length} dossier fields for ${contactId}`);
         }
-      } else if (Object.keys(localResult).length) {
-        console.log(`${LOG} Local-extracted ${Object.keys(localResult).length} dossier fields for ${contactId}`);
+      } catch (err) {
+        console.warn(`${LOG} Dossier extraction failed for ${contactId}:`, err);
       }
-    } catch (err) {
-      console.warn(`${LOG} Dossier extraction failed for ${contactId}:`, err);
-    }
 
       if (dossierExtractionQueue.size > 0) {
         const jittered = ENRICH_CALL_DELAY_MS + (Math.random() * 2 - 1) * ENRICH_CALL_JITTER_MS;
@@ -2291,6 +2287,7 @@ async function processDossierExtractions(): Promise<void> {
 // A contact is only written to PouchDB if its data has changed since the
 // last write, OR if 60+ seconds have passed (to catch metadata drift).
 const recentContactUpserts = new Map<string, { hash: string; time: number }>();
+const RECENT_CONTACT_UPSERTS_CAP = 500;
 
 function contactHash(c: UnifiedContact): string {
   // Quick hash of the fields that matter — if these haven't changed,
@@ -2333,7 +2330,7 @@ async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void>
   // walking `keys()` yields the oldest entries in O(K) where K is the number
   // we want to drop. On accounts with thousands of contact upserts per
   // minute the previous sort dominated this hot path.
-  if (recentContactUpserts.size > 500) {
+  if (recentContactUpserts.size > RECENT_CONTACT_UPSERTS_CAP) {
     const toDrop = 200;
     const iter = recentContactUpserts.keys();
     for (let i = 0; i < toDrop; i++) {

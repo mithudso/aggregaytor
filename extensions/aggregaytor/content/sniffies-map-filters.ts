@@ -53,14 +53,6 @@ interface MapFilterSettings {
   blockedIds: Set<string>;
 }
 
-interface MarkerInfo {
-  element: HTMLElement;
-  profileId: string;
-  attitude?: string;
-  lastChatTs?: number;
-  profileText?: string;
-}
-
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const SCAN_INTERVAL_MS = 5000;
@@ -74,6 +66,7 @@ const BLOCKED_KEY = 'aggregaytor_map_blocked';
 // ── State ──────────────────────────────────────────────────────────────────
 
 const idToMarker = new Map<string, HTMLElement>();
+const ID_TO_MARKER_MAX = 2000;
 const markerAttitudes = new Map<string, string>();
 const MARKER_ATTITUDES_MAX = 5000;
 const manualAttitudes = new Map<string, string>();
@@ -146,7 +139,8 @@ let settings: MapFilterSettings = {
 };
 
 let filterEnabled = false;
-let _diagLogSkip = 0;
+let _lastAppliedSig = '';
+let _lastSettingsSig = '';
 
 // ── CSS Injection ──────────────────────────────────────────────────────────
 
@@ -301,9 +295,21 @@ function extractIdFromElement(el: HTMLElement): string {
 // the marker has a picture or not.
 
 let cachedMap: { getCanvas(): HTMLCanvasElement; queryRenderedFeatures(pt: [number, number]): any[] } | null = null;
+let cachedMapCanvas: HTMLCanvasElement | null = null;
+let lastFullScanTs = 0;
+const FULL_SCAN_COOLDOWN_MS = 10_000;
 
 function findMap(): typeof cachedMap {
-  if (cachedMap && typeof cachedMap.getCanvas === 'function') return cachedMap;
+  if (cachedMap && typeof cachedMap.getCanvas === 'function') {
+    try {
+      const currentCanvas = cachedMap.getCanvas();
+      if (currentCanvas && currentCanvas === cachedMapCanvas && document.body.contains(currentCanvas)) {
+        return cachedMap;
+      }
+    } catch {}
+    cachedMap = null;
+    cachedMapCanvas = null;
+  }
   const canvas = document.querySelector<HTMLCanvasElement>('.maplibregl-canvas');
   if (!canvas) return null;
   const w = window as any;
@@ -315,17 +321,18 @@ function findMap(): typeof cachedMap {
   for (const c of candidates) {
     try {
       if (c.getCanvas && c.queryRenderedFeatures && c.getCanvas() === canvas) {
-        cachedMap = c; return c;
+        cachedMap = c; cachedMapCanvas = canvas; return c;
       }
     } catch {}
   }
-  // Last-resort: scan window for any object exposing a MapLibre-shaped API
-  // that owns the same canvas.
+  const now = Date.now();
+  if (now - lastFullScanTs < FULL_SCAN_COOLDOWN_MS) return null;
+  lastFullScanTs = now;
   try {
     for (const k in w) {
       const v = w[k];
       if (v && typeof v === 'object' && typeof v.getCanvas === 'function' && typeof v.queryRenderedFeatures === 'function') {
-        try { if (v.getCanvas() === canvas) { cachedMap = v; return v; } } catch {}
+        try { if (v.getCanvas() === canvas) { cachedMap = v; cachedMapCanvas = canvas; return v; } } catch {}
       }
     }
   } catch {}
@@ -388,12 +395,30 @@ function scanMarkers(): void {
     idToMarker.set(id, root);
   });
 
-  // Clean up removed markers
+  // Clean up removed markers and their associated badge elements
   for (const [id, el] of idToMarker) {
     if (!currentIds.has(id) || !document.body.contains(el)) {
       idToMarker.delete(id);
       const badge = badgeElements.get(id);
       if (badge) { badge.remove(); badgeElements.delete(id); }
+    }
+  }
+
+  // Enforce cap on idToMarker — evict oldest entries when map is too large
+  // (can happen on heavily scrolled maps where markers accumulate)
+  while (idToMarker.size > ID_TO_MARKER_MAX) {
+    const oldest = idToMarker.keys().next();
+    if (!oldest.done) {
+      const badge = badgeElements.get(oldest.value);
+      if (badge) { badge.remove(); badgeElements.delete(oldest.value); }
+      idToMarker.delete(oldest.value);
+    } else break;
+  }
+
+  // Prune orphaned badge elements whose markers no longer exist in idToMarker
+  if (badgeElements.size > idToMarker.size + 50) {
+    for (const [id, badge] of badgeElements) {
+      if (!idToMarker.has(id)) { badge.remove(); badgeElements.delete(id); }
     }
   }
 }
@@ -572,8 +597,16 @@ function applyFilters(): void {
   scanMarkers();
   if (idToMarker.size === 0) return;
 
-  // Diagnostic counters — surfaced at the end of this pass so you can tell
-  // from the console how each filter is performing.
+  const anyFilterOn = settings.blockedIds.size > 0 ||
+    (settings.excludeEnabled && settings.excludeTerms.length > 0) ||
+    settings.hideRecentChats || settings.hideAnyChats ||
+    settings.hideBottom || settings.hideVersBottom || settings.hideVers ||
+    settings.hideVersTop || settings.hideTop || settings.hideSide || settings.hideUnspecified ||
+    (settings.includeEnabled && settings.includeTerms.length > 0) ||
+    settings.highlightBottom || settings.highlightVersBottom || settings.highlightVers ||
+    settings.highlightVersTop || settings.highlightTop ||
+    settings.showChatAgeBadges;
+  if (!anyFilterOn) return;
   let nMarkers = 0;
   let nHiddenByBlock = 0, nHiddenByText = 0, nHiddenByAttitude = 0;
   let nHiddenByWaiting24h = 0, nHiddenByWaitingEver = 0;
@@ -683,10 +716,16 @@ function applyFilters(): void {
       hideAnyChats: settings.hideAnyChats,
     },
   };
-  if ((settings.hideAnyChats || settings.hideRecentChats || nHiddenByBlock || nHiddenByText || nHiddenByAttitude)
-      && ++_diagLogSkip >= 6) {
-    _diagLogSkip = 0;
-    console.log('[Aggregaytor:MapFilters] applyFilters:', stats);
+  // Throttle applyFilters logs: only fire when something interesting is
+  // happening AND the stats changed since last log. Previously logging on
+  // every 6th scan regardless of state → one line of noise every 30s even
+  // when nothing changed.
+  if (settings.hideAnyChats || settings.hideRecentChats || nHiddenByBlock || nHiddenByText || nHiddenByAttitude) {
+    const sig = `${nMarkers}/${nActivityEntries}/${nWaiting}/${nHiddenByBlock}/${nHiddenByText}/${nHiddenByAttitude}/${nHiddenByWaiting24h}/${nHiddenByWaitingEver}`;
+    if (sig !== _lastAppliedSig) {
+      _lastAppliedSig = sig;
+      console.log('[Aggregaytor:MapFilters] applyFilters:', stats);
+    }
   }
   // Broadcast to the ISOLATED-world bridge so the top filter bar can show
   // live hidden counts per chip. postMessage crosses the MAIN→ISOLATED
@@ -846,13 +885,16 @@ function setupClickHandlers(): void {
   let _lastShiftRightClickResult: { timestamp: number; resolved: ReturnType<typeof resolveProfileIdAtEvent> } | null = null;
   function resolveShiftRightClick(e: MouseEvent): ReturnType<typeof resolveProfileIdAtEvent> {
     const now = performance.now();
-    // A single gesture fires mousedown → contextmenu within a few ms.
-    // Re-use the cached resolution within a 200ms window.
     if (_lastShiftRightClickResult && now - _lastShiftRightClickResult.timestamp < 200) {
       return _lastShiftRightClickResult.resolved;
     }
+    // Clear stale result to release DOM element references held by markerEl
+    if (_lastShiftRightClickResult && now - _lastShiftRightClickResult.timestamp > 2000) {
+      _lastShiftRightClickResult = null;
+    }
     const resolved = resolveProfileIdAtEvent(e);
     _lastShiftRightClickResult = { timestamp: now, resolved };
+    setTimeout(() => { _lastShiftRightClickResult = null; }, 2000);
     return resolved;
   }
 
@@ -950,14 +992,31 @@ function loadSettings(): void {
 window.addEventListener('__aggregaytor_map_filter_settings', ((event: CustomEvent) => {
   const update = event.detail;
   if (!update) return;
-  console.log('[Aggregaytor:MapFilters] Filter settings updated:', {
-    excludeEnabled: update.excludeEnabled,
-    includeEnabled: update.includeEnabled,
-    excludeTerms: update.excludeTerms?.length,
-    includeTerms: update.includeTerms?.length,
-    hasBlockedIdsInUpdate: Array.isArray(update.blockedIds),
-    hiddenCount: settings.blockedIds.size,
+  // Log only when a user-visible setting actually changed — the top bar
+  // and floating panel both echo settings back on every "Sync" tick,
+  // which was producing multiple log lines per minute with no state
+  // change. Compare a stable signature of the interesting fields.
+  const sig = JSON.stringify({
+    e: !!update.excludeEnabled, i: !!update.includeEnabled,
+    r: !!update.hideRecentChats, a: !!update.hideAnyChats,
+    et: (update.excludeTerms || []).join('|'),
+    it: (update.includeTerms || []).join('|'),
+    h: !!update.hideBottom, hv: !!update.hideVers, ht: !!update.hideTop,
+    hvb: !!update.hideVersBottom, hvt: !!update.hideVersTop,
+    hs: !!update.hideSide, hu: !!update.hideUnspecified,
+    b: !!update.showChatAgeBadges,
   });
+  if (sig !== _lastSettingsSig) {
+    _lastSettingsSig = sig;
+    console.log('[Aggregaytor:MapFilters] Filter settings updated:', {
+      excludeEnabled: update.excludeEnabled,
+      includeEnabled: update.includeEnabled,
+      hideRecentChats: update.hideRecentChats,
+      hideAnyChats: update.hideAnyChats,
+      excludeTerms: update.excludeTerms?.length,
+      includeTerms: update.includeTerms?.length,
+    });
+  }
   // ⚠ Never let the filter-panel update (which comes from the floating
   // filter UI) TOUCH blockedIds. That UI doesn't edit the blocked list —
   // but it was inadvertently echoing a stale copy read from STORAGE_KEY,
@@ -1002,6 +1061,7 @@ window.addEventListener('__aggregaytor_contact_data', ((event: CustomEvent) => {
 // so a live message that arrived between seeds isn't stomped by older data.
 // Triggers an immediate applyFilters() so the chips start working the
 // moment the first seed lands — no page reload required.
+let _lastMergedCount = -1;
 window.addEventListener('__aggregaytor_chat_activity_seed', ((event: CustomEvent) => {
   const seed = event.detail;
   if (!seed || typeof seed !== 'object') return;
@@ -1014,7 +1074,12 @@ window.addEventListener('__aggregaytor_chat_activity_seed', ((event: CustomEvent
     if (typeof v.them === 'number' && v.them > a.theirLastTs) a.theirLastTs = v.them;
     mergedCount++;
   }
-  console.log(`[Aggregaytor:MapFilters] Merged chat activity seed for ${mergedCount} profiles`);
+  // Log only when the count changes — the seed fires every 60s and logging
+  // an identical number repeatedly just fills the console with noise.
+  if (mergedCount !== _lastMergedCount) {
+    console.log(`[Aggregaytor:MapFilters] Merged chat activity seed for ${mergedCount} profiles`);
+    _lastMergedCount = mergedCount;
+  }
   applyFilters();
 }) as EventListener);
 
@@ -1067,6 +1132,165 @@ window.addEventListener('__aggregaytor_set_attitude', ((event: CustomEvent) => {
   } catch {}
   applyFilters();
 }) as EventListener);
+
+// ── Partials Prefetcher ───────────────────────────────────────────────────
+// Proactively fetch profile attitude from Sniffies' `/api/user/partials`
+// endpoint for markers currently on the map that don't have a known
+// attitude. This is what the old userscript used — without it, position
+// filters only work for profiles the user has already clicked into,
+// because the adapter only emits `contacts` events when the native app
+// fetches that specific profile.
+//
+// The endpoint takes a batch of user IDs and returns an array of partial
+// profile objects. The attitude is at `data.profile.extended.sexuality.attitude`.
+//
+// Rate limiting: at most one POST per 4 seconds; exponential backoff on 429.
+
+const PARTIALS_ENDPOINTS = [
+  'https://usw.api.sniffies.com/api/user/partials',
+  'https://uswapi2.sniffies.com/api/user/partials',
+];
+const PARTIALS_BATCH = 50;
+const PARTIALS_MIN_INTERVAL_MS = 4000;
+const PARTIALS_FAIL_COOLDOWN_MS = 30_000;
+
+const partialsFetchInFlight = new Set<string>();
+const partialsRetryAt = new Map<string, number>();
+const PARTIALS_RETRY_AT_MAX = 2000;
+const partialsNoAttitude = new Set<string>();
+const PARTIALS_NO_ATTITUDE_MAX = 5000;
+let partialsLastRequestTs = 0;
+let partialsRateLimitUntil = 0;
+let partialsPreferredEndpoint = PARTIALS_ENDPOINTS[0];
+let partialsEndpointFailCount = 0;
+
+function extractAttitudeFromPartial(p: any): string | null {
+  const sexuality = p?.data?.profile?.extended?.sexuality;
+  if (!sexuality) return null;
+  const att = sexuality.attitude;
+  return att ? String(att).toLowerCase() : null;
+}
+
+function extractTextFromPartial(p: any): string {
+  const prof = p?.data?.profile;
+  if (!prof) return '';
+  const bits: string[] = [];
+  const bio = prof.extended?.bio || prof.bio;
+  if (bio) bits.push(String(bio));
+  const aboutMe = prof.extended?.aboutMe || prof.aboutMe;
+  if (aboutMe) bits.push(String(aboutMe));
+  const lookingFor = prof.extended?.lookingFor || prof.lookingFor;
+  if (lookingFor) bits.push(String(lookingFor));
+  return bits.join(' ').toLowerCase();
+}
+
+async function fetchPartialsForIds(ids: string[]): Promise<void> {
+  if (!ids.length) return;
+  const now = Date.now();
+  if (now < partialsRateLimitUntil) return;
+  if (now - partialsLastRequestTs < PARTIALS_MIN_INTERVAL_MS) return;
+  partialsLastRequestTs = now;
+
+  // Try preferred endpoint first, fall back to others on failure.
+  const endpoints = [partialsPreferredEndpoint, ...PARTIALS_ENDPOINTS.filter(e => e !== partialsPreferredEndpoint)];
+  for (const endpoint of endpoints) {
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ userIds: ids }),
+        credentials: 'include',
+      });
+      if (res.status === 429) {
+        partialsRateLimitUntil = Date.now() + PARTIALS_FAIL_COOLDOWN_MS;
+        console.warn('[Aggregaytor:MapFilters] partials 429 — cooling down');
+        return;
+      }
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!Array.isArray(data)) continue;
+      partialsPreferredEndpoint = endpoint;
+      partialsEndpointFailCount = 0;
+      let attitudeCount = 0;
+      for (const p of data) {
+        const id = String(p?._id || p?.id || p?.data?._id || '').toLowerCase();
+        if (!id) continue;
+        const att = extractAttitudeFromPartial(p);
+        if (att) {
+          cappedMapSet(markerAttitudes, id, att, MARKER_ATTITUDES_MAX);
+          attitudeCount++;
+        } else {
+          partialsNoAttitude.add(id);
+          if (partialsNoAttitude.size > PARTIALS_NO_ATTITUDE_MAX) {
+            const oldest = partialsNoAttitude.values().next();
+            if (!oldest.done) partialsNoAttitude.delete(oldest.value);
+          }
+        }
+        const text = extractTextFromPartial(p);
+        if (text) cappedMapSet(markerProfileText, id, text, MARKER_PROFILE_TEXT_MAX);
+      }
+      if (attitudeCount > 0) {
+        console.log(`[Aggregaytor:MapFilters] Partials: fetched ${attitudeCount} attitudes (of ${ids.length} requested)`);
+        requestAnimationFrame(applyFilters);
+      }
+      return;
+    } catch {
+      // Try next endpoint
+    }
+  }
+  partialsEndpointFailCount++;
+  if (partialsEndpointFailCount >= 3) {
+    const curIdx = PARTIALS_ENDPOINTS.indexOf(partialsPreferredEndpoint);
+    partialsPreferredEndpoint = PARTIALS_ENDPOINTS[(curIdx + 1) % PARTIALS_ENDPOINTS.length];
+    partialsEndpointFailCount = 0;
+  }
+}
+
+/**
+ * Scan the current marker set and request partials for any IDs where we
+ * don't yet know the attitude. Runs on an interval; the rate limiter in
+ * fetchPartialsForIds ensures we don't hit the Sniffies API too hard.
+ */
+function tickPartialsPrefetch(): void {
+  if (!filterEnabled) return;
+  // Only prefetch when a position-based filter is actually on — no point
+  // hitting the API otherwise. Checks the chips users actually toggle.
+  const anyPositionFilter =
+    settings.hideBottom || settings.hideVersBottom || settings.hideVers ||
+    settings.hideVersTop || settings.hideTop || settings.hideSide ||
+    settings.hideUnspecified ||
+    settings.highlightBottom || settings.highlightVersBottom || settings.highlightVers ||
+    settings.highlightVersTop || settings.highlightTop;
+  if (!anyPositionFilter) return;
+
+  const now = Date.now();
+  const batch: string[] = [];
+  for (const id of idToMarker.keys()) {
+    if (batch.length >= PARTIALS_BATCH) break;
+    if (markerAttitudes.has(id)) continue;
+    if (manualAttitudes.has(id)) continue;
+    if (partialsFetchInFlight.has(id)) continue;
+    if (partialsNoAttitude.has(id)) continue;
+    const retry = partialsRetryAt.get(id) || 0;
+    if (retry > now) continue;
+    batch.push(id);
+    partialsFetchInFlight.add(id);
+  }
+  if (!batch.length) return;
+  fetchPartialsForIds(batch).finally(() => {
+    for (const id of batch) {
+      partialsFetchInFlight.delete(id);
+      // If we still don't have attitude after the fetch, back off before retrying
+      if (!markerAttitudes.has(id) && !partialsNoAttitude.has(id)) {
+        partialsRetryAt.set(id, Date.now() + PARTIALS_FAIL_COOLDOWN_MS);
+        if (partialsRetryAt.size > PARTIALS_RETRY_AT_MAX) {
+          const oldest = partialsRetryAt.keys().next();
+          if (!oldest.done) partialsRetryAt.delete(oldest.value);
+        }
+      }
+    }
+  });
+}
 
 // ── Initialization ─────────────────────────────────────────────────────────
 
@@ -1132,6 +1356,12 @@ export function initMapFilters(): void {
   setInterval(() => requestAnimationFrame(applyFilters), SCAN_INTERVAL_MS);
   // Initial scan after DOM settles
   setTimeout(() => requestAnimationFrame(applyFilters), 3000);
+
+  // Partials prefetcher — keeps markerAttitudes populated so position
+  // filters work for profiles the user hasn't manually opened yet.
+  // Rate-limited internally; runs only when a position chip is on.
+  setInterval(tickPartialsPrefetch, 4000);
+  setTimeout(tickPartialsPrefetch, 5000);
 
   console.log('[Aggregaytor:MapFilters] Initialized — scanning every 5s');
 }

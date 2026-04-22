@@ -151,7 +151,10 @@ window.addEventListener('message', (event) => {
     // Re-dispatch as a CustomEvent so the map-filters module (also in MAIN
     // world) picks it up. CustomEvents don't cross ISOLATED/MAIN worlds,
     // which is why the floating filter panel has to route through postMessage.
-    console.log('[Aggregaytor:Sniffies] Cross-world filter settings received:', Object.keys(event.data.update || {}).length, 'keys');
+    // Quiet this log — the floating panel / top bar both echo settings on
+    // every "Sync" tick which fired this log repeatedly with no real
+    // state change. The downstream map-filters listener has its own
+    // signature-based dedup.
     window.dispatchEvent(new CustomEvent('__aggregaytor_map_filter_settings', {
       detail: event.data.update,
     }));

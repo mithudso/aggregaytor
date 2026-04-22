@@ -78,8 +78,6 @@ const DEFAULT_SUBSTITUTIONS: Substitution[] = [
   { shortcut: 'ylt', phrase: 'You looking today?' },
   { shortcut: 'zz', phrase: "Hey there, how's it going?" },
   { shortcut: 'war', phrase: 'When are you free to come breed me?' },
-  { shortcut: 'ho', phrase: 'Host or travel?' },
-  { shortcut: 'mm', phrase: 'Mitch 5125455965' },
 ];
 
 // ── Expansion Logic ────────────────────────────────────────────────────────

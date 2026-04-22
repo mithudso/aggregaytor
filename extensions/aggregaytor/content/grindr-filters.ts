@@ -77,8 +77,10 @@ interface GrindrFilterSettings {
 
 // ── State ──────────────────────────────────────────────────────────────────
 
-const profileMap = new Map<string, GrindrProfile>(); // profileId → data
-const hashToProfile = new Map<string, string>(); // photoHash → profileId
+const profileMap = new Map<string, GrindrProfile>();
+const PROFILE_MAP_MAX = 5000;
+const hashToProfile = new Map<string, string>();
+const HASH_TO_PROFILE_MAX = 10_000;
 const HIDE_CLASS = 'aggregaytor-grindr-hide';
 const STORAGE_KEY = 'aggregaytor_grindr_filter_settings';
 
@@ -97,6 +99,7 @@ let settings: GrindrFilterSettings = {
 // Track which profiles we've already auto-blocked this session
 // (so we don't spam the hide API on every filter pass)
 const autoBlockedThisSession = new Set<string>();
+const AUTO_BLOCKED_MAX = 2000;
 
 // ── CSS Injection ──────────────────────────────────────────────────────────
 
@@ -132,18 +135,25 @@ export function indexGrindrProfile(obj: Record<string, unknown>): void {
     photoHashes: [],
   };
 
-  // Index photo hashes
   const hashes = obj.photoMediaHashes;
   if (Array.isArray(hashes)) {
     for (const h of hashes) {
       if (typeof h === 'string' && h.length > 10) {
         profile.photoHashes.push(h);
         hashToProfile.set(h, pid);
+        if (hashToProfile.size > HASH_TO_PROFILE_MAX) {
+          const oldest = hashToProfile.keys().next();
+          if (!oldest.done) hashToProfile.delete(oldest.value);
+        }
       }
     }
   }
 
   profileMap.set(pid, profile);
+  if (profileMap.size > PROFILE_MAP_MAX) {
+    const oldest = profileMap.keys().next();
+    if (!oldest.done) profileMap.delete(oldest.value);
+  }
 }
 
 // ── Filter Logic ───────────────────────────────────────────────────────────
@@ -183,37 +193,52 @@ function shouldHideProfile(profile: GrindrProfile): boolean {
 
 // ── DOM Filtering ──────────────────────────────────────────────────────────
 
+let _lastGrindrFilterSig = '';
+
 function applyFilters(): void {
   if (!settings.enabled) return;
 
   const cards = document.querySelectorAll('[data-testid="cascadeCellContainer"]');
+  let nCards = 0, nHidden = 0, nResolved = 0;
   for (const card of cards) {
+    nCards++;
     const img = card.querySelector('img[src*="cdns.grindr.com"]');
     if (!img) { continue; }
     const src = (img as HTMLImageElement).src;
 
-    // Extract hash from img src
     const hashMatch = src.match(/\/([a-f0-9]{32,})/i);
     if (!hashMatch) continue;
 
     const profileId = hashToProfile.get(hashMatch[1]);
     if (!profileId) continue;
+    nResolved++;
 
     const profile = profileMap.get(profileId);
     if (!profile) continue;
 
     if (shouldHideProfile(profile)) {
       (card as HTMLElement).classList.add(HIDE_CLASS);
-      // Auto-block: call Grindr hide API for matching profiles
+      nHidden++;
       if (settings.autoBlock && !autoBlockedThisSession.has(profileId)) {
         autoBlockedThisSession.add(profileId);
-        // Dispatch to MAIN world to call the hide API with captured auth
+        if (autoBlockedThisSession.size > AUTO_BLOCKED_MAX) {
+          const oldest = autoBlockedThisSession.values().next();
+          if (!oldest.done) autoBlockedThisSession.delete(oldest.value);
+        }
         window.dispatchEvent(new CustomEvent('__aggregaytor_block_profile', {
           detail: { profileId },
         }));
       }
     } else {
       (card as HTMLElement).classList.remove(HIDE_CLASS);
+    }
+  }
+
+  if (nHidden > 0) {
+    const sig = `${nCards}/${nResolved}/${nHidden}`;
+    if (sig !== _lastGrindrFilterSig) {
+      _lastGrindrFilterSig = sig;
+      console.log(`[Aggregaytor:GrindrFilters] ${nHidden}/${nCards} cards hidden (${nResolved} resolved, ${profileMap.size} indexed)`);
     }
   }
 }
