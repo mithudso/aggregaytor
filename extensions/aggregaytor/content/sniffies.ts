@@ -168,6 +168,13 @@ window.addEventListener('message', (event) => {
       detail: event.data.activity,
     }));
   }
+  if (event.data.type === '__aggregaytor_refresh_conversation') {
+    // Bridge detected a /profile/{id}/chat navigation. Force-fetch the
+    // chat-data endpoint so our side panel shows full history even when
+    // Sniffies' native UI leaves the chat blank until the first send.
+    const pid = event.data.profileId;
+    if (pid) adapter.forceRefreshConversation(pid).catch(() => {});
+  }
 });
 
 // ── Auto-Send Mechanism ────────────────────────────────────────────────────

@@ -367,7 +367,8 @@ export function showFloatingPanel(contactId: string, platform: string): void {
 
   injectCSS();
 
-  // Remove existing panel
+  // Remove existing panel and clean up drag listeners
+  if (_dragCleanup) { _dragCleanup(); _dragCleanup = null; }
   const existing = document.getElementById(PANEL_ID);
   if (existing) existing.remove();
 

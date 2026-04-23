@@ -223,7 +223,8 @@ try {
           // System messages about deleted conversations
           if (lower.includes('deleted previous messages in this conversation')) return;
           if (lower.includes('deleted the conversation') || lower.includes('conversation deleted')) return;
-          if (lower.startsWith('this conversation') || lower.startsWith('you blocked')) return;
+          if (lower.startsWith('this conversation') || lower.startsWith('you blocked') || lower.startsWith('you unblocked')) return;
+          if (lower.startsWith('you reported') || lower.startsWith('message unsent') || lower.startsWith('this message was deleted')) return;
 
           // Determine message direction by checking CSS classes for common
           // "sent" indicators. Sniffies typically styles outgoing messages with
@@ -247,7 +248,7 @@ try {
           if (!contactId) return;
 
           messages.push({
-            id: `sniffies:conv-${profileId || 'unknown'}-${Date.now()}-${i}`,
+            id: `sniffies:conv-${profileId || 'unknown'}-${direction}-${text.slice(0, 40).replace(/[^a-zA-Z0-9]/g, '')}-${i}`,
             platform: 'sniffies',
             threadId: contactId, // thread = contact for 1:1 conversations
             contactId,
@@ -1430,10 +1431,19 @@ function checkUrlChange() {
   // Check if the new URL is a profile page: /profile/{hexId} or /profile/{hexId}/chat
   const match = url.match(/\/profile\/([0-9a-f]{6,})(?:\/chat)?/i);
   if (match) {
-    const contactId = `sniffies:${match[1].toLowerCase()}`;
+    const profileId = match[1].toLowerCase();
+    const contactId = `sniffies:${profileId}`;
     try {
       chrome.runtime.sendMessage({ type: 'ACTIVE_PROFILE_CHANGED', contactId, platform: 'sniffies' }).catch(() => {});
     } catch {}
+    // Force a conversation-history refresh: Sniffies' own UI sometimes leaves
+    // the chat panel blank until the user sends a message, which can lead to
+    // messaging over prior context the user can't see. The adapter (MAIN
+    // world) hits the chat-data endpoint itself and relies on the existing
+    // fetch interceptor to extract messages from the response. Debounced
+    // per-profile inside the adapter, so rapid SPA navigation is safe.
+    // postMessage crosses the ISOLATED→MAIN world boundary.
+    window.postMessage({ type: '__aggregaytor_refresh_conversation', profileId }, '*');
     // Show floating quick-action panel on the page
     showFloatingPanel(contactId, 'sniffies');
     // Also inject actions directly into the profile DOM (more reliable than

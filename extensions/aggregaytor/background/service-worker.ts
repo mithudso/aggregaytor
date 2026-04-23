@@ -21,7 +21,7 @@ import {
   exportAllData, importAllData, exportBlocked, importBlocked,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
-import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS, clearLLMCaches, queryContacts, getDeprecationWarnings } from './llm.js';
+import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS, clearLLMCaches, queryContacts, getDeprecationWarnings, generateConversationSummary } from './llm.js';
 import type { ContactQueryRow } from './llm.js';
 import { seedIndex, indexMessages, removeFromIndex, clearIndex, searchMessages as fulltextSearch, isIndexReady, getIndexSize, getEvictedCount, getLastEvictionAt, SEARCH_INDEX_MAX_DOCS } from './search-index.js';
 import { getDossier, upsertDossier, setAutoExtractedField } from '@aggregaytor/store';
@@ -187,6 +187,7 @@ async function handleMessage(msg: any): Promise<any> {
         queryContactsCacheSize: queryContactsCache.size,
         queryContactsCacheCap: QUERY_CONTACTS_CACHE_MAX,
         dossierQueueSize: dossierExtractionQueue.size,
+        dossierQueueCap: DOSSIER_QUEUE_CAP,
         searchIndexReady: isIndexReady(),
         searchIndexSize: getIndexSize(),
         searchIndexCap: SEARCH_INDEX_MAX_DOCS,
@@ -326,11 +327,11 @@ async function handleMessage(msg: any): Promise<any> {
           return { ok: true, messages: [], path: 'flexsearch', indexSize: getIndexSize() };
         }
         const got = await db.allDocs({ keys: hitIds, include_docs: true });
+        const hitOrder = new Map(hitIds.map((id, i) => [id, i]));
         const docs = got.rows
           .map((r: any) => r.doc)
           .filter((d: any) => d && d.docType === 'message')
-          // Preserve FlexSearch's relevance ordering rather than re-sorting by time
-          .sort((a: any, b: any) => hitIds.indexOf(a._id) - hitIds.indexOf(b._id));
+          .sort((a: any, b: any) => (hitOrder.get(a._id) ?? limit) - (hitOrder.get(b._id) ?? limit));
         return { ok: true, messages: docs.slice(0, limit), path: 'flexsearch', indexSize: getIndexSize() };
       }
 
@@ -353,6 +354,8 @@ async function handleMessage(msg: any): Promise<any> {
       clearIndex();
       autoTrainedSet.clear();
       recentContactUpserts.clear();
+      queryContactsCache.clear();
+      dossierExtractionQueue.clear();
       console.log(`${LOG} Cleared all data — database destroyed and recreated`);
       await updateBadgeCount();
       // Re-seed global chat contact
@@ -482,7 +485,9 @@ async function handleMessage(msg: any): Promise<any> {
             metadata: { ...(contact.metadata || {}), isBlocked: true },
           });
         }
-      } catch {}
+      } catch (e) {
+        console.warn(`${LOG} PROFILE_BLOCKED training/upsert failed for ${msg.contactId}:`, (e as Error).message);
+      }
       return { ok: true };
     }
     case 'ACTIVE_PROFILE_CHANGED': {
@@ -665,10 +670,10 @@ async function handleMessage(msg: any): Promise<any> {
       const features: ProfileFeatures = {
         bodyType: String(contact?.metadata?.bodyType || ''),
         position: String(contact?.metadata?.position || ''),
-        age: '', ethnicity: '', height: '',
-        profileTextLength: 0, profileTextKeywords: [],
-        hasPhoto: !!contact?.avatarUrl, photoCount: 0,
-        distance: '', conversationLength: msg.messages.length, responseRate: 0,
+        age: String(contact?.metadata?.age || ''), ethnicity: String(contact?.metadata?.ethnicity || ''), height: String(contact?.metadata?.height || ''),
+        profileTextLength: String(contact?.metadata?.profileText || '').length, profileTextKeywords: [],
+        hasPhoto: !!contact?.avatarUrl, photoCount: Array.isArray(contact?.metadata?.photos) ? (contact.metadata as any).photos.length : 0,
+        distance: String(contact?.metadata?.distance || ''), conversationLength: msg.messages.length, responseRate: 0,
       };
       const preference = await predictPreference(features);
 
@@ -844,6 +849,10 @@ async function handleMessage(msg: any): Promise<any> {
     case 'IMPORT_ALL_DATA': {
       try {
         invalidateThreadCache();
+        clearIndex();
+        autoTrainedSet.clear();
+        recentContactUpserts.clear();
+        queryContactsCache.clear();
         const result = await importAllData(msg.data, msg.passphrase);
         return { ok: true, ...result };
       } catch (err) { return { ok: false, error: (err as Error).message }; }
@@ -2181,6 +2190,7 @@ async function handleIncomingMessages(messages: UnifiedMessage[], platform: Plat
     // DOSSIER_MAX_DELAY ms, processing fires regardless of activity.
     const contactIds = new Set(messages.filter(m => m.direction === 'in').map(m => m.contactId));
     for (const cid of contactIds) {
+      if (dossierExtractionQueue.size >= DOSSIER_QUEUE_CAP) break;
       dossierExtractionQueue.add(`${cid}:${messages[0]?.platform || platform}`);
     }
     // Reset the idle timer on every new message — only starts after 30s of silence
@@ -2205,6 +2215,7 @@ async function handleIncomingMessages(messages: UnifiedMessage[], platform: Plat
 // so heavy chat traffic can't starve the extraction by perpetually resetting
 // the idle timer.
 const dossierExtractionQueue = new Set<string>();
+const DOSSIER_QUEUE_CAP = 100;
 let dossierExtractionTimer: ReturnType<typeof setTimeout> | null = null;
 let dossierProcessing = false;
 let dossierFirstQueuedAt = 0;
@@ -2243,8 +2254,7 @@ async function processDossierExtractions(): Promise<void> {
 
         if (newMessages.length < 3) continue;
 
-        const { extractDossierFields: llmExtract } = await import('./llm.js');
-        const { localDossierExtraction } = await import('./llm.js');
+        const { extractDossierFields: llmExtract, localDossierExtraction } = await import('./llm.js');
 
         const localResult = localDossierExtraction(newMessages.map(m => ({ direction: m.direction, body: m.body, timestamp: m.timestamp })));
         for (const [field, value] of Object.entries(localResult)) {
@@ -2526,13 +2536,14 @@ async function sendMessageToTab(platform: string, contactId: string, text: strin
     hadToNavigate = true;
   }
 
-  if (targetId) {
-    // Give the page time to settle: shorter delay if we're already on the
-    // right URL, longer if we had to load a fresh tab.
+  if (targetId != null) {
+    const tid = targetId;
     const settleMs = hadToNavigate ? (tab?.id ? 3000 : 5000) : 500;
     setTimeout(() => {
-      chrome.tabs.sendMessage(targetId!, { type: 'SEND_AUTO_RESPONSE', text, contactId }).catch(() => {});
+      chrome.tabs.sendMessage(tid, { type: 'SEND_AUTO_RESPONSE', text, contactId }).catch(() => {});
     }, settleMs);
+  } else {
+    console.warn(`${LOG} sendMessageToTab: no target tab resolved for ${platform}:${contactId}`);
   }
 }
 
