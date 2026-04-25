@@ -23,7 +23,7 @@ import {
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
 import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS, clearLLMCaches, queryContacts, getDeprecationWarnings, generateConversationSummary } from './llm.js';
 import type { ContactQueryRow } from './llm.js';
-import { seedIndex, indexMessages, removeFromIndex, clearIndex, searchMessages as fulltextSearch, isIndexReady, getIndexSize, getEvictedCount, getLastEvictionAt, SEARCH_INDEX_MAX_DOCS } from './search-index.js';
+import { seedIndex, indexMessages, removeFromIndex, clearIndex, searchMessages as fulltextSearch, isIndexReady, getIndexSize, getEvictedCount, getLastEvictionAt, getLifetimeStats, SEARCH_INDEX_MAX_DOCS } from './search-index.js';
 import { getDossier, upsertDossier, setAutoExtractedField } from '@aggregaytor/store';
 import { handleDebugCommand } from './debug-bridge.js';
 
@@ -192,6 +192,9 @@ async function handleMessage(msg: any): Promise<any> {
         searchIndexSize: getIndexSize(),
         searchIndexCap: SEARCH_INDEX_MAX_DOCS,
         searchIndexEvicted: getEvictedCount(),
+        // v0.57.28: dossier queue timing — lets the UI show "queued N seconds ago"
+        dossierFirstQueuedAt: dossierFirstQueuedAt || 0,
+        dossierFirstQueuedAgoSec: dossierFirstQueuedAt ? Math.round((Date.now() - dossierFirstQueuedAt) / 1000) : 0,
       };
       const uptimeHrs = Math.round(uptimeMin / 6) / 10;
       return { ok: true, stats, uptimeMin: Math.round(uptimeMin * 10) / 10, uptimeHrs, memory: memoryStats };
@@ -356,6 +359,9 @@ async function handleMessage(msg: any): Promise<any> {
       recentContactUpserts.clear();
       queryContactsCache.clear();
       dossierExtractionQueue.clear();
+      // v0.57.28: clear dossier queue timing state
+      dossierFirstQueuedAt = 0;
+      if (dossierExtractionTimer) { clearTimeout(dossierExtractionTimer); dossierExtractionTimer = null; }
       console.log(`${LOG} Cleared all data — database destroyed and recreated`);
       await updateBadgeCount();
       // Re-seed global chat contact
@@ -516,6 +522,12 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_THREAD_META': return { ok: true, meta: await getThreadMeta(msg.contactId) };
     case 'UPSERT_THREAD_META': return { ok: true, meta: await upsertThreadMeta(msg.contactId, msg.platform, msg.updates) };
     case 'GET_ALL_THREAD_META': return { ok: true, metas: await getAllThreadMeta() };
+
+    // v0.57.28: per-platform contact lookup — avoids fetching ALL contacts and filtering client-side
+    case 'GET_CONTACTS_BY_PLATFORM': {
+      const contacts = await getContactsByPlatform(msg.platform as Platform);
+      return { ok: true, contacts, count: contacts.length };
+    }
 
     // Reminders
     case 'CREATE_REMINDER': return { ok: true, reminder: await createReminder(msg.contactId, msg.platform, msg.note, msg.dueAt) };
@@ -1941,6 +1953,7 @@ async function handleMessage(msg: any): Promise<any> {
      *  is dropping docs on every write". A high evictedCount means some
      *  searches will silently fall back to the slow scan for old messages. */
     case 'GET_SEARCH_INDEX_INFO': {
+      const lifetime = getLifetimeStats();
       return {
         ok: true,
         ready: isIndexReady(),
@@ -1951,6 +1964,9 @@ async function handleMessage(msg: any): Promise<any> {
           : 0,
         evictedCount: getEvictedCount(),
         lastEvictionAt: getLastEvictionAt() || null,
+        // v0.57.28: lifetime stats survive clearIndex() for cumulative diagnostics
+        lifetimeSeeds: lifetime.seeds,
+        lifetimeAdds: lifetime.adds,
       };
     }
 
@@ -2367,11 +2383,12 @@ async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void>
 // ── Auto-respond with tier-based processing ─────────────────────────────────
 
 async function processAutoResponds(): Promise<void> {
-  // #8 Auto-close stale drafts older than 10 minutes
+  // #8 Auto-close stale drafts older than 15 minutes (v0.57.28: increased from
+  // 10m to account for time spent in the "generate" phase before draft state)
   const staleDrafts = await getDraftAutoResponds();
   for (const d of staleDrafts) {
     const age = Date.now() - new Date(d.updatedAt || d.createdAt).getTime();
-    if (age > 10 * 60_000) {
+    if (age > 15 * 60_000) {
       await updateAutoRespondStatus(d._id, 'rejected', { error: 'expired' });
       console.log(`${LOG} Auto-closed stale draft for ${d.contactId} (age: ${Math.round(age / 60_000)}m)`);
     }
@@ -2474,6 +2491,7 @@ async function runBlockRules(newMessages: UnifiedMessage[]): Promise<void> {
 // ── Navigation + messaging ──────────────────────────────────────────────────
 
 async function navigateToConversation(platform: string, contactId: string): Promise<void> {
+  if (!contactId) return; // v0.57.28: guard against empty contactId
   const urlFn = PLATFORM_URLS[platform]; if (!urlFn) return;
   const url = urlFn(contactId);
   const tabs = await chrome.tabs.query({});
@@ -2498,6 +2516,8 @@ async function navigateToConversation(platform: string, contactId: string): Prom
 }
 
 async function sendMessageToTab(platform: string, contactId: string, text: string): Promise<void> {
+  // v0.57.28: short-circuit on empty text to avoid unnecessary tab navigation
+  if (!text?.trim()) { console.warn(`${LOG} sendMessageToTab: empty text, skipping`); return; }
   console.log(`${LOG} Sending to ${contactId}: "${text.slice(0, 50)}..."`);
   const urlFn = PLATFORM_URLS[platform]; if (!urlFn) return;
   const url = urlFn(contactId);

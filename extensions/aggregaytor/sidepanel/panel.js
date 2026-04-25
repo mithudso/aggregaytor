@@ -149,18 +149,29 @@ async function loadThreads() {
       renderThreads(sortThreads(applyFilters(filtered)));
       // #15 Per-platform unread badges — computed from ALL threads, not filtered
       const platformUnread = {};
+      const platformTotal = {};
       for (const s of all) {
+        platformTotal[s.platform] = (platformTotal[s.platform] || 0) + 1;
         if (s.unreadCount) platformUnread[s.platform] = (platformUnread[s.platform] || 0) + s.unreadCount;
       }
       document.querySelectorAll('.platform-chip[data-platform]').forEach(chip => {
         const p = chip.dataset.platform;
         const existing = chip.querySelector('.chip-badge');
         if (existing) existing.remove();
+        const existingCount = chip.querySelector('.chip-count');
+        if (existingCount) existingCount.remove();
         if (p !== 'all' && p !== 'archived' && platformUnread[p]) {
           const badge = document.createElement('span');
           badge.className = 'chip-badge';
           badge.textContent = platformUnread[p];
           chip.appendChild(badge);
+        }
+        // v0.57.28: show total thread count on active chips
+        if (p !== 'all' && p !== 'archived' && activePlatforms.has(p) && platformTotal[p]) {
+          const count = document.createElement('span');
+          count.className = 'chip-count';
+          count.textContent = platformTotal[p];
+          chip.appendChild(count);
         }
       });
     }
@@ -687,11 +698,11 @@ async function openThread(contactId, platform, displayName) {
 async function loadProfileInfo(contactId) {
   const el = document.getElementById('profile-info');
   try {
-    const res = await chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId });
-    // Direct single-contact lookup — avoids the expensive GET_THREAD_SUMMARIES
-    // query (177ms avg, queries 1000 messages) just to find one contact.
-    // GET_CONTACT is a single PouchDB.get() — essentially instant.
-    const contactRes = await chrome.runtime.sendMessage({ type: 'GET_CONTACT', contactId: `contact:${contactId.replace('contact:', '')}` });
+    // v0.57.28: run both lookups in parallel — they're independent
+    const [res, contactRes] = await Promise.all([
+      chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId }),
+      chrome.runtime.sendMessage({ type: 'GET_CONTACT', contactId: `contact:${contactId.replace('contact:', '')}` }),
+    ]);
     const contact = contactRes?.contact;
     const meta = res?.meta || {};
 
@@ -951,6 +962,13 @@ function renderMessages(messages) {
       // Persist hidden state
       const set = new Set(JSON.parse(localStorage.getItem('aggregaytor_hidden_msgs') || '[]'));
       if (hidden) set.add(msgId); else set.delete(msgId);
+      // v0.57.28: cap at 1000 entries with FIFO eviction to prevent unbounded growth
+      if (set.size > 1000) {
+        const arr = [...set];
+        const trimmed = arr.slice(arr.length - 1000);
+        set.clear();
+        for (const id of trimmed) set.add(id);
+      }
       localStorage.setItem('aggregaytor_hidden_msgs', JSON.stringify([...set]));
     });
   });
@@ -1530,6 +1548,11 @@ const nicknameQueue = new Set();
 
 async function generateNickname(contactId, platform, contact, lastMessage) {
   if (nicknameQueue.has(contactId)) return;
+  // v0.57.28: cap at 50 with FIFO eviction to prevent memory leak
+  if (nicknameQueue.size >= 50) {
+    const oldest = nicknameQueue.values().next().value;
+    if (oldest) nicknameQueue.delete(oldest);
+  }
   nicknameQueue.add(contactId);
 
   try {
@@ -1755,9 +1778,9 @@ async function openGallery(contactId, displayName) {
 
   const pics = [];
   try {
-    const summRes = await chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} });
-    const thread = summRes?.summaries?.find(s => s.contactId === contactId);
-    const contact = thread?.contact;
+    // v0.57.28: use O(1) GET_CONTACT instead of fetching ALL thread summaries
+    const contactRes = await chrome.runtime.sendMessage({ type: 'GET_CONTACT', contactId: 'contact:' + contactId.replace('contact:', '') });
+    const contact = contactRes?.contact;
     if (contact?.avatarUrl) pics.push(contact.avatarUrl);
     if (Array.isArray(contact?.metadata?.photos)) {
       for (const p of contact.metadata.photos) {
@@ -1790,6 +1813,13 @@ async function openGallery(contactId, displayName) {
 
 document.getElementById('gallery-close').addEventListener('click', () => {
   document.getElementById('gallery-overlay').style.display = 'none';
+});
+
+// v0.57.28: click on overlay background (not child elements) to close gallery
+document.getElementById('gallery-overlay').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget || e.target.classList.contains('gallery-grid')) {
+    document.getElementById('gallery-overlay').style.display = 'none';
+  }
 });
 
 document.getElementById('btn-gallery').addEventListener('click', () => {
@@ -3059,8 +3089,28 @@ function addDevLog(msg) {
 }
 
 function renderDevLog() {
-  devLogEl.innerHTML = devLogMessages.slice(-50).map(m => `<div>${esc(m)}</div>`).join('');
+  devLogEl.innerHTML = '<button id="devlog-refresh-stats" style="font-size:10px;margin-bottom:4px;padding:2px 8px;border-radius:4px;border:1px solid rgba(59,130,246,0.4);background:rgba(59,130,246,0.15);color:#93c5fd;cursor:pointer;">Refresh Stats</button>' +
+    devLogMessages.slice(-50).map(m => `<div>${esc(m)}</div>`).join('');
   devLogEl.scrollTop = devLogEl.scrollHeight;
+  // v0.57.28: wire up refresh stats button
+  document.getElementById('devlog-refresh-stats')?.addEventListener('click', async () => {
+    try {
+      const [perfRes, idxRes] = await Promise.all([
+        chrome.runtime.sendMessage({ type: 'GET_SW_PERF' }),
+        chrome.runtime.sendMessage({ type: 'GET_SEARCH_INDEX_INFO' }),
+      ]);
+      if (perfRes?.ok) {
+        const m = perfRes.memory || {};
+        addDevLog(`[PERF] uptime=${perfRes.uptimeHrs}h threads=${m.threadCacheHasData ? 'cached' : 'cold'} contacts=${m.recentContactUpserts}/${m.recentContactUpsertsCap} dossierQ=${m.dossierQueueSize}/${m.dossierQueueCap}`);
+        if (m.dossierFirstQueuedAgoSec) addDevLog(`[PERF] dossier queued ${m.dossierFirstQueuedAgoSec}s ago`);
+      }
+      if (idxRes?.ok) {
+        addDevLog(`[SEARCH] ready=${idxRes.ready} size=${idxRes.size}/${idxRes.cap} (${idxRes.utilization}%) evicted=${idxRes.evictedCount}${idxRes.lifetimeSeeds != null ? ' seeds=' + idxRes.lifetimeSeeds + ' adds=' + idxRes.lifetimeAdds : ''}`);
+      }
+    } catch (err) {
+      addDevLog(`[STATS] Error: ${err.message}`);
+    }
+  });
 }
 
 // Hook into message listener to populate dev log

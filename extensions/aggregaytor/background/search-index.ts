@@ -82,6 +82,10 @@ let _seeded = false;
 // this was invisible and heavy users could see stale/incomplete search
 // results without any hint that the index was dropping docs.
 let _evictedCount = 0;
+// v0.57.28: lifetime counters that survive clearIndex() so GET_SEARCH_INDEX_INFO
+// can show cumulative stats across rebuilds.
+let _lifetimeSeeds = 0;
+let _lifetimeAdds = 0;
 // Also track the most recent eviction so the UI can show "last pruned 3m
 // ago". A running counter without a timestamp makes the stat useless for
 // diagnosing whether evictions are chronic or a one-time seeding artifact.
@@ -112,6 +116,7 @@ function createIndex(): any {
  *  of distinct documents in the index. */
 function addOne(doc: IndexableMessage): void {
   if (!_index) return;
+  _lifetimeAdds++;
   try {
     _index.add(doc);
     if (!_indexedSet.has(doc._id)) {
@@ -151,6 +156,7 @@ export async function seedIndex(
   loader: (limit: number) => Promise<IndexableMessage[]>,
 ): Promise<{ seeded: number; took: number }> {
   const t0 = performance.now();
+  _lifetimeSeeds++;
   if (!_index) _index = createIndex();
   const docs = await loader(SEARCH_INDEX_MAX_DOCS);
   for (const d of docs) {
@@ -293,4 +299,12 @@ export function getEvictedCount(): number {
  */
 export function getLastEvictionAt(): number {
   return _lastEvictionAt;
+}
+
+/**
+ * v0.57.28: Lifetime stats that persist across clearIndex() calls so
+ * GET_SEARCH_INDEX_INFO can show cumulative activity even after rebuilds.
+ */
+export function getLifetimeStats(): { seeds: number; adds: number } {
+  return { seeds: _lifetimeSeeds, adds: _lifetimeAdds };
 }
