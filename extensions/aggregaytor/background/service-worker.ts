@@ -477,7 +477,15 @@ async function handleMessage(msg: any): Promise<any> {
       if (msg.platform === 'grindr' || msg.platform === 'sniffies') {
         maybeResumeEnrich(msg.platform).catch(() => {});
       }
-      await upsertThreadMeta(msg.contactId, msg.platform, { blockedByThem: true, archived: true });
+      // v0.57.33: PROFILE_BLOCKED is a preference signal (user clicked
+       // hide / middle-click / shift+right-click). It used to also flip
+       // archived:true, which silently nuked the inbox — heavy users with
+       // a few hundred map-blocks ended up with all their messages hidden
+       // because applyFilters drops anything archived. Block-and-archive
+       // is now two separate intents: blockedByThem stays as the ML
+       // preference signal, but the inbox thread keeps showing until the
+       // user explicitly archives via the 📦 action icon.
+      await upsertThreadMeta(msg.contactId, msg.platform, { blockedByThem: true });
       chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform: msg.platform, count: 0 }).catch(() => {});
       // Immediate preference training — blocking is a strong negative signal.
       // We also mirror the flag onto the contact record's metadata so future
@@ -546,6 +554,28 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_THREAD_META': return { ok: true, meta: await getThreadMeta(msg.contactId) };
     case 'UPSERT_THREAD_META': return { ok: true, meta: await upsertThreadMeta(msg.contactId, msg.platform, msg.updates) };
     case 'GET_ALL_THREAD_META': return { ok: true, metas: await getAllThreadMeta() };
+
+    // v0.57.33: one-shot recovery for users whose inbox lost threads to
+    // the old PROFILE_BLOCKED → archived:true coupling. Scans every
+    // thread-meta whose archived flag was set BY a block (blockedByThem)
+    // and clears the archived flag while keeping the block signal. Also
+    // accepts an optional platform filter so the user can recover one
+    // platform at a time. Returns the count un-archived.
+    case 'UNARCHIVE_BLOCKED_THREADS': {
+      const platformFilter = msg.platform ? String(msg.platform) : '';
+      const all = await getAllThreadMeta();
+      let unarchived = 0;
+      for (const m of all) {
+        if (!m.archived) continue;
+        if (!m.blockedByThem) continue;
+        if (platformFilter && m.platform !== platformFilter) continue;
+        await upsertThreadMeta(m.contactId, m.platform as Platform, { archived: false });
+        unarchived++;
+      }
+      invalidateThreadCache();
+      console.log(`${LOG} UNARCHIVE_BLOCKED_THREADS: un-archived ${unarchived} thread(s)${platformFilter ? ` (platform=${platformFilter})` : ''}`);
+      return { ok: true, count: unarchived };
+    }
 
     // v0.57.28: per-platform contact lookup — avoids fetching ALL contacts and filtering client-side
     case 'GET_CONTACTS_BY_PLATFORM': {

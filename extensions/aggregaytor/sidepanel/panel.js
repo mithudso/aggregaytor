@@ -273,6 +273,24 @@ function renderThreads(summaries) {
   const container = document.getElementById('thread-list');
   const showingArchive = currentPlatform === 'archived';
   if (!summaries?.length) {
+    // v0.57.33: detect the "all my threads are archived because I bulk-
+    // blocked profiles" failure mode. Up through v0.57.32 every
+    // PROFILE_BLOCKED set archived:true on the thread meta, so a heavy
+    // map-block session would hide every Sniffies conversation from the
+    // inbox. Count blocked-and-archived threads for the active filter
+    // and surface a one-click recovery if any are present.
+    let blockedArchived = 0;
+    for (const m of allThreadMeta.values()) {
+      if (!m.archived || !m.blockedByThem) continue;
+      if (currentPlatform === 'all' || activePlatforms.size === 0) { blockedArchived++; continue; }
+      if (activePlatforms.has(m.platform)) blockedArchived++;
+    }
+    const recoveryHint = (!showingArchive && blockedArchived > 0)
+      ? `<div class="empty-recovery">
+           <p><strong>${blockedArchived}</strong> conversation${blockedArchived === 1 ? '' : 's'} were archived by old map-block behaviour. Restore them to your inbox?</p>
+           <button class="empty-action-btn" id="empty-restore-blocked">Restore ${blockedArchived} archived thread${blockedArchived === 1 ? '' : 's'}</button>
+         </div>`
+      : '';
     // #18 Better empty states with actionable guidance
     container.innerHTML = showingArchive
       ? '<div class="empty-state"><h2>Archive empty</h2><p>Swipe left or tap 📦 on any conversation to archive it.</p></div>'
@@ -281,13 +299,30 @@ function renderThreads(summaries) {
           <div class="empty-actions">
             <button class="empty-action-btn" id="empty-open-sites">Open all sites</button>
             <button class="empty-action-btn" id="empty-clear-filters">Clear filters</button>
-          </div></div>`;
+          </div>
+          ${recoveryHint}</div>`;
     updateTotalUnread(0);
     // Attach empty state action handlers
     const openBtn = container.querySelector('#empty-open-sites');
     if (openBtn) openBtn.addEventListener('click', () => chrome.runtime.sendMessage({ type: 'OPEN_ALL_SITES' }).catch(() => {}));
     const clearBtn = container.querySelector('#empty-clear-filters');
     if (clearBtn) clearBtn.addEventListener('click', () => { document.getElementById('filter-clear').click(); });
+    const restoreBtn = container.querySelector('#empty-restore-blocked');
+    if (restoreBtn) restoreBtn.addEventListener('click', async () => {
+      restoreBtn.disabled = true;
+      restoreBtn.textContent = 'Restoring…';
+      // Limit to active platform if user is viewing a specific one;
+      // otherwise restore across the board.
+      const platform = (activePlatforms.size === 1) ? [...activePlatforms][0] : '';
+      const res = await chrome.runtime.sendMessage({ type: 'UNARCHIVE_BLOCKED_THREADS', platform }).catch(() => null);
+      if (res?.ok) {
+        restoreBtn.textContent = `✓ Restored ${res.count}`;
+        setTimeout(() => loadThreads(), 400);
+      } else {
+        restoreBtn.textContent = 'Failed — try again';
+        restoreBtn.disabled = false;
+      }
+    });
     return;
   }
 
@@ -3029,6 +3064,33 @@ document.getElementById('sp-map-undo-hide')?.addEventListener('click', () => {
   });
   const status = document.getElementById('sp-map-status');
   if (status) { status.textContent = 'Last hide undone!'; status.style.color = '#22c55e'; }
+});
+
+// v0.57.33: bulk-restore inbox threads that the old PROFILE_BLOCKED →
+// archived:true coupling silently nuked. Doesn't touch the block flag,
+// so the profiles stay blocked on the map; only the inbox visibility
+// flips back. Async because we await the SW count for the toast.
+document.getElementById('sp-restore-blocked-archived')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-restore-blocked-archived');
+  const status = document.getElementById('sp-map-status');
+  if (!btn) return;
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = 'Restoring…';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'UNARCHIVE_BLOCKED_THREADS' });
+    if (res?.ok) {
+      btn.textContent = `✓ Restored ${res.count}`;
+      if (status) { status.textContent = `Restored ${res.count} thread(s) to the inbox.`; status.style.color = '#22c55e'; }
+      // Refresh inbox so the user sees the restored threads immediately.
+      setTimeout(() => loadThreads(), 300);
+    } else {
+      btn.textContent = 'Failed — try again';
+    }
+  } catch (err) {
+    btn.textContent = 'Failed — try again';
+  }
+  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 3000);
 });
 
 document.getElementById('sp-map-clear-blocked')?.addEventListener('click', () => {
