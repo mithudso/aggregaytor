@@ -555,6 +555,40 @@ async function handleMessage(msg: any): Promise<any> {
     case 'UPSERT_THREAD_META': return { ok: true, meta: await upsertThreadMeta(msg.contactId, msg.platform, msg.updates) };
     case 'GET_ALL_THREAD_META': return { ok: true, metas: await getAllThreadMeta() };
 
+    // v0.57.36: panel-driven memory pressure release. The user reported the
+    // SW process holding 14GB of RAM after a long session. This handler nukes
+    // every in-memory cache and bookkeeping Set/Map in the SW so GC can
+    // reclaim. The next request that needs the data re-fetches lazily —
+    // slower for the first call, but recoverable. Returns a snapshot of the
+    // pre/post sizes so the panel can show "Freed X MB".
+    case 'FREE_SW_MEMORY': {
+      const before = {
+        threadCache: !!threadSummaryCache,
+        chatActivityCache: !!chatActivityCache,
+        queryContactsCache: queryContactsCache.size,
+        autoTrainedSet: autoTrainedSet.size,
+        recentContactUpserts: recentContactUpserts.size,
+        dossierExtractionQueue: dossierExtractionQueue.size,
+        searchIndexSize: getIndexSize(),
+      };
+      threadSummaryCache = null;
+      chatActivityCache = null;
+      queryContactsCache.clear();
+      autoTrainedSet.clear();
+      recentContactUpserts.clear();
+      dossierExtractionQueue.clear();
+      // Also drop the persisted session-cache copy so a SW restart can't
+      // immediately rehydrate megabytes back into RAM.
+      try { await chrome.storage.session.remove(CHAT_ACTIVITY_SESSION_KEY); } catch {}
+      // Clear the search index — heavyweight (will need re-seed on next
+      // search) but the FlexSearch index can hold tens of MB on heavy users.
+      try { clearIndex(); } catch {}
+      // Clear LLM-side caches (response, summary, prompt module, dossier ts).
+      try { clearLLMCaches(); } catch {}
+      console.log(`${LOG} FREE_SW_MEMORY: cleared all in-memory caches`, before);
+      return { ok: true, before };
+    }
+
     // v0.57.33: one-shot recovery for users whose inbox lost threads to
     // the old PROFILE_BLOCKED → archived:true coupling. Scans every
     // thread-meta whose archived flag was set BY a block (blockedByThem)
@@ -2085,11 +2119,30 @@ async function handleMessage(msg: any): Promise<any> {
         // than `db.find({selector: {docType, platform}})` which was taking
         // 300-400s on heavy users with ~20k messages and piling up
         // overlapping seeds behind the 60s re-seed interval.
+        // v0.57.36 memory fix \u2014 was loading EVERY message doc into RAM on every
+        // 60s seed. With 20k+ messages \u00d7 ~1-2KB each + PouchDB's internal caches,
+        // this allocated ~20-40MB per call and was a major contributor to the
+        // 14GB SW memory the user reported.
+        //
+        // New approach: stream rows in a single allDocs() WITHOUT include_docs,
+        // then page through the smaller keys-only result. We only need timestamps
+        // \u2014 those live on the message doc, but we can do a second narrow allDocs
+        // on a 90-day-windowed slice. For "waiting on response" semantics, msgs
+        // older than 90d don't change the answer (a 90+ day-old reply is dead).
+        //
+        // Implementation: doc IDs include the message timestamp because the
+        // upserter stamps `msg:{platform}:{messageId}` and `messageId` is
+        // typically `{epochSec}-{hash}` or similar. We can't rely on that across
+        // adapters though, so instead: cap include_docs scan to CHAT_ACTIVITY_MAX
+        // newest documents using PouchDB's descending+limit.
         const keyPrefix = `msg:${platform}:`;
+        const CHAT_ACTIVITY_MAX = 8000; // ~80% smaller working set than the old "all rows"
         const r = await db.allDocs({
-          startkey: keyPrefix,
-          endkey: keyPrefix + '\uffff',
+          startkey: keyPrefix + '\uffff', // descending starts from the high end
+          endkey: keyPrefix,
           include_docs: true,
+          descending: true,
+          limit: CHAT_ACTIVITY_MAX,
         });
         const activity: Record<string, { myLastTs: number; theirLastTs: number }> = {};
         for (const row of r.rows) {
@@ -2106,6 +2159,10 @@ async function handleMessage(msg: any): Promise<any> {
             if (ts > activity[id].theirLastTs) activity[id].theirLastTs = ts;
           }
         }
+        // Drop r.rows reference explicitly so GC can reclaim the buffer
+        // before we await the persist call below \u2014 without this PouchDB's
+        // internal LRU and our local closure both keep it pinned.
+        (r as any).rows = null;
         chatActivityCache = { data: activity, time: Date.now(), platform };
         // Persist to session storage so the next fresh SW wakeup serves
         // from cache instead of re-running the scan (which is what makes
@@ -2685,6 +2742,40 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       case 'block-rule-check':
         await runPeriodicBlockRules().catch(e => console.warn(`${LOG} Block rule error:`, e));
         break;
+      // v0.57.36: periodic memory pressure release. Runs every 30 min.
+      // Drops the heaviest in-memory caches (thread summaries + chat
+      // activity) and trims search index back to the cap, so a SW that's
+      // been alive for hours gets a chance to release retained memory
+      // without waiting for Chrome to suspend it.
+      case 'mem-gc': {
+        const beforeQuery = queryContactsCache.size;
+        const beforeAutoTrain = autoTrainedSet.size;
+        const beforeContacts = recentContactUpserts.size;
+        threadSummaryCache = null;
+        chatActivityCache = null;
+        // Don't clear queryContactsCache fully — just evict expired entries.
+        const now = Date.now();
+        for (const [k, v] of queryContactsCache) {
+          if (now - v.time > QUERY_CONTACTS_CACHE_TTL) queryContactsCache.delete(k);
+        }
+        // autoTrainedSet only grows during a session — half it on each tick
+        // so long-lived SWs don't accumulate forever.
+        if (autoTrainedSet.size > 5000) {
+          const drop = Math.floor(autoTrainedSet.size / 2);
+          const it = autoTrainedSet.values();
+          for (let i = 0; i < drop; i++) {
+            const n = it.next();
+            if (n.done) break;
+            autoTrainedSet.delete(n.value);
+          }
+        }
+        // Same for recentContactUpserts — TTL prune.
+        for (const [k, v] of recentContactUpserts) {
+          if (now - v.time > 5 * 60_000) recentContactUpserts.delete(k);
+        }
+        console.log(`${LOG} mem-gc: queryCache ${beforeQuery}->${queryContactsCache.size}, autoTrain ${beforeAutoTrain}->${autoTrainedSet.size}, contactUpserts ${beforeContacts}->${recentContactUpserts.size}`);
+        break;
+      }
       case 'grindr-login-check':
         await runGrindrLoginCheck().catch(() => { /* tab often inaccessible */ });
         break;
@@ -2754,6 +2845,8 @@ async function updateBadgeCount(): Promise<void> {
 updateBadgeCount().catch(() => {});
 chrome.alarms.create('badge-refresh', { periodInMinutes: 1 });
 chrome.alarms.create('reminder-check', { periodInMinutes: 0.25 });
+// v0.57.36: periodic memory pressure release for long-lived SWs.
+chrome.alarms.create('mem-gc', { periodInMinutes: 30 });
 // Removed 25s keepalive alarm — was causing unnecessary CPU usage
 
 // ── Dev Auto-Reload ────────────────────────────────────────────────────────

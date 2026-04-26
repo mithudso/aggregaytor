@@ -58,20 +58,35 @@ export async function getThreadSummaries(
     include_docs: true,
     limit: 5000,
   });
-  const messages = result.rows
-    .filter(r => r.doc && (r.doc as any).docType === 'message')
-    .map(r => r.doc as MessageDoc);
 
-  // Step 2: Group by contactId, counting unreads along the way
-  const contactMap = new Map<string, { messages: MessageDoc[]; unread: number }>();
-  for (const msg of messages) {
-    if (!contactMap.has(msg.contactId)) {
-      contactMap.set(msg.contactId, { messages: [], unread: 0 });
+  // v0.57.36 memory fix \u2014 instead of materialising the full messages[] array
+  // (5000 docs \u00d7 ~1-2KB) and a parallel contactMap that holds the SAME doc
+  // references in nested arrays, we walk rows once and only retain the
+  // last-seen message per contact + unread count. The full message body
+  // never escapes this loop, so the 5-10MB transient stays scoped to the
+  // function and is GC-eligible the moment we return.
+  const contactMap = new Map<string, { lastMessage: MessageDoc; unread: number }>();
+  for (const row of result.rows) {
+    const m = row.doc as MessageDoc | undefined;
+    if (!m || (m as any).docType !== 'message') continue;
+    const existing = contactMap.get(m.contactId);
+    if (!existing) {
+      contactMap.set(m.contactId, {
+        lastMessage: m,
+        unread: (!m.read && m.direction === 'in') ? 1 : 0,
+      });
+    } else {
+      // Track unread count
+      if (!m.read && m.direction === 'in') existing.unread++;
+      // Replace lastMessage if this one is newer
+      const aTs = new Date(existing.lastMessage.timestamp).getTime();
+      const bTs = new Date(m.timestamp).getTime();
+      if (bTs > aTs) existing.lastMessage = m;
     }
-    const entry = contactMap.get(msg.contactId)!;
-    entry.messages.push(msg);
-    if (!msg.read && msg.direction === 'in') entry.unread++;
   }
+  // Drop the rows reference so the 5000-doc allDocs buffer becomes GC-eligible
+  // before the contact lookup runs (which itself can allocate megabytes).
+  (result as any).rows = null;
 
   // Step 3: Batch-fetch all contacts in ONE allDocs call.
   // Contact IDs in PouchDB are `contact:{platform}:{userId}`, but message
@@ -95,15 +110,11 @@ export async function getThreadSummaries(
     }
   }
 
-  // Step 4: Build ThreadSummary for each contact
+  // Step 4: Build ThreadSummary for each contact (no per-contact sort —
+  // the contactMap already tracks the latest message per contact).
   const summaries: ThreadSummary[] = [];
-  for (const [contactId, { messages: msgs, unread }] of contactMap) {
-    const sorted = msgs.sort(
-      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-    );
-    const lastMessage = sorted[0];
+  for (const [contactId, { lastMessage, unread }] of contactMap) {
     const contact = contactLookup.get(contactId) || null;
-
     summaries.push({
       threadId: lastMessage.threadId || contactId,
       contactId,

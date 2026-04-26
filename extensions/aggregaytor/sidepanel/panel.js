@@ -3150,6 +3150,35 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
+// v0.57.36: panel-driven memory pressure release. Sends FREE_SW_MEMORY
+// to the SW which nukes every in-memory cache (thread summaries, chat
+// activity, query cache, autoTrained set, recent contact upserts,
+// dossier queue, search index, all LLM caches). Reports pre-clear sizes
+// so the user can see how much was held.
+document.getElementById('sp-free-memory')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-free-memory');
+  const status = document.getElementById('sp-map-status');
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Freeing…';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'FREE_SW_MEMORY' });
+    if (res?.ok) {
+      const b = res.before || {};
+      const summary = `Cleared: search ${b.searchIndexSize || 0}, query ${b.queryContactsCache || 0}, autoTrain ${b.autoTrainedSet || 0}, contactUpserts ${b.recentContactUpserts || 0}, dossierQ ${b.dossierExtractionQueue || 0}`;
+      btn.textContent = '✓ Freed';
+      if (status) { status.textContent = summary; status.style.color = '#22c55e'; }
+    } else {
+      btn.textContent = 'Failed';
+    }
+  } catch (err) {
+    btn.textContent = 'Failed';
+    if (status) { status.textContent = `Free failed: ${err?.message || err}`; status.style.color = '#f87171'; }
+  }
+  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 4000);
+});
+
 // v0.57.33: bulk-restore inbox threads that the old PROFILE_BLOCKED →
 // archived:true coupling silently nuked. Doesn't touch the block flag,
 // so the profiles stay blocked on the map; only the inbox visibility

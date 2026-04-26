@@ -194,14 +194,18 @@ function getProviderRPMUsed(provider: string): number {
 }
 
 function recordProviderRequest(provider: string): void {
-  const timestamps = providerRequestCounts.get(provider) || [];
-  timestamps.push(Date.now());
-  // Defensive ceiling: if we somehow record thousands of requests within 60s
-  // (bug or very high-RPM paid tier) the array could balloon. Trim to keep
-  // memory bounded; the RPM calculation still uses the 60s filter below.
-  if (timestamps.length > PROVIDER_TS_HARD_CAP) {
-    timestamps.splice(0, timestamps.length - PROVIDER_TS_HARD_CAP);
+  const now = Date.now();
+  let timestamps = providerRequestCounts.get(provider) || [];
+  // v0.57.36: prune-on-write so the array is always exactly the 60s window.
+  // Old code only pruned on read AND only after the 2000-entry hard cap was
+  // reached. On a chronically-misbehaving SW this could pin ~16KB per provider
+  // before the splice fired — small per provider but multiplied by lifetime
+  // accumulation across SW restarts the steady-state grew. Pruning on every
+  // write keeps the array at <= the actual RPM (typically <60).
+  if (timestamps.length > 0 && now - timestamps[0] > 60_000) {
+    timestamps = timestamps.filter(t => now - t < 60_000);
   }
+  timestamps.push(now);
   providerRequestCounts.set(provider, timestamps);
 }
 

@@ -784,7 +784,12 @@ export class SniffiesAdapter extends BaseAdapter {
               this.selfIds.detectFromPayload(profileData);
               const avatarUrl = this.resolveAvatarUrl(profileData, profileId);
               // Buffer contacts and flush every 5s to avoid flooding
-              // with 25+ chrome.runtime.sendMessage calls per second
+              // with 25+ chrome.runtime.sendMessage calls per second.
+              // v0.57.36: hard-cap the buffer at 1000 entries. The 5s flush
+              // SHOULD keep this small, but if the bridge or SW is slow to
+              // drain, the buffer could balloon on a busy map (hundreds of
+              // userJoined events per second). Drop oldest when over cap —
+              // newer presence data is more useful than ancient.
               this.userJoinedContactBuffer.push({
                 id: `sniffies:${profileId}`,
                 platform: 'sniffies' as const,
@@ -795,6 +800,9 @@ export class SniffiesAdapter extends BaseAdapter {
                 lastSeen: new Date().toISOString(),
                 metadata: {},
               });
+              if (this.userJoinedContactBuffer.length > 1000) {
+                this.userJoinedContactBuffer.splice(0, this.userJoinedContactBuffer.length - 1000);
+              }
               if (!this.userJoinedFlushTimer) {
                 this.userJoinedFlushTimer = setTimeout(() => {
                   if (this.userJoinedContactBuffer.length) {
