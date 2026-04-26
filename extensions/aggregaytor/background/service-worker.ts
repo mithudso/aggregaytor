@@ -561,6 +561,22 @@ async function handleMessage(msg: any): Promise<any> {
     // and clears the archived flag while keeping the block signal. Also
     // accepts an optional platform filter so the user can recover one
     // platform at a time. Returns the count un-archived.
+    // v0.57.35: panel-driven bulk refetch of the Sniffies inbox. Fans out
+    // to every sniffies.com tab; each bridge relays to MAIN-world adapter
+    // which hits the chat-data endpoint. Any captured deltas flow back
+    // through ADAPTER_MESSAGES → invalidateThreadCache → panel sees them
+    // on the next loadThreads. We just count tabs notified so the panel
+    // can show "Refetching N tab(s)…".
+    case 'REFETCH_SNIFFIES_INBOX': {
+      const tabs = await chrome.tabs.query({ url: 'https://sniffies.com/*' });
+      let pinged = 0;
+      for (const tab of tabs) {
+        if (!tab.id) continue;
+        try { await chrome.tabs.sendMessage(tab.id, { type: 'SNIFFIES_REFETCH_INBOX' }); pinged++; } catch {}
+      }
+      console.log(`${LOG} REFETCH_SNIFFIES_INBOX: pinged ${pinged} sniffies tab(s)`);
+      return { ok: true, tabs: pinged };
+    }
     case 'UNARCHIVE_BLOCKED_THREADS': {
       const platformFilter = msg.platform ? String(msg.platform) : '';
       const all = await getAllThreadMeta();

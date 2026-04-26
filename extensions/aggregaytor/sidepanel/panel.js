@@ -3101,6 +3101,55 @@ document.getElementById('sp-map-undo-hide')?.addEventListener('click', () => {
   if (status) { status.textContent = 'Last hide undone!'; status.style.color = '#22c55e'; }
 });
 
+// v0.57.35: panel-driven sanity check for "my Sniffies inbox looks
+// frozen" — pings every open sniffies.com tab via the SW, the bridge
+// relays to MAIN world which hits chat-data, and the patched fetch
+// pipes any new messages back through ADAPTER_MESSAGES. The result
+// count tells the user whether the adapter is actually capturing or
+// whether they genuinely just don't have new server-side activity.
+document.getElementById('sp-refetch-sniffies')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-refetch-sniffies');
+  const status = document.getElementById('sp-map-status');
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Refetching…';
+  if (status) { status.textContent = 'Pinging Sniffies tabs…'; status.style.color = '#93c5fd'; }
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'REFETCH_SNIFFIES_INBOX' });
+    if (!res?.ok) throw new Error('SW refused refetch');
+    if (res.tabs === 0) {
+      btn.textContent = 'No Sniffies tab open';
+      if (status) { status.textContent = 'Open sniffies.com in a tab and try again.'; status.style.color = '#fbbf24'; }
+    } else {
+      btn.textContent = `✓ Pinged ${res.tabs} tab${res.tabs === 1 ? '' : 's'}`;
+      if (status) { status.textContent = `Refetch dispatched. Watching for ADAPTER_MESSAGES (~3s)…`; status.style.color = '#93c5fd'; }
+      // After ~4s, refresh the inbox so any new messages render
+      setTimeout(() => loadThreads(), 4000);
+    }
+  } catch (err) {
+    btn.textContent = 'Failed';
+    if (status) { status.textContent = `Refetch failed: ${err?.message || err}`; status.style.color = '#f87171'; }
+  }
+  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 5000);
+});
+
+// Listen for the MAIN-world result so we can show the actual capture delta
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== 'SNIFFIES_REFETCH_RESULT') return;
+  const status = document.getElementById('sp-map-status');
+  if (!status) return;
+  const captured = Number(message.captured || 0);
+  if (captured > 0) {
+    status.textContent = `✓ Captured ${captured} new message${captured === 1 ? '' : 's'} (lifetime: ${message.totalLifetime}). Inbox refreshing.`;
+    status.style.color = '#22c55e';
+    loadThreads();
+  } else {
+    status.textContent = `Adapter ran (lifetime captures: ${message.totalLifetime}) but no NEW messages came back. The Sniffies API itself returned nothing new — your inbox is genuinely up to date.`;
+    status.style.color = '#fbbf24';
+  }
+});
+
 // v0.57.33: bulk-restore inbox threads that the old PROFILE_BLOCKED →
 // archived:true coupling silently nuked. Doesn't touch the block flag,
 // so the profiles stay blocked on the map; only the inbox visibility

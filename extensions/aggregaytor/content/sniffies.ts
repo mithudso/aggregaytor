@@ -175,6 +175,37 @@ window.addEventListener('message', (event) => {
     const pid = event.data.profileId;
     if (pid) adapter.forceRefreshConversation(pid).catch(() => {});
   }
+  if (event.data.type === '__aggregaytor_refetch_inbox') {
+    // v0.57.35: side-panel-triggered bulk refetch. The chat-data endpoint
+    // returns ALL DMs in one shot, no profileId required. Same-origin
+    // fetch goes through our patched window.fetch → parseApiResponse
+    // pipeline, so any new messages get emitted as ADAPTER_MESSAGES via
+    // the existing event flow. We respond with the delta in captureCount
+    // so the panel can confirm whether the adapter is actually capturing.
+    (async () => {
+      const before = (adapter as any).captureCount || 0;
+      try {
+        // forceRefreshConversation gates on a hex profileId, so we bypass
+        // it and hit the endpoint directly — patched fetch still intercepts.
+        const auth = (window as any).__aggregaytor_captured_auth_sniffies || {};
+        await fetch('https://sniffies.com/api/v2/post-authentication/chat-data', {
+          method: 'GET',
+          headers: { Accept: 'application/json', ...auth },
+          credentials: 'include',
+        }).catch(() => {});
+      } catch {}
+      // Allow parseApiResponse to finish + emit before we read the counter.
+      await new Promise(r => setTimeout(r, 2000));
+      const after = (adapter as any).captureCount || 0;
+      window.dispatchEvent(new CustomEvent('__aggregaytor_message', {
+        detail: {
+          type: 'SNIFFIES_REFETCH_RESULT',
+          captured: after - before,
+          totalLifetime: after,
+        },
+      }));
+    })();
+  }
 });
 
 // ── Auto-Send Mechanism ────────────────────────────────────────────────────

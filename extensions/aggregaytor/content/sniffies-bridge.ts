@@ -364,6 +364,17 @@ try {
       sendResponse({ ok: true });
       return true;
     }
+    // v0.57.35: side-panel-triggered bulk inbox refetch. Side panel sends
+    // SNIFFIES_REFETCH_INBOX → SW broadcasts to every sniffies.com tab →
+    // bridge here postMessages to MAIN world → adapter hits chat-data and
+    // emits any newly-seen DMs through ADAPTER_MESSAGES. Result count
+    // (SNIFFIES_REFETCH_RESULT) bubbles back to the panel via the existing
+    // __aggregaytor_message relay below.
+    if (message.type === 'SNIFFIES_REFETCH_INBOX') {
+      window.postMessage({ type: '__aggregaytor_refetch_inbox' }, '*');
+      sendResponse({ ok: true });
+      return true;
+    }
     if (message.type === 'TEXT_EXPANDER_SETTINGS') {
       window.dispatchEvent(new CustomEvent('__aggregaytor_text_expander_settings', {
         detail: { substitutions: message.substitutions },
