@@ -868,13 +868,27 @@ function injectProfileActions(contactId: string, platform: string): void {
 
   el.innerHTML = `
     <button class="pa-btn danger pa-hide-btn" ${isBlocked ? 'disabled' : ''}>${isBlocked ? '🚫 Hidden' : '🚫 Hide'}</button>
-    <button class="pa-btn pa-notes-btn">📝 Notes</button>
+    <button class="pa-btn pa-notes-btn" title="Toggle notes editor">📝 Notes</button>
+    <button class="pa-btn pa-reminder-btn" title="Set a reminder to follow up with this person">⏰ Remind</button>
+    <button class="pa-btn pa-intro-btn" title="Send a random AI-generated intro after a 5-15s human-like delay">🎲 Intro</button>
     <div class="pa-stars">
       <button class="pa-star" data-star="1">★</button>
       <button class="pa-star" data-star="2">★</button>
       <button class="pa-star" data-star="3">★</button>
       <button class="pa-star" data-star="4">★</button>
       <button class="pa-star" data-star="5">★</button>
+    </div>
+    <div class="pa-reminder-wrap" style="display:none;width:100%;margin-top:4px">
+      <input type="text" class="pa-notes-input pa-reminder-note" placeholder="Reminder note..." maxlength="200">
+      <select class="pa-notes-input pa-reminder-when" style="margin-top:4px">
+        <option value="3600000">In 1 hour</option>
+        <option value="14400000">In 4 hours</option>
+        <option value="86400000" selected>Tomorrow</option>
+        <option value="259200000">In 3 days</option>
+        <option value="604800000">In 1 week</option>
+      </select>
+      <button class="pa-btn pa-reminder-save" style="margin-top:4px">Save reminder</button>
+      <div class="pa-status pa-reminder-status"></div>
     </div>
     <div class="pa-notes-wrap" style="display:none">
       <textarea class="pa-notes-input" placeholder="Notes about this person..." maxlength="10000"></textarea>
@@ -927,6 +941,48 @@ function injectProfileActions(contactId: string, platform: string): void {
       const nr = r === cur ? 0 : r;
       stars.forEach((s, i) => s.classList.toggle('active', i < nr));
       chrome.runtime.sendMessage({ type: 'SET_RATING', contactId, platform, rating: nr }).catch(() => {});
+    });
+  });
+
+  // ── Reminder toggle + saver ──
+  const remWrap = el.querySelector('.pa-reminder-wrap') as HTMLElement;
+  const remInput = el.querySelector('.pa-reminder-note') as HTMLInputElement;
+  const remWhen = el.querySelector('.pa-reminder-when') as HTMLSelectElement;
+  const remStatus = el.querySelector('.pa-reminder-status') as HTMLElement;
+  el.querySelector('.pa-reminder-btn')!.addEventListener('click', () => {
+    remWrap.style.display = remWrap.style.display === 'none' ? '' : 'none';
+    if (remWrap.style.display !== 'none') remInput.focus();
+  });
+  el.querySelector('.pa-reminder-save')!.addEventListener('click', () => {
+    const offsetMs = parseInt(remWhen.value || '86400000', 10);
+    const dueAt = new Date(Date.now() + offsetMs).toISOString();
+    const note = remInput.value.trim() || `Follow up with profile`;
+    chrome.runtime.sendMessage({
+      type: 'CREATE_REMINDER', contactId, platform, note, dueAt,
+    }).then(() => {
+      remStatus.textContent = `Reminder set for ${new Date(dueAt).toLocaleString()}`;
+      setTimeout(() => { remStatus.textContent = ''; remWrap.style.display = 'none'; }, 2000);
+    }).catch(() => {
+      remStatus.textContent = 'Failed to save reminder';
+    });
+  });
+
+  // ── Random Intro button ──
+  // Fires SEND_GREETING which generates an LLM intro and queues it with a
+  // randomised 5-15s delay (human-like timing). The SW handles the actual
+  // platform send via sendMessageToTab → SEND_AUTO_RESPONSE relay.
+  const introBtn = el.querySelector('.pa-intro-btn') as HTMLButtonElement;
+  introBtn.addEventListener('click', () => {
+    const orig = introBtn.textContent || '';
+    introBtn.disabled = true;
+    introBtn.textContent = '🎲 Sending…';
+    chrome.runtime.sendMessage({ type: 'SEND_GREETING', contactId, platform }).then((res: any) => {
+      const delaySec = Math.round(((res?.delay) || 0) / 1000);
+      introBtn.textContent = `✓ Queued (${delaySec}s)`;
+      setTimeout(() => { introBtn.textContent = orig; introBtn.disabled = false; }, 3000);
+    }).catch(() => {
+      introBtn.textContent = '✗ Failed';
+      setTimeout(() => { introBtn.textContent = orig; introBtn.disabled = false; }, 2000);
     });
   });
 
@@ -1016,9 +1072,13 @@ function showTopFilterBar(): void {
   ];
   // "Waiting on response" filters — hide profiles whose most recent message
   // is mine (outbound). The marker reappears the moment they reply.
+  // Plus the v0.57.29 "platform inactivity" filter: hide markers whose last-
+  // active timestamp is older than 2h. Profiles with no last-active signal
+  // are LEFT VISIBLE so unknowns aren't penalised.
   const chatHistory = [
     { key: 'hideRecentChats', label: '⏳ <24h' },
     { key: 'hideAnyChats', label: '⏳ Ghosted' },
+    { key: 'hideInactiveOver2h', label: '🟢 ≤2h' },
   ];
 
   const bar = document.createElement('div');
@@ -1029,11 +1089,19 @@ function showTopFilterBar(): void {
     <span class="fb-label">Filter${activeCount ? ` (${activeCount})` : ''}:</span>
     ${positions.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}>${p.label}</label>`).join('')}
     <span class="fb-sep"></span>
-    ${chatHistory.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}" title="${p.key === 'hideRecentChats' ? 'Hide profiles you\'ve chatted with in the last 24h, in either direction. Use this to declutter the map of people you\'re already talking to.' : 'Hide profiles where your last message went unanswered (waiting on their reply), any age. They reappear the moment they respond.'}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}><span class="fb-chip-label" data-chip="${p.key}">${p.label}</span></label>`).join('')}
+    ${chatHistory.map(p => {
+      const tip = p.key === 'hideRecentChats'
+        ? 'Hide profiles you\'ve chatted with in the last 24h, in either direction. Use this to declutter the map of people you\'re already talking to.'
+        : p.key === 'hideAnyChats'
+          ? 'Hide profiles where your last message went unanswered (waiting on their reply), any age. They reappear the moment they respond.'
+          : 'Hide markers whose last platform activity is more than 2 hours ago. Profiles with no last-active signal are left visible — the partials API backfills timestamps as the map loads.';
+      return `<label class="fb-chip ${settings[p.key] ? 'on' : ''}" title="${tip}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}><span class="fb-chip-label" data-chip="${p.key}">${p.label}</span></label>`;
+    }).join('')}
     <span class="fb-sep"></span>
     ${extras.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}>${p.label}</label>`).join('')}
     <span class="fb-sep"></span>
     <button class="fb-undo" title="Undo last hide">Undo</button>
+    <button class="fb-undo fb-settings" title="Open full filter settings (text terms, position highlights, save/restore)">⚙ Settings</button>
     <span class="fb-hide-count">${blockedCount} hidden</span>
     <button class="fb-close" title="Close filter bar">✕</button>
   `;
@@ -1084,6 +1152,21 @@ function showTopFilterBar(): void {
     }, 200);
   });
 
+  // Settings — bring the full floating filter panel to the foreground.
+  // The panel has all the controls the top bar doesn't: position highlights,
+  // text term editors, save/restore, undo. We re-show it (idempotent) and
+  // un-collapse it so it lands open even if the user had minimised it.
+  bar.querySelector('.fb-settings')!.addEventListener('click', () => {
+    showMapFilterPanel();
+    const fp = document.getElementById(FP_ID);
+    if (fp) {
+      fp.classList.remove('collapsed');
+      try { localStorage.setItem('aggregaytor_fp_collapsed', 'false'); } catch {}
+      // Pop above other UI
+      fp.style.zIndex = '99999';
+    }
+  });
+
   // Close bar
   bar.querySelector('.fb-close')!.addEventListener('click', () => {
     bar.remove();
@@ -1112,10 +1195,15 @@ function showTopFilterBar(): void {
     if (chipEver) {
       chipEver.textContent = s.hiddenByWaitingEver > 0 ? `⏳ Ghosted (${s.hiddenByWaitingEver})` : '⏳ Ghosted';
     }
+    const chipInactive = bar.querySelector('[data-chip="hideInactiveOver2h"]');
+    if (chipInactive) {
+      chipInactive.textContent = s.hiddenByInactive > 0 ? `🟢 ≤2h (${s.hiddenByInactive})` : '🟢 ≤2h';
+    }
     // Also update the right-side "N hidden" counter to show the total
-    // across all filter types (block + text + attitude + waiting).
+    // across all filter types (block + text + attitude + waiting + inactive).
     const total = (s.hiddenByBlock || 0) + (s.hiddenByText || 0) + (s.hiddenByAttitude || 0)
-                + (s.hiddenByWaiting24h || 0) + (s.hiddenByWaitingEver || 0);
+                + (s.hiddenByWaiting24h || 0) + (s.hiddenByWaitingEver || 0)
+                + (s.hiddenByInactive || 0);
     const countEl = bar.querySelector('.fb-hide-count');
     if (countEl) countEl.textContent = `${total} hidden${s.waiting ? ` · ${s.waiting} waiting` : ''}`;
   };
@@ -1444,10 +1532,14 @@ function checkUrlChange() {
     // per-profile inside the adapter, so rapid SPA navigation is safe.
     // postMessage crosses the ISOLATED→MAIN world boundary.
     window.postMessage({ type: '__aggregaytor_refresh_conversation', profileId }, '*');
-    // Show floating quick-action panel on the page
-    showFloatingPanel(contactId, 'sniffies');
-    // Also inject actions directly into the profile DOM (more reliable than
-    // the floating panel). Delay to allow Angular to render the profile view.
+    // v0.57.30: dropped the showFloatingPanel(contactId, 'sniffies') call —
+    // the inline profile-action bar (injectProfileActions below) now carries
+    // hide/notes/stars/reminder/intro in a row anchored to the profile DOM
+    // rather than a draggable overlay. Floating panel is still defined and
+    // used by other platforms (Grindr SHOW_FLOATING_PANEL relay) but no
+    // longer auto-shown on Sniffies profile navigation.
+    // Inject actions directly into the profile DOM. Delay to allow Angular
+    // to render the profile view.
     // Cancel any pending retries from a previous profile — otherwise we'd
     // paint actions for stale contacts over the current profile container.
     clearProfileActionTimers();
@@ -1732,6 +1824,79 @@ function seedChatTimestamps(): void {
 }
 setTimeout(seedChatTimestamps, 1500);      // initial seed after 1.5s
 setInterval(seedChatTimestamps, 60_000);    // refresh every 60s
+
+// ── Random Intro Gestures (middle-click / Shift+right-click) ─────────────
+// On a Sniffies chat window, middle-click or Shift+right-click anywhere
+// inside the chat composer area sends a random AI-generated intro after
+// the same 5–15s human-like delay the 🎲 Intro button uses. The gesture
+// only fires when:
+//   1. We're on a /profile/{id}/chat URL (so we have a target contact)
+//   2. The click target is inside a chat-input region — placeholder text
+//      "Say something…" or a textarea/contenteditable in the composer.
+// Outside that region the events fall through and any existing handlers
+// (Alt+Shift+right-click for phrase capture, native context menu) keep
+// working. This is the trackpad-friendly equivalent of middle-click.
+function isChatComposerTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  // Direct match: Sniffies' chat input has placeholder "Say something…"
+  if (target.matches?.('textarea, [contenteditable="true"], input[type="text"]')) {
+    const ph = target.getAttribute('placeholder') || '';
+    if (/say something/i.test(ph)) return true;
+  }
+  // Ancestor match: any chat-composer wrapper
+  const composer = target.closest?.(
+    '[class*="chat-composer" i], [class*="composer" i], [class*="message-input" i], ' +
+    '[class*="chat-input" i], [class*="say-something" i]'
+  );
+  if (composer) return true;
+  // Fallback: text "Say something" anywhere in an ancestor's placeholder
+  let node: HTMLElement | null = target;
+  for (let i = 0; node && i < 6; i++, node = node.parentElement) {
+    const ph = node.getAttribute?.('placeholder') || '';
+    if (/say something/i.test(ph)) return true;
+  }
+  return false;
+}
+
+function dispatchRandomIntroFromGesture(): boolean {
+  const match = location.pathname.match(/\/profile\/([0-9a-f]{6,})/i);
+  if (!match) return false;
+  const contactId = `sniffies:${match[1].toLowerCase()}`;
+  try {
+    chrome.runtime.sendMessage({ type: 'SEND_GREETING', contactId, platform: 'sniffies' }).then((res: any) => {
+      const delaySec = Math.round(((res?.delay) || 0) / 1000);
+      const toast = document.createElement('div');
+      toast.textContent = `🎲 Intro queued${delaySec ? ` (~${delaySec}s)` : ''}`;
+      toast.style.cssText = 'position:fixed;bottom:80px;right:20px;z-index:999999;background:rgba(34,197,94,0.95);color:#fff;padding:8px 14px;border-radius:8px;font-family:system-ui,sans-serif;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,0.4);transition:opacity 0.3s;';
+      toast.setAttribute('role', 'status');
+      document.body.appendChild(toast);
+      setTimeout(() => { toast.style.opacity = '0'; }, 1800);
+      setTimeout(() => toast.remove(), 2200);
+    }).catch(() => {});
+  } catch {}
+  return true;
+}
+
+document.addEventListener('auxclick', (e) => {
+  if (e.button !== 1) return; // middle-click only
+  if (!contextValid || !checkContext()) return;
+  if (!isChatComposerTarget(e.target)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  dispatchRandomIntroFromGesture();
+}, true);
+
+document.addEventListener('contextmenu', (e) => {
+  // Shift+right-click — but NOT Alt+Shift (which is the phrase-capture
+  // gesture handled by the listener below). The Alt check keeps the two
+  // gestures from colliding.
+  if (!e.shiftKey || e.altKey) return;
+  if (!contextValid || !checkContext()) return;
+  if (!isChatComposerTarget(e.target)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  dispatchRandomIntroFromGesture();
+}, true);
 
 // ── Quick Phrase Capture (Alt+Shift+Right-Click) ──────────────────────────
 // When the user Alt+Shift+right-clicks in a chat, capture selected text
