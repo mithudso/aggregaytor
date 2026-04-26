@@ -97,8 +97,58 @@ function checkContext(): boolean {
     if (contextValid) {
       console.warn(`${LOG} Extension context invalidated — bridge disabled until page reload`);
       contextValid = false;
+      shutdownBackgroundTimers();
     }
     return false;
+  }
+}
+
+// v0.57.32: chrome.runtime.sendMessage can THROW SYNCHRONOUSLY when the
+// extension is reloaded mid-session — that throw bypasses any .catch()
+// chained onto the returned promise and surfaces as
+// "Uncaught Error: Extension context invalidated".
+//
+// safeSendMessage wraps the call so:
+//   1. Pre-flight: if context is already known dead, reject immediately
+//      (no attempt → no throw → no Sentry-style noise).
+//   2. Sync throw: caught and turned into a rejected promise, plus we
+//      flip contextValid so subsequent calls short-circuit.
+//   3. Async rejections (channel-closed, no-receiver, context-lost) flow
+//      through normally; callers decide whether to retry or give up.
+//
+// "Receiving end does not exist" / "Could not establish connection" —
+// these fire when the SW is asleep AND has no other tab keeping it warm,
+// or when the extension was reloaded but the SW handler hasn't bound yet.
+// They're transient by definition; treat them as cache-miss equivalents.
+function safeSendMessage(message: any): Promise<any> {
+  if (!contextValid) {
+    return Promise.reject(new Error('Context invalidated'));
+  }
+  try {
+    const p = chrome.runtime.sendMessage(message);
+    // Some old polyfills returned undefined; normalise to a Promise.
+    return p && typeof (p as any).then === 'function' ? p as Promise<any> : Promise.resolve(p);
+  } catch (err) {
+    // Sync throw — almost always context invalidation. Flip the flag so
+    // subsequent calls short-circuit without re-throwing.
+    contextValid = false;
+    shutdownBackgroundTimers();
+    return Promise.reject(err as Error);
+  }
+}
+
+// Background timers (intervals) keep firing even after the extension is
+// reloaded. Once contextValid flips to false they all become dead-letter
+// CPU, and any sendMessage they retry will throw again. Track them in a
+// registry so checkContext() / safeSendMessage() can clear them once.
+const _backgroundTimers: ReturnType<typeof setInterval>[] = [];
+function registerBackgroundTimer(id: ReturnType<typeof setInterval>): void {
+  _backgroundTimers.push(id);
+}
+function shutdownBackgroundTimers(): void {
+  while (_backgroundTimers.length) {
+    const id = _backgroundTimers.pop();
+    if (id != null) clearInterval(id);
   }
 }
 
@@ -1692,12 +1742,17 @@ function scrapeChatPanel() {
     console.log(`[Aggregaytor:Bridge:Sniffies] Chat panel scraped: ${contacts.length} contacts, ${messages.length} messages from ${rows.length} rows`);
   }
 
-  // Send scraped contacts and messages to the service worker
+  // Send scraped contacts and messages to the service worker. safeSendMessage
+  // catches the sync throw that fires when the extension is reloaded mid-
+  // session (the bridge interval keeps running in the orphaned page until
+  // the user refreshes — without the wrap, the throw escapes here as the
+  // top-level "Uncaught Error: Extension context invalidated" we saw on
+  // sniffies chat pages).
   if (contacts.length) {
-    chrome.runtime.sendMessage({ type: 'ADAPTER_CONTACTS', platform: 'sniffies', payload: contacts }).catch(() => {});
+    safeSendMessage({ type: 'ADAPTER_CONTACTS', platform: 'sniffies', payload: contacts }).catch(() => {});
   }
   if (messages.length) {
-    chrome.runtime.sendMessage({ type: 'ADAPTER_MESSAGES', platform: 'sniffies', payload: messages }).catch(() => {});
+    safeSendMessage({ type: 'ADAPTER_MESSAGES', platform: 'sniffies', payload: messages }).catch(() => {});
   }
 }
 
@@ -1711,7 +1766,7 @@ setTimeout(() => scrapeChatPanel(), 3000);
 // any route change. Periodic scraping is the only way to catch them promptly.
 // 15s is a balance between freshness and CPU — the scrape itself is ~1-3ms
 // per row and a typical Recents panel has <30 rows.
-setInterval(() => scrapeChatPanel(), 15_000);
+registerBackgroundTimer(setInterval(() => scrapeChatPanel(), 15_000));
 
 // Additionally, watch for new chat-list-vertical-item elements appearing in
 // the DOM and re-scrape immediately. This covers the case where a new
@@ -1745,7 +1800,7 @@ try {
 // navigation) does NOT fire any native DOM event. popstate only fires for
 // browser Back/Forward buttons. Polling is the only reliable way to detect
 // when the user clicks a profile or opens a conversation within the SPA.
-setInterval(checkUrlChange, 3000);
+registerBackgroundTimer(setInterval(checkUrlChange, 3000));
 window.addEventListener('popstate', checkUrlChange);
 
 // Show top filter bar on initial load if we're on the map view
@@ -1782,7 +1837,7 @@ function seedChatTimestamps(): void {
   }
   seedInFlight = true;
   const t0 = performance.now();
-  chrome.runtime.sendMessage({ type: 'GET_CHAT_ACTIVITY', platform: 'sniffies' }).then((res: any) => {
+  safeSendMessage({ type: 'GET_CHAT_ACTIVITY', platform: 'sniffies' }).then((res: any) => {
     if (!res?.ok) {
       console.warn(`${LOG} GET_CHAT_ACTIVITY failed:`, res?.error || 'no response');
       return;
@@ -1817,26 +1872,35 @@ function seedChatTimestamps(): void {
       _lastSeedProfileCount = profileCount;
     }
   }).catch((err: Error) => {
-    // MV3 lifecycle race: the SW often gets suspended mid-await on the
-    // PouchDB allDocs scan that GET_CHAT_ACTIVITY drives. Chrome closes
-    // the message channel and we get this exact error text. The data
-    // itself is fine — the SW wakes back up on its own and the next
-    // call hits the 30s SW-side cache. So we treat this specific error
-    // as a transient: silent retry after 2s instead of a console.warn.
+    // Three transient patterns — all benign, all self-heal on the next tick:
+    //   1. "message channel closed"        — SW suspended mid-allDocs scan.
+    //   2. "Receiving end does not exist"  — SW asleep with no other warm tab.
+    //   3. "Could not establish connection" — same family as #2 on Chromium.
+    // For these we silent-retry once after 2s (faster than the 60s interval).
+    //
+    // One PERMANENT pattern: "Extension context invalidated". The page-side
+    // bridge is now orphaned and no chrome.runtime call will work until the
+    // user refreshes the page. shutdownBackgroundTimers() stops the seed
+    // interval so we don't keep firing dead-letter calls.
     const msg = String(err?.message || err || '');
-    const channelClosed = /message channel closed/i.test(msg);
-    if (channelClosed) {
-      // One quick retry; if that also fails, the 60s interval will pick it up.
-      setTimeout(() => { if (!seedInFlight) seedChatTimestamps(); }, 2000);
-    } else {
-      console.warn(`${LOG} seedChatTimestamps error:`, msg);
+    const transient = /(message channel closed|Receiving end does not exist|Could not establish connection)/i.test(msg);
+    const permanent = /Extension context invalidated|Context invalidated/i.test(msg);
+    if (permanent) {
+      contextValid = false;
+      shutdownBackgroundTimers();
+      return; // silent — checkContext already logged the one-time warning
     }
+    if (transient) {
+      setTimeout(() => { if (contextValid && !seedInFlight) seedChatTimestamps(); }, 2000);
+      return;
+    }
+    console.warn(`${LOG} seedChatTimestamps error:`, msg);
   }).finally(() => {
     seedInFlight = false;
   });
 }
 setTimeout(seedChatTimestamps, 1500);      // initial seed after 1.5s
-setInterval(seedChatTimestamps, 60_000);    // refresh every 60s
+registerBackgroundTimer(setInterval(seedChatTimestamps, 60_000));    // refresh every 60s
 
 // ── Random Intro Gestures (middle-click / Shift+right-click) ─────────────
 // On a Sniffies chat window, middle-click or Shift+right-click anywhere
