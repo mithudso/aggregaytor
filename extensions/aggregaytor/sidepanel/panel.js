@@ -111,6 +111,13 @@ function debouncedLoadDrafts() {
   _draftsTimer = setTimeout(() => loadDrafts(), 2000);
 }
 
+// v0.57.34: ACTIVE_PROFILE_CHANGED debounce state — see the listener
+// at the bottom of the file. Holds the most-recent contactId from a
+// burst of broadcasts and the timer that will eventually fire openThread
+// once the burst quiets down.
+let _apcDebounceTimer = null;
+let _apcDebounceTarget = '';
+
 // ── Inbox ───────────────────────────────────────────────────────────────────
 
 async function loadThreads() {
@@ -636,7 +643,14 @@ async function handleAction(action, contactId, platform) {
 
 // ── Thread detail ───────────────────────────────────────────────────────────
 
-async function openThread(contactId, platform, displayName) {
+async function openThread(contactId, platform, displayName, opts = {}) {
+  // v0.57.34: opts.suppressNavigate skips the NAVIGATE_TO_CONVERSATION
+  // message back to the SW. Used by the ACTIVE_PROFILE_CHANGED listener
+  // because the platform tab IS the source of truth for that event —
+  // navigating it back would be a redundant SPA_NAVIGATE → popstate →
+  // checkUrlChange → ACTIVE_PROFILE_CHANGED loop. The user-initiated
+  // path (clicking a thread in the inbox) still navigates so the
+  // platform tab follows.
   // #13 Save scroll position before opening thread
   const threadList = document.getElementById('thread-list');
   savedScrollTop = threadList.scrollTop;
@@ -677,7 +691,7 @@ async function openThread(contactId, platform, displayName) {
 
   // Navigate parent tab (unless auto-navigate is disabled or contact is deleted/blocked)
   const threadMeta = allThreadMeta.get(contactId) || {};
-  if (prefAutoNavigate && !threadMeta.blockedByThem && contactId !== 'sniffies:global-chat') {
+  if (prefAutoNavigate && !threadMeta.blockedByThem && contactId !== 'sniffies:global-chat' && !opts.suppressNavigate) {
     chrome.runtime.sendMessage({ type: 'NAVIGATE_TO_CONVERSATION', platform, contactId }).catch(() => {});
   }
   chrome.runtime.sendMessage({ type: 'MARK_THREAD_READ', threadId: contactId }).catch(() => {});
@@ -1548,16 +1562,37 @@ chrome.runtime.onMessage.addListener((message) => {
     if (message.contactId) {
       chrome.runtime.sendMessage({ type: 'MARK_THREAD_READ', threadId: message.contactId }).catch(() => {});
     }
-    // Auto-open the conversation in the side panel when the user opens
-    // a profile or chat on the platform site. This keeps the side panel
-    // in sync with what's on screen.
+    // v0.57.34: debounce + suppressNavigate to break the ping-pong loop.
+    //
+    // Old flow that caused the user-reported "panel keeps switching
+    // between two profiles" bug:
+    //   click profile B on map
+    //     → bridge polls URL → ACTIVE_PROFILE_CHANGED(B) → SW → panel
+    //     → panel openThread(B) → NAVIGATE_TO_CONVERSATION(B)
+    //     → SW SPA_NAVIGATE(B) → bridge pushState + dispatch popstate
+    //     → bridge checkUrlChange runs again, sometimes catching a
+    //       transitional URL state, fires ACTIVE_PROFILE_CHANGED for
+    //       the OLD profile → panel opens OLD → loop
+    //
+    // Two guards:
+    //   (a) suppressNavigate — when the bridge is already on the right
+    //       URL there's no reason to bounce a navigation back at it.
+    //   (b) 250ms debounce per contactId — collapses the burst of polls
+    //       Sniffies' SPA emits during a profile click into a single
+    //       openThread call.
     if (message.contactId && message.contactId !== 'sniffies:global-chat') {
       const platform = message.platform || message.contactId.split(':')[0] || '';
-      const existingThread = currentThread?.contactId;
-      // Only auto-open if we're in inbox view OR viewing a different thread
-      if (!existingThread || existingThread !== message.contactId) {
-        openThread(message.contactId, platform, '');
-      }
+      const target = message.contactId;
+      // Skip same-profile re-broadcasts entirely
+      if (currentThread?.contactId === target) return;
+      // Debounce identical IDs across the 250ms burst window
+      if (_apcDebounceTimer) clearTimeout(_apcDebounceTimer);
+      _apcDebounceTarget = target;
+      _apcDebounceTimer = setTimeout(() => {
+        _apcDebounceTimer = null;
+        if (currentThread?.contactId === _apcDebounceTarget) return;
+        openThread(_apcDebounceTarget, platform, '', { suppressNavigate: true });
+      }, 250);
     } else {
       // No specific profile — go back to inbox if we're in a thread
       if (document.body.classList.contains('view-inbox')) loadThreads();
