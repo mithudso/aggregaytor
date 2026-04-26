@@ -1817,7 +1817,20 @@ function seedChatTimestamps(): void {
       _lastSeedProfileCount = profileCount;
     }
   }).catch((err: Error) => {
-    console.warn(`${LOG} seedChatTimestamps error:`, err?.message || err);
+    // MV3 lifecycle race: the SW often gets suspended mid-await on the
+    // PouchDB allDocs scan that GET_CHAT_ACTIVITY drives. Chrome closes
+    // the message channel and we get this exact error text. The data
+    // itself is fine — the SW wakes back up on its own and the next
+    // call hits the 30s SW-side cache. So we treat this specific error
+    // as a transient: silent retry after 2s instead of a console.warn.
+    const msg = String(err?.message || err || '');
+    const channelClosed = /message channel closed/i.test(msg);
+    if (channelClosed) {
+      // One quick retry; if that also fails, the 60s interval will pick it up.
+      setTimeout(() => { if (!seedInFlight) seedChatTimestamps(); }, 2000);
+    } else {
+      console.warn(`${LOG} seedChatTimestamps error:`, msg);
+    }
   }).finally(() => {
     seedInFlight = false;
   });

@@ -112,6 +112,30 @@ const QUERY_CONTACTS_CACHE_MAX = 20;
 
 let chatActivityCache: { data: Record<string, { myLastTs: number; theirLastTs: number }>; time: number; platform: string } | null = null;
 const CHAT_ACTIVITY_CACHE_TTL = 30_000;
+// v0.57.31: mirror chatActivityCache into chrome.storage.session so a
+// freshly-respawned SW serves the bridge's seed call instantly instead
+// of re-running the 5000-doc allDocs scan that often triggers Chrome to
+// suspend the SW mid-await ("message channel closed" on the bridge).
+// session storage persists for the browser session but not across
+// restarts, which matches our cache semantics.
+const CHAT_ACTIVITY_SESSION_KEY = 'aggregaytor_chat_activity_cache_v1';
+async function persistChatActivityCache(): Promise<void> {
+  if (!chatActivityCache) return;
+  try { await chrome.storage.session.set({ [CHAT_ACTIVITY_SESSION_KEY]: chatActivityCache }); } catch {}
+}
+async function rehydrateChatActivityCache(): Promise<void> {
+  if (chatActivityCache) return;
+  try {
+    const got = await chrome.storage.session.get(CHAT_ACTIVITY_SESSION_KEY);
+    const stored = got?.[CHAT_ACTIVITY_SESSION_KEY];
+    if (stored && typeof stored === 'object' && stored.data && typeof stored.time === 'number') {
+      chatActivityCache = stored;
+    }
+  } catch {}
+}
+// Kick off rehydration at SW startup. Fire-and-forget — by the time the
+// first GET_CHAT_ACTIVITY arrives, the cache is usually already in memory.
+rehydrateChatActivityCache().catch(() => {});
 
 function safeNotify(id: string, opts: chrome.notifications.NotificationOptions): void {
   try {
@@ -1995,6 +2019,11 @@ async function handleMessage(msg: any): Promise<any> {
       const end = swPerfTrack('getChatActivity');
       try {
         const platform = String(msg.platform || 'sniffies');
+        // Try the in-memory cache first; if absent (fresh SW), pull from
+        // chrome.storage.session. This is the v0.57.31 fix for the
+        // "message channel closed" warn on the bridge — the heavy scan
+        // only fires when the persisted cache is also stale.
+        if (!chatActivityCache) await rehydrateChatActivityCache();
         // Cache for 30s — the bridge re-seeds every 60s, so a 30s cache
         // means at most one real PouchDB scan per seed cycle while still
         // picking up newly-stored messages within half a minute.
@@ -2032,6 +2061,10 @@ async function handleMessage(msg: any): Promise<any> {
           }
         }
         chatActivityCache = { data: activity, time: Date.now(), platform };
+        // Persist to session storage so the next fresh SW wakeup serves
+        // from cache instead of re-running the scan (which is what makes
+        // Chrome kill the SW mid-await in the first place).
+        persistChatActivityCache().catch(() => {});
         end();
         return { ok: true, activity };
       } catch (err) {
