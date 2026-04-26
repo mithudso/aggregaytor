@@ -207,8 +207,17 @@ document.addEventListener('auxclick', (e) => {
   }));
 }, true);
 
-// Shift+click toggles block (undo path for misclicks)
-document.addEventListener('click', (e) => {
+// Shift+right-click toggles block — trackpad-friendly equivalent of
+// middle-click, with the added "click-again-to-undo" behaviour.
+//
+// The previous binding was on plain `click` + shiftKey, which collided
+// with the browser's native Shift+click ("open in new window"): every
+// time a user opened a profile in a new window, the username got
+// silently added to the local blocklist, eventually hiding the entire
+// page. Switching to `contextmenu` confines the gesture to an
+// intentional Shift+right-click and stops normal navigation from
+// poisoning the blocklist.
+document.addEventListener('contextmenu', (e) => {
   if (!e.shiftKey) return;
   if (!contextValid) return;
   const target = e.target as HTMLElement;
@@ -221,11 +230,11 @@ document.addEventListener('click', (e) => {
     blockedUsernames.delete(lower);
     resolved.card.classList.remove(HIDE_CLASS);
     resolved.card.style.opacity = '';
-    console.log(`${LOG} Shift+click unblock: ${lower}`);
+    console.log(`${LOG} Shift+right-click unblock: ${lower}`);
   } else {
     blockedUsernames.add(lower);
     hideCard(resolved.card);
-    console.log(`${LOG} Shift+click block: ${lower}`);
+    console.log(`${LOG} Shift+right-click block: ${lower}`);
   }
   saveBlockedList();
 }, true);
@@ -297,6 +306,15 @@ setTimeout(() => { selfHeal(); applyHideFilter(); }, 3000);
 // __aggregaytor_a4a_unhide_all()  — un-hide currently-hidden cards but keep
 //                                    the blocklist (hide re-applies on scroll)
 // __aggregaytor_a4a_list_blocked()— print the stored blocklist
+//
+// Bridge content scripts run in the ISOLATED world, so assigning to
+// `window.foo` only exposes the helper to the extension's console
+// context — not to the page's default console where users actually
+// type. We mirror the helpers into MAIN world via a one-shot injected
+// <script> so `__aggregaytor_a4a_reset()` works straight from the
+// regular DevTools prompt. The MAIN-world stubs use localStorage
+// (shared across worlds) and a CustomEvent to ping the bridge so the
+// in-memory blocklist + DOM hide state stay in sync.
 (window as any).__aggregaytor_a4a_reset = function(): void {
   clearA4ABlocklist();
 };
@@ -312,6 +330,46 @@ setTimeout(() => { selfHeal(); applyHideFilter(); }, 3000);
   console.log(`${LOG} ${list.length} blocked username(s):`, list);
   return list;
 };
+
+// MAIN-world bridge: listen for the CustomEvents the page-side stubs
+// fire and run the real helpers in the ISOLATED world.
+window.addEventListener('__aggregaytor_a4a_console_reset', () => clearA4ABlocklist());
+window.addEventListener('__aggregaytor_a4a_console_unhide_all', () => {
+  document.querySelectorAll<HTMLElement>(`.${HIDE_CLASS}`).forEach(el => {
+    el.classList.remove(HIDE_CLASS);
+    el.style.opacity = '';
+  });
+  console.log(`${LOG} All hidden cards revealed. Blocklist unchanged (${blockedUsernames.size} entries).`);
+});
+
+// Inject a tiny MAIN-world stub so the helpers are reachable from the
+// page's default console context.
+try {
+  const stub = document.createElement('script');
+  stub.textContent = `
+    (function () {
+      const LK = ${JSON.stringify(BLOCKED_KEY)};
+      window.__aggregaytor_a4a_reset = function () {
+        try { localStorage.removeItem(LK); } catch (_) {}
+        window.dispatchEvent(new CustomEvent('__aggregaytor_a4a_console_reset'));
+        console.log('[Aggregaytor:A4A] Reset dispatched — page will refresh hide state shortly.');
+      };
+      window.__aggregaytor_a4a_unhide_all = function () {
+        window.dispatchEvent(new CustomEvent('__aggregaytor_a4a_console_unhide_all'));
+      };
+      window.__aggregaytor_a4a_list_blocked = function () {
+        try {
+          const raw = localStorage.getItem(LK);
+          const list = raw ? JSON.parse(raw) : [];
+          console.log('[Aggregaytor:A4A]', list.length, 'blocked username(s):', list);
+          return list;
+        } catch (_) { return []; }
+      };
+    })();
+  `;
+  (document.head || document.documentElement).appendChild(stub);
+  stub.remove();
+} catch {}
 
 // Relay MAIN world adapter events to service worker
 window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {

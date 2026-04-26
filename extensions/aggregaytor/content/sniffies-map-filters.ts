@@ -49,6 +49,10 @@ interface MapFilterSettings {
   // Chat-history hiding
   hideRecentChats: boolean;   // hide profiles chatted within last 24h
   hideAnyChats: boolean;      // hide profiles ever chatted
+  // Activity hiding — hide markers whose last-active time on the platform
+  // is older than 2 hours. Profiles with no last-active signal are LEFT
+  // VISIBLE (we don't penalise unknowns).
+  hideInactiveOver2h: boolean;
   // Manual blocks
   blockedIds: Set<string>;
 }
@@ -73,6 +77,13 @@ const manualAttitudes = new Map<string, string>();
 const MANUAL_ATTITUDES_MAX = 1000;
 const markerProfileText = new Map<string, string>();
 const MARKER_PROFILE_TEXT_MAX = 5000;
+// Last-active timestamp per profile (epoch ms). Populated from adapter
+// contact metadata and from the partials API response. Used by the
+// hideInactiveOver2h filter; capped so a long-lived map page doesn't
+// accumulate unbounded entries.
+const markerLastActive = new Map<string, number>();
+const MARKER_LAST_ACTIVE_MAX = 5000;
+const INACTIVE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 function cappedMapSet<V>(map: Map<string, V>, key: string, value: V, cap: number): void {
   map.set(key, value);
@@ -135,6 +146,7 @@ let settings: MapFilterSettings = {
   showChatAgeBadges: false,
   hideRecentChats: false,
   hideAnyChats: false,
+  hideInactiveOver2h: false,
   blockedIds: new Set(),
 };
 
@@ -605,11 +617,13 @@ function applyFilters(): void {
     (settings.includeEnabled && settings.includeTerms.length > 0) ||
     settings.highlightBottom || settings.highlightVersBottom || settings.highlightVers ||
     settings.highlightVersTop || settings.highlightTop ||
-    settings.showChatAgeBadges;
+    settings.showChatAgeBadges ||
+    settings.hideInactiveOver2h;
   if (!anyFilterOn) return;
   let nMarkers = 0;
   let nHiddenByBlock = 0, nHiddenByText = 0, nHiddenByAttitude = 0;
   let nHiddenByWaiting24h = 0, nHiddenByWaitingEver = 0;
+  let nHiddenByInactive = 0;
   let nWaiting = 0, nActivityEntries = 0;
   nActivityEntries = chatActivity.size;
 
@@ -672,6 +686,22 @@ function applyFilters(): void {
       }
     }
 
+    // Priority 2.75: hide markers whose last platform activity is over the
+    // inactivity threshold. Profiles for which we have no last-active
+    // signal are LEFT VISIBLE — better to under-hide than to hide a
+    // marker that might actually be online but which we just haven't
+    // observed a timestamp for yet (the partials prefetch backfills this
+    // asynchronously, so unknowns become known on the next pass).
+    if (settings.hideInactiveOver2h) {
+      const lastActiveTs = markerLastActive.get(id) || 0;
+      if (lastActiveTs > 0 && (Date.now() - lastActiveTs) > INACTIVE_THRESHOLD_MS) {
+        marker.classList.add(HIDE_CLASS);
+        const b = badgeElements.get(id); if (b) b.style.display = 'none';
+        nHiddenByInactive++;
+        continue;
+      }
+    }
+
     // Priority 3: attitude hiding (uses manual override if set)
     const att = getEffectiveAttitude(id);
     if (shouldHideAttitude(att)) {
@@ -711,17 +741,20 @@ function applyFilters(): void {
     hiddenByAttitude: nHiddenByAttitude,
     hiddenByWaiting24h: nHiddenByWaiting24h,
     hiddenByWaitingEver: nHiddenByWaitingEver,
+    hiddenByInactive: nHiddenByInactive,
+    lastActiveKnown: markerLastActive.size,
     chips: {
       hideRecentChats: settings.hideRecentChats,
       hideAnyChats: settings.hideAnyChats,
+      hideInactiveOver2h: settings.hideInactiveOver2h,
     },
   };
   // Throttle applyFilters logs: only fire when something interesting is
   // happening AND the stats changed since last log. Previously logging on
   // every 6th scan regardless of state → one line of noise every 30s even
   // when nothing changed.
-  if (settings.hideAnyChats || settings.hideRecentChats || nHiddenByBlock || nHiddenByText || nHiddenByAttitude) {
-    const sig = `${nMarkers}/${nActivityEntries}/${nWaiting}/${nHiddenByBlock}/${nHiddenByText}/${nHiddenByAttitude}/${nHiddenByWaiting24h}/${nHiddenByWaitingEver}`;
+  if (settings.hideAnyChats || settings.hideRecentChats || settings.hideInactiveOver2h || nHiddenByBlock || nHiddenByText || nHiddenByAttitude) {
+    const sig = `${nMarkers}/${nActivityEntries}/${nWaiting}/${nHiddenByBlock}/${nHiddenByText}/${nHiddenByAttitude}/${nHiddenByWaiting24h}/${nHiddenByWaitingEver}/${nHiddenByInactive}`;
     if (sig !== _lastAppliedSig) {
       _lastAppliedSig = sig;
       console.log('[Aggregaytor:MapFilters] applyFilters:', stats);
@@ -1005,6 +1038,7 @@ window.addEventListener('__aggregaytor_map_filter_settings', ((event: CustomEven
     hvb: !!update.hideVersBottom, hvt: !!update.hideVersTop,
     hs: !!update.hideSide, hu: !!update.hideUnspecified,
     b: !!update.showChatAgeBadges,
+    in2h: !!update.hideInactiveOver2h,
   });
   if (sig !== _lastSettingsSig) {
     _lastSettingsSig = sig;
@@ -1048,6 +1082,11 @@ window.addEventListener('__aggregaytor_contact_data', ((event: CustomEvent) => {
     if (!id) continue;
     if (c.metadata?.position || c.metadata?.attitude) {
       cappedMapSet(markerAttitudes, id, String(c.metadata.position || c.metadata.attitude), MARKER_ATTITUDES_MAX);
+    }
+    if (typeof c.metadata?.lastActive === 'number' && c.metadata.lastActive > 0) {
+      // Adapter normalises any of {lastactive, last_active, lastSeenAt, …}
+      // into epoch ms via parseTimestamp, so we just cache the number.
+      cappedMapSet(markerLastActive, id, c.metadata.lastActive, MARKER_LAST_ACTIVE_MAX);
     }
     if (c.metadata?.profileText) {
       cappedMapSet(markerProfileText, id, String(c.metadata.profileText), MARKER_PROFILE_TEXT_MAX);
@@ -1184,6 +1223,37 @@ function extractTextFromPartial(p: any): string {
   return bits.join(' ').toLowerCase();
 }
 
+/**
+ * Pull a last-active timestamp out of a partials response object. Tries
+ * each path Sniffies has used historically, plus legacy snake/camelCase
+ * spellings. Returns epoch ms, or 0 when no usable signal was found.
+ *
+ * Number values below 1e12 are interpreted as seconds and upgraded to
+ * milliseconds (matches parseTimestamp() in the adapter).
+ */
+function extractLastActiveFromPartial(p: any): number {
+  const prof = p?.data?.profile || p?.data || p || {};
+  const candidates: unknown[] = [
+    prof.lastActiveAt, prof.lastActive, prof.lastSeenAt, prof.lastSeen,
+    prof.lastOnlineAt, prof.lastOnline, prof.onlineAt,
+    prof.activity?.lastSeenAt, prof.activity?.lastActiveAt,
+    prof.extended?.lastActiveAt, prof.extended?.lastActive,
+    p?.lastActiveAt, p?.lastActive,
+  ];
+  for (const v of candidates) {
+    if (v == null) continue;
+    if (typeof v === 'number') {
+      if (!isFinite(v) || v <= 0) continue;
+      return v < 1e12 ? v * 1000 : v;
+    }
+    if (typeof v === 'string') {
+      const parsed = Date.parse(v);
+      if (!isNaN(parsed)) return parsed;
+    }
+  }
+  return 0;
+}
+
 async function fetchPartialsForIds(ids: string[]): Promise<void> {
   if (!ids.length) return;
   const now = Date.now();
@@ -1228,6 +1298,8 @@ async function fetchPartialsForIds(ids: string[]): Promise<void> {
         }
         const text = extractTextFromPartial(p);
         if (text) cappedMapSet(markerProfileText, id, text, MARKER_PROFILE_TEXT_MAX);
+        const lastActive = extractLastActiveFromPartial(p);
+        if (lastActive > 0) cappedMapSet(markerLastActive, id, lastActive, MARKER_LAST_ACTIVE_MAX);
       }
       if (attitudeCount > 0) {
         console.log(`[Aggregaytor:MapFilters] Partials: fetched ${attitudeCount} attitudes (of ${ids.length} requested)`);

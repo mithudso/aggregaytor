@@ -104,12 +104,18 @@ try {
   });
 } catch { contextValid = false; }
 
-// ── Middle-click to block ─────────────────────────────────────────────────
+// ── Middle-click / Shift+right-click to block ────────────────────────────
 // Middle-click (button 2 = auxclick, button 1 = mousedown) on a profile
 // element extracts the profile ID and dispatches a block request to the
 // MAIN world, which has the captured Grindr JWT for API calls.
-document.addEventListener('auxclick', (e) => {
-  if (e.button !== 1) return; // middle-click only
+//
+// Shift+right-click is the trackpad-friendly equivalent: trackpads can't
+// produce a middle-click, so users with no mouse get the same gesture by
+// holding Shift while right-clicking. Both events fire `attemptBlock`,
+// which calls e.preventDefault() inside any strategy that succeeds —
+// strategies that bail out leave the default (new-tab / context menu)
+// alone so unrelated clicks aren't hijacked.
+function attemptBlock(e: MouseEvent): void {
   if (!contextValid || !checkContext()) return;
 
   const target = e.target as HTMLElement;
@@ -249,6 +255,20 @@ document.addEventListener('auxclick', (e) => {
     contactId: `grindr:${profileId}`,
     platform: 'grindr',
   }).catch(() => {});
+}
+
+document.addEventListener('auxclick', (e) => {
+  if (e.button !== 1) return; // middle-click only
+  attemptBlock(e);
+}, true);
+
+// Shift+right-click — trackpad-friendly equivalent of middle-click. Only
+// suppresses the native context menu when a strategy actually fired
+// e.preventDefault() inside attemptBlock; plain right-clicks (no Shift)
+// behave normally.
+document.addEventListener('contextmenu', (e) => {
+  if (!e.shiftKey) return;
+  attemptBlock(e);
 }, true);
 
 // ── Session Keepalive ─────────────────────────────────────────────────────

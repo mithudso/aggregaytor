@@ -513,6 +513,14 @@ export class SniffiesAdapter extends BaseAdapter {
               if (/^(distance|miles|km|approximatedistance)$/.test(k)) md.distance = value;
               if (/^(hosting|host|hostingstatus)$/.test(k)) md.hosting = value;
             }
+            // Capture last-active timestamps regardless of value type — Sniffies
+            // emits these as numbers (epoch s/ms), ISO strings, and occasionally
+            // relative strings like "5m ago". parseTimestamp coerces the first
+            // two; relative strings fall through with 0 and are ignored.
+            if (/^(lastactive|lastactiveat|lastseen|lastseenat|onlineat|lastonline)$/.test(k)) {
+              const ts = parseTimestamp(value);
+              if (ts > 0) md.lastActive = ts;
+            }
             if (Array.isArray(value) && /photo|image|pic/.test(k)) {
               md.photos = value.filter(v => typeof v === 'string').slice(0, 10);
             }

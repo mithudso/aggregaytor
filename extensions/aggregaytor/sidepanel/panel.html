@@ -351,6 +351,13 @@
         </label>
       </div>
       <div class="settings-section">
+        <h3 class="settings-heading">Activity</h3>
+        <div class="settings-info">Hide profiles whose last platform activity is older than the threshold. Profiles with no last-active signal are left visible — the partials API backfills timestamps as the map loads, so unknowns become known on the next pass.</div>
+        <label class="settings-checkbox-label" title="Hide profiles whose last-active timestamp is more than 2 hours ago. Useful for trackpad-only zooming where dormant markers clutter the view.">
+          <input type="checkbox" data-map-filter="hideInactiveOver2h"> Hide if not online in last 2 hours
+        </label>
+      </div>
+      <div class="settings-section">
         <button class="settings-btn" id="sp-map-save">Save Sniffies Filters</button>
         <button class="settings-btn" id="sp-map-undo-hide" style="margin-top:4px">Undo Last Hide</button>
         <button class="settings-btn" id="sp-map-clear-blocked" style="margin-top:4px;border-color:rgba(239,68,68,0.3);color:#f87171">Clear All Hidden</button>
