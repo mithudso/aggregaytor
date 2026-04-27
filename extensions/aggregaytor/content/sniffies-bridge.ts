@@ -853,10 +853,14 @@ function injectProfileActionsCSS(): void {
     }
     /* Fallback: when no profile container is found, anchor the bar to the
        top of the viewport so it's always visible while a Sniffies chat or
-       profile is open. The user can drag it via the grip dot. */
+       profile is open. The user can drag it via the grip dot.
+       v0.57.40: z-index bumped to ~max-int because Sniffies' chat/profile
+       overlay renders at a higher index than our previous 99997 and was
+       visually covering the bar. The new value is well above any plausible
+       overlay stack. */
     #${PROFILE_ACTIONS_ID}.pa-floating {
-      position:fixed; top:8px; left:50%; transform:translateX(-50%);
-      z-index:99997; max-width:calc(100vw - 24px); margin:0;
+      position:fixed; top:50px; left:50%; transform:translateX(-50%);
+      z-index:2147483646; max-width:calc(100vw - 24px); margin:0;
       box-shadow:0 4px 16px rgba(0,0,0,0.5);
     }
     #${PROFILE_ACTIONS_ID} .pa-grip {
@@ -1177,8 +1181,11 @@ function injectFilterBarCSS(): void {
   const s = document.createElement('style');
   s.id = FILTER_BAR_CSS_ID;
   s.textContent = `
+    /* v0.57.40: z-index bumped to ~max-int so Sniffies' chat/profile
+       overlay (which renders above our previous 99998) stops covering
+       the bar when the user opens a profile or chat. */
     #${FILTER_BAR_ID} {
-      position:fixed; top:0; left:0; right:0; z-index:99998;
+      position:fixed; top:0; left:0; right:0; z-index:2147483645;
       display:flex; align-items:center; gap:4px; padding:4px 10px;
       background:rgba(15,20,25,0.92); border-bottom:1px solid rgba(59,130,246,0.2);
       font-family:system-ui,sans-serif; font-size:10px; color:#9ca3af;
@@ -1721,15 +1728,17 @@ function checkUrlChange() {
     hideFloatingPanel();
     clearProfileActionTimers();
     removeProfileActions();
-    // Show map filter controls on the map view
+    // v0.57.40: keep the top filter bar visible on EVERY sniffies.com URL
+    // (not just /map) so it doesn't blink out when the user clicks a
+    // profile, opens a chat, or navigates to /messages. Previously the
+    // bar was only re-shown on /map matches and removed everywhere else.
+    // showMapFilterPanel still gates on the map view because the floating
+    // filter editor only makes sense there.
     if (url.match(/sniffies\.com\/?(\?|$|#)/i) || url.match(/sniffies\.com\/map/i)) {
       showMapFilterPanel();
-      // Show top filter bar unless the user explicitly closed it
-      const barHidden = localStorage.getItem('aggregaytor_top_filter_bar_hidden') === 'true';
-      if (!barHidden) showTopFilterBar();
-    } else {
-      removeTopFilterBar();
     }
+    const barHidden = localStorage.getItem('aggregaytor_top_filter_bar_hidden') === 'true';
+    if (!barHidden) showTopFilterBar();
     try {
       chrome.runtime.sendMessage({ type: 'PROFILE_CLOSED', platform: 'sniffies' }).catch(() => {});
     } catch {}
@@ -1921,11 +1930,64 @@ try {
 registerBackgroundTimer(setInterval(checkUrlChange, 3000));
 window.addEventListener('popstate', checkUrlChange);
 
-// Show top filter bar on initial load if we're on the map view
-if (location.href.match(/sniffies\.com\/?(\?|$|#)/i) || location.href.match(/sniffies\.com\/map/i)) {
+// v0.57.40: top filter bar on ALL sniffies.com URLs at initial load,
+// not just the map. The user wants the chips visible while they click
+// through profiles and chats too. Honors the "explicitly closed" flag.
+{
   const barHidden = localStorage.getItem('aggregaytor_top_filter_bar_hidden') === 'true';
   if (!barHidden) setTimeout(() => showTopFilterBar(), 1000);
 }
+
+// v0.57.40: DOM-driven profile-actions injector. The URL-based path in
+// checkUrlChange only fires on /profile/{hex}(/chat)? matches, which
+// silently misses anonymous-cruiser overlays and any URL-shape drift
+// from Sniffies' SPA router. This poller runs every 1.5s and asks
+// "is a Sniffies profile/chat container open right now?" via the same
+// findProfileContainer() heuristics injectProfileActions uses. If yes
+// AND the bar isn't already painted, inject. If the container goes
+// away, remove the bar. Independent of the URL path entirely — works
+// on every overlay variant.
+function activeProfileFromDom(): { contactId: string; container: HTMLElement | null } | null {
+  // First try the URL — when we DO have a hex profile id, prefer it because
+  // it's authoritative (works even before the chat overlay finishes rendering).
+  const m = location.pathname.match(/\/profile\/([0-9a-f]{6,})/i);
+  if (m) {
+    const container = findProfileContainer();
+    return { contactId: `sniffies:${m[1].toLowerCase()}`, container };
+  }
+  // No hex URL → check whether the chat/profile overlay is open anyway.
+  // This catches anonymous cruisers, in-progress route transitions, and
+  // any other case where Sniffies opens a profile UI without a usable URL.
+  const container = findProfileContainer();
+  if (!container) return null;
+  // Best-effort contact id: pull the avatar URL hex out of the container.
+  const avatarHex = container.outerHTML.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+  if (avatarHex) return { contactId: `sniffies:${avatarHex[1].toLowerCase()}`, container };
+  // Anonymous profile with no hex available — use a synthetic id so the
+  // bar still appears with the action set; meta operations write to a
+  // sentinel record but at least Hide / Intro / etc. work for the user.
+  return { contactId: 'sniffies:anonymous-overlay', container };
+}
+
+let _lastDomInjectId = '';
+function tickDomDrivenProfileActions(): void {
+  if (!contextValid) return;
+  const found = activeProfileFromDom();
+  if (!found) {
+    // Container went away — clean up so we don't leak a stale bar over the map.
+    if (document.getElementById(PROFILE_ACTIONS_ID)) {
+      removeProfileActions();
+      _lastDomInjectId = '';
+    }
+    return;
+  }
+  // Already painted for this contact? leave it alone.
+  if (_lastDomInjectId === found.contactId && document.getElementById(PROFILE_ACTIONS_ID)) return;
+  _lastDomInjectId = found.contactId;
+  injectProfileActions(found.contactId, 'sniffies');
+}
+registerBackgroundTimer(setInterval(tickDomDrivenProfileActions, 1500));
+setTimeout(tickDomDrivenProfileActions, 1200);
 
 // ── Seed Chat Activity for Map Filters ─────────────────────────────────────
 // map-filters.ts (MAIN world) uses a per-profile {myLastTs, theirLastTs}
