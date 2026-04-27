@@ -131,13 +131,31 @@ async function loadThreads() {
       </div>`).join('');
   }
   try {
+    // v0.57.38: 8s timeout per request so we never leave the user staring
+    // at frozen skeletons. If the SW is wedged on a heavy DB scan or has
+    // been suspended mid-await, surface the failure clearly instead of
+    // hanging silently.
+    const withTimeout = (p, ms, label) => Promise.race([
+      p,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)),
+    ]);
     const [threadRes, metaRes] = await Promise.all([
-      chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} }),
-      chrome.runtime.sendMessage({ type: 'GET_ALL_THREAD_META' }),
+      withTimeout(chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} }), 8000, 'GET_THREAD_SUMMARIES'),
+      withTimeout(chrome.runtime.sendMessage({ type: 'GET_ALL_THREAD_META' }), 8000, 'GET_ALL_THREAD_META'),
     ]);
     if (metaRes?.ok) {
       allThreadMeta.clear();
       for (const m of metaRes.metas || []) allThreadMeta.set(m.contactId, m);
+    }
+    if (!threadRes) {
+      // SW didn't respond at all — message channel closed. Show an
+      // actionable error state instead of leaving skeletons up.
+      renderInboxLoadError('No response from service worker. The SW may be suspended or wedged.');
+      return;
+    }
+    if (!threadRes.ok) {
+      renderInboxLoadError(`SW returned an error: ${threadRes.error || 'unknown'}`);
+      return;
     }
     if (threadRes?.ok) {
       const all = threadRes.summaries;
@@ -182,7 +200,47 @@ async function loadThreads() {
         }
       });
     }
-  } catch (err) { console.error('[Panel] Load error:', err); }
+  } catch (err) {
+    console.error('[Panel] Load error:', err);
+    renderInboxLoadError(String(err?.message || err || 'unknown error'));
+  }
+}
+
+// v0.57.38: surface inbox-load failures in the UI instead of leaving the
+// user staring at frozen skeletons. Replaces the thread-list with an
+// actionable error card: explains what happened, offers Retry + Free SW
+// Memory + Reload Extension actions. Called from any of:
+//   1. Promise.all timeout (8s per request)
+//   2. SW returned undefined (channel closed)
+//   3. SW returned { ok: false, error }
+//   4. catch block on sync throw
+function renderInboxLoadError(reason) {
+  const container = document.getElementById('thread-list');
+  if (!container) return;
+  container.innerHTML = `
+    <div class="empty-state">
+      <h2>Inbox load failed</h2>
+      <p style="color:#fbbf24;font-size:11px;margin:4px 0 12px">${esc(reason)}</p>
+      <p style="color:#9ca3af;font-size:11px">The service worker may be busy on a heavy database scan, suspended by Chrome, or wedged. Try:</p>
+      <div class="empty-actions" style="flex-direction:column;gap:6px;align-items:stretch">
+        <button class="empty-action-btn" id="inbox-err-retry">Retry</button>
+        <button class="empty-action-btn" id="inbox-err-free">Free SW Memory + Retry</button>
+        <button class="empty-action-btn" id="inbox-err-reload" style="border-color:rgba(239,68,68,0.3);color:#f87171">Reload Extension</button>
+      </div>
+    </div>
+  `;
+  container.querySelector('#inbox-err-retry')?.addEventListener('click', () => {
+    container.innerHTML = '';
+    loadThreads();
+  });
+  container.querySelector('#inbox-err-free')?.addEventListener('click', async () => {
+    try { await chrome.runtime.sendMessage({ type: 'FREE_SW_MEMORY' }); } catch {}
+    container.innerHTML = '';
+    setTimeout(() => loadThreads(), 200);
+  });
+  container.querySelector('#inbox-err-reload')?.addEventListener('click', () => {
+    chrome.runtime.reload();
+  });
 }
 
 function applyFilters(summaries) {
