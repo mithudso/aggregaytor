@@ -847,9 +847,23 @@ function injectProfileActionsCSS(): void {
     #${PROFILE_ACTIONS_ID} {
       display:flex; flex-wrap:wrap; gap:6px; align-items:center;
       padding:8px 12px; margin:6px 0;
-      background:rgba(15,20,25,0.85); border:1px solid rgba(59,130,246,0.25);
+      background:rgba(15,20,25,0.92); border:1px solid rgba(59,130,246,0.35);
       border-radius:8px; font-family:system-ui,sans-serif; font-size:12px; color:#e7e9ea;
+      backdrop-filter:blur(6px);
     }
+    /* Fallback: when no profile container is found, anchor the bar to the
+       top of the viewport so it's always visible while a Sniffies chat or
+       profile is open. The user can drag it via the grip dot. */
+    #${PROFILE_ACTIONS_ID}.pa-floating {
+      position:fixed; top:8px; left:50%; transform:translateX(-50%);
+      z-index:99997; max-width:calc(100vw - 24px); margin:0;
+      box-shadow:0 4px 16px rgba(0,0,0,0.5);
+    }
+    #${PROFILE_ACTIONS_ID} .pa-grip {
+      cursor:move; color:#6b7280; font-size:14px; user-select:none;
+      padding:0 4px; display:none;
+    }
+    #${PROFILE_ACTIONS_ID}.pa-floating .pa-grip { display:inline; }
     #${PROFILE_ACTIONS_ID} .pa-btn {
       background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12);
       border-radius:6px; padding:4px 10px; color:#e7e9ea; cursor:pointer;
@@ -898,6 +912,42 @@ function findProfileContainer(): HTMLElement | null {
     const cs = window.getComputedStyle(iw);
     if (cs.visibility !== 'hidden' && cs.display !== 'none') return iw;
   }
+  // v0.57.37: Sniffies' chat overlay uses different markup than the
+  // profile overlay (.his-profile / #sniffies-infowindow). Try a broad
+  // set of plausible selectors for the chat-window container so the
+  // action bar shows up there too. We sanity-check that the container
+  // is actually visible and big enough to be the chat panel (not a
+  // tiny tooltip). First match wins.
+  const candidates = [
+    'app-chat-overlay', 'app-chat-window', 'app-chat-container',
+    'chat-overlay', 'chat-window', 'chat-container',
+    '[class*="chat-overlay" i]', '[class*="chat-window" i]',
+    '[class*="conversation-overlay" i]', '[class*="conversation-window" i]',
+    '[class*="ChatOverlay"]', '[class*="ChatWindow"]',
+    '[role="dialog"][class*="chat" i]',
+  ];
+  for (const sel of candidates) {
+    const el = document.querySelector(sel) as HTMLElement | null;
+    if (!el) continue;
+    try {
+      const cs = window.getComputedStyle(el);
+      if (cs.visibility === 'hidden' || cs.display === 'none') continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.height < 200 || rect.width < 200) continue; // too small to be the chat
+      return el;
+    } catch { /* getComputedStyle on detached node */ }
+  }
+  // Last-resort heuristic: the element that contains the "Say something..."
+  // composer textarea is almost certainly the chat panel root. Walk up
+  // from the textarea to the nearest sized container.
+  const composer = document.querySelector('textarea[placeholder*="Say something" i]') as HTMLElement | null;
+  if (composer) {
+    let node: HTMLElement | null = composer;
+    for (let i = 0; node && i < 8; i++, node = node.parentElement) {
+      const r = node.getBoundingClientRect();
+      if (r.height > 300 && r.width > 250) return node;
+    }
+  }
   return null;
 }
 
@@ -916,11 +966,18 @@ function injectProfileActions(contactId: string, platform: string): void {
   injectProfileActionsCSS();
 
   const container = findProfileContainer();
-  if (!container) return;
+  // v0.57.37: previous code bailed silently when no container was found,
+  // which is exactly the state the user keeps hitting on the chat overlay.
+  // Now: always inject — if there's no good DOM anchor, append the bar
+  // to <body> with the .pa-floating class so it lives at the top of the
+  // viewport as a draggable strip. The user always sees Hide / Notes /
+  // Remind / Intro / stars regardless of which Sniffies route they're on.
+  const useFloating = !container;
 
   const profileId = contactId.replace(/^[a-z]+:/, '');
   const el = document.createElement('div');
   el.id = PROFILE_ACTIONS_ID;
+  if (useFloating) el.className = 'pa-floating';
 
   // Check if already blocked in the local map-filter blocklist
   let blockedIds: string[] = [];
@@ -928,6 +985,7 @@ function injectProfileActions(contactId: string, platform: string): void {
   const isBlocked = blockedIds.includes(profileId);
 
   el.innerHTML = `
+    <span class="pa-grip" title="Drag to reposition">⋮⋮</span>
     <button class="pa-btn danger pa-hide-btn" ${isBlocked ? 'disabled' : ''}>${isBlocked ? '🚫 Hidden' : '🚫 Hide'}</button>
     <button class="pa-btn pa-notes-btn" title="Toggle notes editor">📝 Notes</button>
     <button class="pa-btn pa-reminder-btn" title="Set a reminder to follow up with this person">⏰ Remind</button>
@@ -958,8 +1016,57 @@ function injectProfileActions(contactId: string, platform: string): void {
   `;
 
   // Insert at the top of the profile container
-  if (container.firstChild) container.insertBefore(el, container.firstChild);
-  else container.appendChild(el);
+  if (useFloating) {
+    // No DOM anchor — append to body as a fixed-position strip and wire
+    // up dragging via the grip handle so the user can move it out of
+    // the way of Sniffies' own UI.
+    document.body.appendChild(el);
+    // Restore last-saved floating position (if any)
+    try {
+      const raw = localStorage.getItem('aggregaytor_pa_floating_pos');
+      if (raw) {
+        const pos = JSON.parse(raw);
+        if (typeof pos.x === 'number' && typeof pos.y === 'number') {
+          el.style.left = `${Math.max(0, Math.min(pos.x, window.innerWidth - 100))}px`;
+          el.style.top = `${Math.max(0, Math.min(pos.y, window.innerHeight - 40))}px`;
+          el.style.transform = 'none';
+        }
+      }
+    } catch {}
+    // Drag handler scoped to the grip dot
+    const grip = el.querySelector('.pa-grip') as HTMLElement | null;
+    if (grip) {
+      let dragging = false; let dx = 0; let dy = 0;
+      grip.addEventListener('mousedown', (ev) => {
+        const r = el.getBoundingClientRect();
+        dragging = true; dx = (ev as MouseEvent).clientX - r.left; dy = (ev as MouseEvent).clientY - r.top;
+        ev.preventDefault();
+      });
+      const move = (ev: MouseEvent) => {
+        if (!dragging) return;
+        const x = Math.max(0, Math.min(ev.clientX - dx, window.innerWidth - 100));
+        const y = Math.max(0, Math.min(ev.clientY - dy, window.innerHeight - 40));
+        el.style.left = `${x}px`;
+        el.style.top = `${y}px`;
+        el.style.transform = 'none';
+      };
+      const end = () => {
+        if (!dragging) return;
+        dragging = false;
+        try {
+          localStorage.setItem('aggregaytor_pa_floating_pos', JSON.stringify({
+            x: parseInt(el.style.left), y: parseInt(el.style.top),
+          }));
+        } catch {}
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', end);
+    }
+  } else if (container.firstChild) {
+    container.insertBefore(el, container.firstChild);
+  } else {
+    container.appendChild(el);
+  }
 
   // ── Hide button ──
   const hideBtn = el.querySelector('.pa-hide-btn') as HTMLButtonElement;
