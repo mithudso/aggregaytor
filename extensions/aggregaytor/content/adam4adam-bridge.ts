@@ -342,34 +342,14 @@ window.addEventListener('__aggregaytor_a4a_console_unhide_all', () => {
   console.log(`${LOG} All hidden cards revealed. Blocklist unchanged (${blockedUsernames.size} entries).`);
 });
 
-// Inject a tiny MAIN-world stub so the helpers are reachable from the
-// page's default console context.
-try {
-  const stub = document.createElement('script');
-  stub.textContent = `
-    (function () {
-      const LK = ${JSON.stringify(BLOCKED_KEY)};
-      window.__aggregaytor_a4a_reset = function () {
-        try { localStorage.removeItem(LK); } catch (_) {}
-        window.dispatchEvent(new CustomEvent('__aggregaytor_a4a_console_reset'));
-        console.log('[Aggregaytor:A4A] Reset dispatched — page will refresh hide state shortly.');
-      };
-      window.__aggregaytor_a4a_unhide_all = function () {
-        window.dispatchEvent(new CustomEvent('__aggregaytor_a4a_console_unhide_all'));
-      };
-      window.__aggregaytor_a4a_list_blocked = function () {
-        try {
-          const raw = localStorage.getItem(LK);
-          const list = raw ? JSON.parse(raw) : [];
-          console.log('[Aggregaytor:A4A]', list.length, 'blocked username(s):', list);
-          return list;
-        } catch (_) { return []; }
-      };
-    })();
-  `;
-  (document.head || document.documentElement).appendChild(stub);
-  stub.remove();
-} catch {}
+// v0.57.39: previously injected an inline <script>{textContent: ...}</script>
+// here to expose console helpers in the MAIN world. A4A's CSP forbids
+// inline scripts, so every page load logged 30+ "Executing inline script
+// violates Content Security Policy" errors. The MAIN-world content script
+// (content/adam4adam.ts) defines the same three helpers directly and is
+// loaded via src= which every CSP allows. The bridge keeps its own copies
+// on the ISOLATED-world window (immediately above) for the rare case
+// where the user switches the DevTools execution context.
 
 // Relay MAIN world adapter events to service worker
 window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {

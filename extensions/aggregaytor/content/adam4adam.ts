@@ -93,3 +93,34 @@ window.addEventListener('__aggregaytor_send_message', ((event: CustomEvent) => {
     else console.warn(`${LOG} Send button not found`);
   }, 500);
 }) as EventListener);
+
+// ── Console Helpers (MAIN world) ────────────────────────────────────────────
+// v0.57.39: previously the bridge tried to expose these via an inline
+// <script>{...}</script> tag injected into the page. A4A's CSP forbids
+// inline scripts, so the page console threw "Executing inline script
+// violates the following Content Security Policy directive ..." up to a
+// dozen times per minute (the bridge re-tried on every page load).
+//
+// The MAIN-world content script (this file) is loaded via src= which
+// IS allowed by every CSP. Define the helpers here directly — they're
+// reachable from the page's default DevTools console without any inline
+// script injection. Bridge-side helpers still exist on the ISOLATED-world
+// `window`, but the user typically types into the MAIN-world prompt by
+// default, so these are the ones that "just work."
+const A4A_BLOCKED_KEY = 'aggregaytor_a4a_blocked';
+(window as any).__aggregaytor_a4a_reset = function (): void {
+  try { localStorage.removeItem(A4A_BLOCKED_KEY); } catch {}
+  window.dispatchEvent(new CustomEvent('__aggregaytor_a4a_console_reset'));
+  console.log('[Aggregaytor:A4A] Reset dispatched — page will refresh hide state shortly.');
+};
+(window as any).__aggregaytor_a4a_unhide_all = function (): void {
+  window.dispatchEvent(new CustomEvent('__aggregaytor_a4a_console_unhide_all'));
+};
+(window as any).__aggregaytor_a4a_list_blocked = function (): string[] {
+  try {
+    const raw = localStorage.getItem(A4A_BLOCKED_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    console.log('[Aggregaytor:A4A]', list.length, 'blocked username(s):', list);
+    return list;
+  } catch { return []; }
+};
