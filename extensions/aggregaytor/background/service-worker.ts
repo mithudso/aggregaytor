@@ -611,6 +611,32 @@ async function handleMessage(msg: any): Promise<any> {
       return { ok: true };
     }
 
+    // v0.57.45: emergency PouchDB compaction. The user reported persistent
+    // GET_THREAD_SUMMARIES timeouts (>20s) even after Free SW Memory + Retry.
+    // PouchDB stores every revision of every doc in IDB; on a long-lived
+    // install with thousands of message upserts the rev-history bloat can
+    // turn a 2000-doc scan into a 20s+ ordeal. db.compact() drops all
+    // non-current revisions and rebuilds the index, typically reclaiming
+    // 50-90% of the underlying IDB space and cutting scan time roughly
+    // in half. Returns elapsed ms so the panel can surface the win.
+    case 'COMPACT_DB': {
+      const t0 = Date.now();
+      try {
+        const db = await getDB();
+        await db.compact();
+        // Drop in-memory caches that may reference stale revisions
+        threadSummaryCache = null;
+        chatActivityCache = null;
+        try { await chrome.storage.session.remove(THREAD_CACHE_SESSION_KEY); } catch {}
+        try { await chrome.storage.session.remove(CHAT_ACTIVITY_SESSION_KEY); } catch {}
+        const elapsedMs = Date.now() - t0;
+        console.log(`${LOG} COMPACT_DB: completed in ${elapsedMs}ms`);
+        return { ok: true, elapsedMs };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message, elapsedMs: Date.now() - t0 };
+      }
+    }
+
     // v0.57.36: panel-driven memory pressure release. The user reported the
     // SW process holding 14GB of RAM after a long session. This handler nukes
     // every in-memory cache and bookkeeping Set/Map in the SW so GC can

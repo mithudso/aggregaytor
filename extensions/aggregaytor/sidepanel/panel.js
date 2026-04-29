@@ -170,20 +170,19 @@ async function loadThreads() {
       </div>`).join('');
   }
   try {
-    // v0.57.42: 20s timeout per request. Was 8s in v0.57.38 — too tight
-    // for users with a 651-thread Sniffies inbox + Grindr/DList/A4A,
-    // where a cold-cache GET_THREAD_SUMMARIES call legitimately runs the
-    // 2000-doc allDocs scan once and finishes in ~1-3s but can spike on
-    // heavy IndexedDB compaction. The session-storage rehydrate added in
-    // v0.57.42 avoids most cold scans, so 20s is generous enough to catch
-    // worst case without hiding real wedges.
+    // v0.57.45: 60s timeout — a real 30k-message corpus with a bloated
+    // PouchDB rev history can legitimately need 30-45s on cold scan
+    // before COMPACT_DB has been run. Was 20s and still failing for
+    // this user. The error UI offers Compact Database now as the
+    // recovery path; once compaction lands the scan drops back to
+    // 1-3s and 60s is hugely generous.
     const withTimeout = (p, ms, label) => Promise.race([
       p,
       new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)),
     ]);
     const [threadRes, metaRes] = await Promise.all([
-      withTimeout(chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} }), 20000, 'GET_THREAD_SUMMARIES'),
-      withTimeout(chrome.runtime.sendMessage({ type: 'GET_ALL_THREAD_META' }), 20000, 'GET_ALL_THREAD_META'),
+      withTimeout(chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} }), 60000, 'GET_THREAD_SUMMARIES'),
+      withTimeout(chrome.runtime.sendMessage({ type: 'GET_ALL_THREAD_META' }), 60000, 'GET_ALL_THREAD_META'),
     ]);
     if (metaRes?.ok) {
       allThreadMeta.clear();
@@ -267,6 +266,7 @@ function renderInboxLoadError(reason) {
       <div class="empty-actions" style="flex-direction:column;gap:6px;align-items:stretch">
         <button class="empty-action-btn" id="inbox-err-retry">Retry</button>
         <button class="empty-action-btn" id="inbox-err-free">Free SW Memory + Retry</button>
+        <button class="empty-action-btn" id="inbox-err-compact" style="border-color:rgba(251,191,36,0.5);color:#fbbf24">Compact Database + Retry (5–30s)</button>
         <button class="empty-action-btn" id="inbox-err-reload" style="border-color:rgba(239,68,68,0.3);color:#f87171">Reload Extension</button>
       </div>
     </div>
@@ -279,6 +279,20 @@ function renderInboxLoadError(reason) {
     try { await chrome.runtime.sendMessage({ type: 'FREE_SW_MEMORY' }); } catch {}
     container.innerHTML = '';
     setTimeout(() => loadThreads(), 200);
+  });
+  container.querySelector('#inbox-err-compact')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = 'Compacting database… (this can take 30s on heavy installs)';
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'COMPACT_DB' });
+      btn.textContent = res?.ok
+        ? `✓ Compacted in ${Math.round((res.elapsedMs || 0) / 1000)}s — retrying`
+        : `✗ Compact failed: ${res?.error || 'unknown'}`;
+      if (res?.ok) setTimeout(() => { container.innerHTML = ''; loadThreads(); }, 800);
+    } catch (err) {
+      btn.textContent = `✗ Compact threw: ${err?.message || err}`;
+    }
   });
   container.querySelector('#inbox-err-reload')?.addEventListener('click', () => {
     chrome.runtime.reload();
@@ -3313,6 +3327,31 @@ setInterval(refreshErrorCount, 30_000);
 // activity, query cache, autoTrained set, recent contact upserts,
 // dossier queue, search index, all LLM caches). Reports pre-clear sizes
 // so the user can see how much was held.
+document.getElementById('sp-compact-db')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-compact-db');
+  const status = document.getElementById('sp-map-status');
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Compacting… (5–30s)';
+  if (status) { status.textContent = 'PouchDB compaction running. Don\'t close the panel.'; status.style.color = '#fbbf24'; }
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'COMPACT_DB' });
+    if (res?.ok) {
+      const sec = Math.round((res.elapsedMs || 0) / 1000);
+      btn.textContent = `✓ Compacted in ${sec}s`;
+      if (status) { status.textContent = `Database compacted in ${sec}s. Subsequent inbox loads should be much faster.`; status.style.color = '#22c55e'; }
+    } else {
+      btn.textContent = '✗ Failed';
+      if (status) { status.textContent = `Compact failed: ${res?.error || 'unknown'}`; status.style.color = '#f87171'; }
+    }
+  } catch (err) {
+    btn.textContent = '✗ Failed';
+    if (status) { status.textContent = `Compact threw: ${err?.message || err}`; status.style.color = '#f87171'; }
+  }
+  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 5000);
+});
+
 document.getElementById('sp-free-memory')?.addEventListener('click', async () => {
   const btn = document.getElementById('sp-free-memory');
   const status = document.getElementById('sp-map-status');
