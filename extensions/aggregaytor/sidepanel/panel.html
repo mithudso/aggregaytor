@@ -364,6 +364,12 @@
         <button class="settings-btn" id="sp-restore-blocked-archived" style="margin-top:4px" title="Up through v0.57.32, every map-block also archived the inbox thread. This restores those archived-by-block threads to the inbox without un-blocking the profile.">Restore Inbox Threads Hidden by Old Block Behavior</button>
         <button class="settings-btn" id="sp-refetch-sniffies" style="margin-top:4px" title="Force a fresh fetch of the Sniffies chat-data endpoint in every open Sniffies tab. Useful as a sanity check when the inbox seems stale — the response count tells you whether the adapter is still capturing.">Refetch Sniffies Inbox (Diagnose Stale)</button>
         <button class="settings-btn" id="sp-free-memory" style="margin-top:4px;border-color:rgba(251,191,36,0.3);color:#fbbf24" title="Clear every in-memory cache and bookkeeping set in the service worker. Use this if the extension feels sluggish or if Chrome's task manager shows the SW process holding multiple GB. The next request will be slower while caches re-populate, but memory drops immediately.">Free SW Memory (when sluggish)</button>
+        <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08)">
+          <div style="font-size:11px;color:#9ca3af;margin-bottom:4px">Error Log (<span id="sp-error-count">0</span> entries)</div>
+          <button class="settings-btn" id="sp-export-errors" title="Save the rolling error log as a JSON file in your Downloads folder. Includes errors from the service worker, side panel, and every connected content script (Sniffies, Grindr, A4A, etc).">Export Errors → Downloads</button>
+          <button class="settings-btn" id="sp-clear-errors" style="margin-top:4px;border-color:rgba(239,68,68,0.3);color:#f87171">Clear Error Log</button>
+          <div id="sp-error-status" class="settings-status"></div>
+        </div>
         <div id="sp-map-status" class="settings-status"></div>
       </div>
       <div class="settings-divider"></div>

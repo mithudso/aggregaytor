@@ -5,6 +5,26 @@
 import { showFloatingPanel, hideFloatingPanel } from './floating-actions.js';
 
 const LOG = '[Aggregaytor:Bridge:Grindr]';
+
+// v0.57.44: forward bridge errors to the SW's rolling error log.
+function _forwardError(level: 'unhandled' | 'rejection' | 'error', message: string, stack?: string): void {
+  try {
+    chrome.runtime.sendMessage({
+      type: 'LOG_ERROR',
+      entry: { source: 'bridge:grindr', level, message, stack, url: location.href },
+    }).catch(() => {});
+  } catch {}
+}
+window.addEventListener('error', (ev) => {
+  _forwardError('unhandled', ev.message || String(ev.error || 'unknown error'),
+    (ev.error && (ev.error as Error).stack) || undefined);
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  const r: any = ev.reason;
+  _forwardError('rejection',
+    typeof r === 'string' ? r : (r?.message || String(r)),
+    r?.stack);
+});
 let contextValid = true;
 
 function checkContext(): boolean {

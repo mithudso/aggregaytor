@@ -13,6 +13,26 @@
  */
 
 const LOG = '[Aggregaytor:Bridge:A4A]';
+
+// v0.57.44: forward bridge errors to the SW's rolling error log.
+function _forwardError(level: 'unhandled' | 'rejection' | 'error', message: string, stack?: string): void {
+  try {
+    chrome.runtime.sendMessage({
+      type: 'LOG_ERROR',
+      entry: { source: 'bridge:a4a', level, message, stack, url: location.href },
+    }).catch(() => {});
+  } catch {}
+}
+window.addEventListener('error', (ev) => {
+  _forwardError('unhandled', ev.message || String(ev.error || 'unknown error'),
+    (ev.error && (ev.error as Error).stack) || undefined);
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  const r: any = ev.reason;
+  _forwardError('rejection',
+    typeof r === 'string' ? r : (r?.message || String(r)),
+    r?.stack);
+});
 const HIDE_CLASS = 'aggregaytor-a4a-hide';
 const BLOCKED_KEY = 'aggregaytor_a4a_blocked';
 let contextValid = true;

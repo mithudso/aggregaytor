@@ -26,9 +26,16 @@ import type { ContactQueryRow } from './llm.js';
 import { seedIndex, indexMessages, removeFromIndex, clearIndex, searchMessages as fulltextSearch, isIndexReady, getIndexSize, getEvictedCount, getLastEvictionAt, getLifetimeStats, SEARCH_INDEX_MAX_DOCS } from './search-index.js';
 import { getDossier, upsertDossier, setAutoExtractedField } from '@aggregaytor/store';
 import { handleDebugCommand } from './debug-bridge.js';
+import { logError, getErrorLog, clearErrorLog, exportErrorLog, installGlobalErrorCapture } from './error-logger.js';
 
 const LOG = '[Aggregaytor:SW]';
 console.log(`${LOG} Service worker starting...`);
+
+// v0.57.44: capture every error that fires in the SW context (uncaught
+// exceptions, unhandled promise rejections, console.error calls) into
+// the rolling error log. Done before any other module work so a startup
+// error is itself logged. Idempotent.
+installGlobalErrorCapture('sw');
 
 // ── Service Worker Performance Counters ─────────────────────────────────────
 // Lightweight in-memory counters tracking call counts and cumulative time
@@ -582,6 +589,27 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_THREAD_META': return { ok: true, meta: await getThreadMeta(msg.contactId) };
     case 'UPSERT_THREAD_META': return { ok: true, meta: await upsertThreadMeta(msg.contactId, msg.platform, msg.updates) };
     case 'GET_ALL_THREAD_META': return { ok: true, metas: await getAllThreadMeta() };
+
+    // v0.57.44: error-log API. Bridges/panel forward errors via LOG_ERROR;
+    // settings UI calls GET_ERROR_LOG / EXPORT_ERROR_LOG / CLEAR_ERROR_LOG.
+    case 'LOG_ERROR': {
+      // msg.entry is the partial ErrorLogEntry shape from the caller —
+      // logError fills in the timestamp + truncates field lengths.
+      await logError(msg.entry || { source: 'unknown', level: 'error', message: 'empty LOG_ERROR' });
+      return { ok: true };
+    }
+    case 'GET_ERROR_LOG': {
+      const entries = await getErrorLog();
+      return { ok: true, entries, count: entries.length };
+    }
+    case 'EXPORT_ERROR_LOG': {
+      const result = await exportErrorLog();
+      return { ok: true, ...result };
+    }
+    case 'CLEAR_ERROR_LOG': {
+      await clearErrorLog();
+      return { ok: true };
+    }
 
     // v0.57.36: panel-driven memory pressure release. The user reported the
     // SW process holding 14GB of RAM after a long session. This handler nukes

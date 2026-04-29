@@ -25,6 +25,36 @@
 
 const LOG = '[Aggregaytor:Bridge:Sniffies]';
 
+// v0.57.44: forward every uncaught error / unhandled promise rejection
+// from this ISOLATED-world bridge to the SW's error-log buffer. Cheap
+// (one chrome.runtime.sendMessage per error). The SW persists to
+// chrome.storage.local with a rolling 500-entry cap so a runaway error
+// can't fill the disk. Wrapped in a top-level try/catch — if the
+// extension is reloaded mid-session, `chrome.runtime` throws and we
+// just lose the report.
+function _forwardError(level: 'unhandled' | 'rejection' | 'error', message: string, stack?: string): void {
+  try {
+    chrome.runtime.sendMessage({
+      type: 'LOG_ERROR',
+      entry: {
+        source: 'bridge:sniffies',
+        level, message, stack,
+        url: location.href,
+      },
+    }).catch(() => {});
+  } catch {}
+}
+window.addEventListener('error', (ev) => {
+  _forwardError('unhandled', ev.message || String(ev.error || 'unknown error'),
+    (ev.error && (ev.error as Error).stack) || undefined);
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  const r: any = ev.reason;
+  _forwardError('rejection',
+    typeof r === 'string' ? r : (r?.message || String(r)),
+    r?.stack);
+});
+
 /**
  * Parse a relative time string ("2 hours ago", "3 months ago", "an hour ago")
  * into an approximate ISO 8601 timestamp. Returns current time if unparseable.

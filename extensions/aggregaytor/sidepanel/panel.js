@@ -5,6 +5,45 @@
  * thread (message detail with notes, reminders, suggestions).
  */
 
+// v0.57.44: forward every uncaught error / unhandled promise rejection
+// in the side panel to the SW's rolling error log. Same pattern as the
+// content-script bridges. Lets us diagnose panel-side bugs from the
+// exported JSON file instead of asking the user to copy DevTools output.
+function _panelForwardError(level, message, stack) {
+  try {
+    chrome.runtime.sendMessage({
+      type: 'LOG_ERROR',
+      entry: { source: 'panel', level, message, stack, url: location.href },
+    }).catch(() => {});
+  } catch {}
+}
+window.addEventListener('error', (ev) => {
+  _panelForwardError('unhandled', ev.message || String(ev.error || 'unknown error'),
+    (ev.error && ev.error.stack) || undefined);
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  const r = ev.reason;
+  _panelForwardError('rejection',
+    typeof r === 'string' ? r : (r?.message || String(r)),
+    r?.stack);
+});
+// Patch console.error so existing console.error('[Panel] ...') call sites
+// also flow into the log. Cheap.
+{
+  const origError = console.error.bind(console);
+  console.error = function (...args) {
+    try {
+      const [first, ...rest] = args;
+      const msg = typeof first === 'string' ? first : String(first);
+      const err = rest.find(a => a instanceof Error);
+      _panelForwardError('error',
+        [msg, ...rest.filter(a => a !== err).map(a => typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })())].join(' '),
+        err?.stack);
+    } catch {}
+    origError.apply(console, args);
+  };
+}
+
 let currentPlatform = 'all'; // legacy — still used for some checks
 let activePlatforms = new Set(); // multi-select toggle: which platforms are shown
 let currentThread = null;
@@ -3210,6 +3249,64 @@ chrome.runtime.onMessage.addListener((message) => {
     status.style.color = '#fbbf24';
   }
 });
+
+// v0.57.44: error-log Export / Clear / counter. Pulls the SW's rolling
+// log via GET_ERROR_LOG, triggers a JSON download via EXPORT_ERROR_LOG,
+// and resets via CLEAR_ERROR_LOG. The count refreshes whenever the user
+// opens the Map tab.
+async function refreshErrorCount() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_ERROR_LOG' });
+    const el = document.getElementById('sp-error-count');
+    if (el && res?.ok) el.textContent = String(res.count || 0);
+  } catch {}
+}
+document.getElementById('sp-export-errors')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-export-errors');
+  const status = document.getElementById('sp-error-status');
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Exporting…';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'EXPORT_ERROR_LOG' });
+    if (res?.ok) {
+      btn.textContent = res.id != null ? `✓ Saved (${res.count})` : `✗ Download blocked`;
+      if (status) {
+        status.textContent = res.id != null
+          ? `Saved ${res.count} entries to Downloads/${res.filename}`
+          : `Download API returned no id (chrome.downloads may be unavailable in this build).`;
+        status.style.color = res.id != null ? '#22c55e' : '#fbbf24';
+      }
+    } else {
+      btn.textContent = '✗ Failed';
+    }
+  } catch (err) {
+    btn.textContent = '✗ Failed';
+    if (status) { status.textContent = `Export failed: ${err?.message || err}`; status.style.color = '#f87171'; }
+  }
+  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 4000);
+});
+document.getElementById('sp-clear-errors')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-clear-errors');
+  const status = document.getElementById('sp-error-status');
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Clearing…';
+  try {
+    await chrome.runtime.sendMessage({ type: 'CLEAR_ERROR_LOG' });
+    btn.textContent = '✓ Cleared';
+    if (status) { status.textContent = 'Error log cleared.'; status.style.color = '#22c55e'; }
+    refreshErrorCount();
+  } catch (err) {
+    btn.textContent = '✗ Failed';
+  }
+  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 3000);
+});
+// Refresh the count on initial load + every 30s while the panel is open.
+refreshErrorCount();
+setInterval(refreshErrorCount, 30_000);
 
 // v0.57.36: panel-driven memory pressure release. Sends FREE_SW_MEMORY
 // to the SW which nukes every in-memory cache (thread summaries, chat
