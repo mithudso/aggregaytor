@@ -161,13 +161,40 @@ function attemptBlock(e: MouseEvent): void {
   }
 
   // Find the nearest profile container — Grindr's cascade grid uses
-  // data-testid="cascadeCellContainer" on each profile card
-  const profileEl = target.closest(
+  // data-testid="cascadeCellContainer" on each profile card.
+  // v0.57.47: broaden the selector list because Grindr's DOM keeps
+  // drifting (we'd silently hit `return` whenever none of these matched).
+  let profileEl = target.closest(
     '[data-testid="cascadeCellContainer"], [data-profile-id], [data-conversation-id], ' +
     'a[href*="/chat/"], [class*="profile-card"], [class*="cascade-item"], ' +
-    '[class*="profile-detail"], [class*="ProfileView"], [data-testid*="profile"]'
-  );
-  if (!profileEl) return;
+    '[class*="profile-detail"], [class*="ProfileView"], [data-testid*="profile"], ' +
+    '[class*="cascade-cell" i], [class*="cascade-grid" i] > div, ' +
+    '[class*="cascade" i] [class*="cell" i], [class*="profile-tile" i], ' +
+    '[role="article"][class*="profile" i], [data-testid*="cascade" i], ' +
+    '[data-testid*="cell" i], [data-testid*="profileTile" i]'
+  ) as HTMLElement | null;
+
+  // Walk-up fallback — any clicked element that contains a Grindr CDN
+  // photo URL is almost certainly inside a profile card. Walk up until
+  // we find a container with reasonable dimensions (>=80x80) so we
+  // don't pick the bare img tag.
+  if (!profileEl) {
+    let node: HTMLElement | null = target;
+    for (let i = 0; node && i < 8; i++, node = node.parentElement) {
+      const html = node.outerHTML || '';
+      if (/cdns?\.grindr\.com\/images\/profile/i.test(html) || /\.cloudfront\.net\/profile/i.test(html)) {
+        const r = node.getBoundingClientRect();
+        if (r.width >= 80 && r.height >= 80) { profileEl = node; break; }
+      }
+    }
+  }
+
+  if (!profileEl) {
+    // Diagnostic — surfaces in the v0.57.44 error log so we can see when
+    // every selector misses on a fresh Grindr DOM revision.
+    console.warn(`${LOG} Middle-click: no profile container matched. target=${target.tagName}.${target.className?.toString().slice(0, 60)} url=${location.href}`);
+    return;
+  }
 
   // Extract profile ID — Grindr's DOM doesn't expose IDs directly, but
   // profile card images use CDN URLs with the photo hash:
@@ -280,6 +307,25 @@ function attemptBlock(e: MouseEvent): void {
 document.addEventListener('auxclick', (e) => {
   if (e.button !== 1) return; // middle-click only
   attemptBlock(e);
+}, true);
+
+// v0.57.47: redundant `mousedown` capture for middle-click. Some Chrome
+// builds + trackpad gesture configs DO fire mousedown (button:1) but
+// suppress the matching auxclick — the user's "doesn't work anymore"
+// report. Capturing both events with a 150ms dedupe window means we
+// catch whichever fires; if both fire we run the handler exactly once.
+let _grindrLastMiddleAt = 0;
+document.addEventListener('mousedown', (e) => {
+  if (e.button !== 1) return;
+  if (Date.now() - _grindrLastMiddleAt < 150) return;
+  _grindrLastMiddleAt = Date.now();
+  attemptBlock(e);
+}, true);
+// Re-stamp the dedupe window from auxclick too so a normal mouse click
+// chain (mousedown + auxclick) doesn't double-fire attemptBlock.
+document.addEventListener('auxclick', (e) => {
+  if (e.button !== 1) return;
+  _grindrLastMiddleAt = Date.now();
 }, true);
 
 // Shift+right-click — trackpad-friendly equivalent of middle-click. Only
