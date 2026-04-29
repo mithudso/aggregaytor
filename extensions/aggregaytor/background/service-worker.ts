@@ -67,6 +67,180 @@ function swPerfTrack(name: string): () => void {
 // unread counts. See the ADAPTER_CONTACTS handler for the reasoning.
 let threadSummaryCache: { data: any; time: number; key: string } | null = null;
 const THREAD_CACHE_TTL = 5000; // 5 seconds — matches the value in code, was previously mis-documented as 3s
+// v0.57.46: auto-maintenance bookkeeping. The mem-gc alarm now decides
+// whether to compact / free-mem based on these counters + timestamps.
+// All persisted to chrome.storage.local so they survive SW restarts.
+const MAINTENANCE_KEY = 'aggregaytor_auto_maintenance_v1';
+interface MaintenanceState {
+  lastCompactAt: number;          // epoch ms; 0 = never
+  lastFreeAt: number;             // epoch ms; 0 = never
+  mutationsSinceCompact: number;  // upserts since last compact
+  lastDecisionAt: number;         // when runAutoMaintenance last ran
+  lastReason: string;             // human-readable decision summary
+}
+let maintenanceState: MaintenanceState = {
+  lastCompactAt: 0, lastFreeAt: 0, mutationsSinceCompact: 0,
+  lastDecisionAt: 0, lastReason: '(not yet run)',
+};
+let maintenanceLoaded = false;
+async function loadMaintenanceState(): Promise<void> {
+  if (maintenanceLoaded) return;
+  maintenanceLoaded = true;
+  try {
+    const got = await chrome.storage.local.get(MAINTENANCE_KEY);
+    const s = got?.[MAINTENANCE_KEY];
+    if (s && typeof s === 'object') Object.assign(maintenanceState, s);
+  } catch {}
+}
+function saveMaintenanceState(): void {
+  // Fire-and-forget — losing one update is fine.
+  try { chrome.storage.local.set({ [MAINTENANCE_KEY]: maintenanceState }).catch(() => {}); } catch {}
+}
+loadMaintenanceState().catch(() => {});
+
+// v0.57.46: compact status — survives SW death because it's in
+// chrome.storage.session. Panel polls GET_COMPACT_STATUS to render
+// live progress; the original COMPACT_DB sendMessage call returning
+// {ok:true, started:true} is just an ack.
+const COMPACT_STATUS_KEY = 'aggregaytor_compact_status_v1';
+type CompactStatus =
+  | { state: 'idle' }
+  | { state: 'running'; startedAt: number }
+  | { state: 'done'; startedAt: number; finishedAt: number; elapsedMs: number; trigger: string }
+  | { state: 'error'; startedAt: number; finishedAt: number; error: string; trigger: string };
+async function getCompactStatus(): Promise<CompactStatus> {
+  try {
+    const got = await chrome.storage.session.get(COMPACT_STATUS_KEY);
+    return (got?.[COMPACT_STATUS_KEY] as CompactStatus) || { state: 'idle' };
+  } catch { return { state: 'idle' }; }
+}
+async function setCompactStatus(status: CompactStatus): Promise<void> {
+  try { await chrome.storage.session.set({ [COMPACT_STATUS_KEY]: status }); } catch {}
+}
+
+/** Run db.compact() and write progress/result into chrome.storage.session. */
+async function runCompaction(trigger: string, startedAt: number): Promise<void> {
+  try {
+    const db = await getDB();
+    await db.compact();
+    // Drop in-memory + session-mirror caches that may reference stale revs
+    threadSummaryCache = null;
+    chatActivityCache = null;
+    try { await chrome.storage.session.remove(THREAD_CACHE_SESSION_KEY); } catch {}
+    try { await chrome.storage.session.remove(CHAT_ACTIVITY_SESSION_KEY); } catch {}
+    const finishedAt = Date.now();
+    await setCompactStatus({ state: 'done', startedAt, finishedAt, elapsedMs: finishedAt - startedAt, trigger });
+    await loadMaintenanceState();
+    maintenanceState.lastCompactAt = finishedAt;
+    maintenanceState.mutationsSinceCompact = 0;
+    saveMaintenanceState();
+    console.log(`${LOG} compaction (${trigger}) finished in ${finishedAt - startedAt}ms`);
+  } catch (err) {
+    const finishedAt = Date.now();
+    await setCompactStatus({ state: 'error', startedAt, finishedAt, error: (err as Error).message, trigger });
+    console.warn(`${LOG} compaction (${trigger}) failed:`, (err as Error).message);
+  }
+}
+
+/**
+ * Decide whether to auto-free memory and/or auto-compact and run them.
+ * Triggered by the 30-min mem-gc alarm. All thresholds are intentionally
+ * conservative — we'd rather miss one cycle than thrash the user's DB.
+ *
+ * Decision matrix:
+ *   - Auto-FREE if SW uptime > 1h AND any cap-bounded structure is at
+ *     >80% capacity (autoTrainedSet, queryContactsCache, etc.).
+ *   - Auto-COMPACT if any of:
+ *       (a) lastCompactAt > 24h ago AND mutationsSinceCompact > 1000
+ *       (b) recent getThreadSummaries avg > 5000ms (PouchDB rev bloat)
+ *       (c) lastCompactAt > 7d ago (regardless of mutation count)
+ *
+ * Reasons are recorded in maintenanceState.lastReason so the user can see
+ * what happened in Settings.
+ */
+async function runAutoMaintenance(): Promise<void> {
+  await loadMaintenanceState();
+  const now = Date.now();
+  maintenanceState.lastDecisionAt = now;
+  const reasons: string[] = [];
+  const swUptimeMs = now - swPerfStart;
+
+  // Auto-FREE conditions
+  let shouldFree = false;
+  if (swUptimeMs > 60 * 60_000) {
+    if (autoTrainedSet.size > AUTO_TRAIN_SET_CAP * 0.8) {
+      shouldFree = true; reasons.push(`autoTrainedSet ${autoTrainedSet.size}/${AUTO_TRAIN_SET_CAP}`);
+    }
+    if (queryContactsCache.size > QUERY_CONTACTS_CACHE_MAX * 0.8) {
+      shouldFree = true; reasons.push(`queryContactsCache ${queryContactsCache.size}/${QUERY_CONTACTS_CACHE_MAX}`);
+    }
+    if (recentContactUpserts.size > RECENT_CONTACT_UPSERTS_CAP * 0.8) {
+      shouldFree = true; reasons.push(`recentContactUpserts ${recentContactUpserts.size}/${RECENT_CONTACT_UPSERTS_CAP}`);
+    }
+    if (getIndexSize() > SEARCH_INDEX_MAX_DOCS * 0.8) {
+      shouldFree = true; reasons.push(`searchIndex ${getIndexSize()}/${SEARCH_INDEX_MAX_DOCS}`);
+    }
+  }
+
+  // Auto-COMPACT conditions
+  let shouldCompact = false;
+  const sinceLastCompact = now - maintenanceState.lastCompactAt;
+  const ONE_DAY = 24 * 60 * 60_000;
+  const SEVEN_DAYS = 7 * ONE_DAY;
+  if (maintenanceState.lastCompactAt === 0) {
+    // First boot ever — don't compact immediately, wait for one of the conditions
+  }
+  if (sinceLastCompact > ONE_DAY && maintenanceState.mutationsSinceCompact > 1000) {
+    shouldCompact = true;
+    reasons.push(`>1d since compact + ${maintenanceState.mutationsSinceCompact} mutations`);
+  }
+  if (sinceLastCompact > SEVEN_DAYS && maintenanceState.lastCompactAt > 0) {
+    shouldCompact = true;
+    reasons.push(`>7d since compact`);
+  }
+  const tsAvg = swPerf['getThreadSummaries']?.calls
+    ? swPerf['getThreadSummaries'].totalMs / swPerf['getThreadSummaries'].calls
+    : 0;
+  if (tsAvg > 5000) {
+    shouldCompact = true;
+    reasons.push(`getThreadSummaries avg ${Math.round(tsAvg)}ms (>5000ms)`);
+  }
+
+  // Execute. Free first (cheap), then compact (expensive).
+  if (shouldFree) {
+    threadSummaryCache = null;
+    chatActivityCache = null;
+    queryContactsCache.clear();
+    if (autoTrainedSet.size > 5000) {
+      const drop = Math.floor(autoTrainedSet.size / 2);
+      const it = autoTrainedSet.values();
+      for (let i = 0; i < drop; i++) { const n = it.next(); if (n.done) break; autoTrainedSet.delete(n.value); }
+    }
+    recentContactUpserts.clear();
+    dossierExtractionQueue.clear();
+    maintenanceState.lastFreeAt = now;
+    console.log(`${LOG} auto-free triggered: ${reasons.join('; ')}`);
+  }
+  if (shouldCompact) {
+    const status = await getCompactStatus();
+    if (status.state !== 'running') {
+      await setCompactStatus({ state: 'running', startedAt: now });
+      runCompaction('auto', now).catch(() => {});
+    }
+  }
+
+  maintenanceState.lastReason = reasons.length
+    ? `${shouldFree ? 'FREE ' : ''}${shouldCompact ? 'COMPACT ' : ''}— ${reasons.join('; ')}`
+    : 'all thresholds clear';
+  saveMaintenanceState();
+}
+
+/** Helper for upsert hooks to count mutations toward the next compact. */
+export function recordMutation(): void {
+  maintenanceState.mutationsSinceCompact++;
+  if (maintenanceState.mutationsSinceCompact % 100 === 0) saveMaintenanceState();
+}
+
 // v0.57.42: persist thread summaries into chrome.storage.session so a SW
 // restart serves the inbox instantly from cache instead of triggering the
 // 1-2s allDocs scan that's been timing out on the panel side. The session
@@ -256,6 +430,9 @@ async function handleMessage(msg: any): Promise<any> {
       const end = swPerfTrack('handleIncomingMessages');
       const result = await handleIncomingMessages(msg.payload, msg.platform);
       end();
+      // v0.57.46: count toward next auto-compact decision
+      const n = Array.isArray(msg.payload) ? msg.payload.length : 1;
+      for (let i = 0; i < n; i++) recordMutation();
       return result;
     }
     case 'ADAPTER_CONTACTS': {
@@ -265,6 +442,8 @@ async function handleMessage(msg: any): Promise<any> {
       const end = swPerfTrack('handleIncomingContacts');
       await handleIncomingContacts(msg.payload);
       end();
+      const n = Array.isArray(msg.payload) ? msg.payload.length : 1;
+      for (let i = 0; i < n; i++) recordMutation();
       return { ok: true };
     }
     case 'GET_CONTACT': {
@@ -620,21 +799,32 @@ async function handleMessage(msg: any): Promise<any> {
     // 50-90% of the underlying IDB space and cutting scan time roughly
     // in half. Returns elapsed ms so the panel can surface the win.
     case 'COMPACT_DB': {
-      const t0 = Date.now();
-      try {
-        const db = await getDB();
-        await db.compact();
-        // Drop in-memory caches that may reference stale revisions
-        threadSummaryCache = null;
-        chatActivityCache = null;
-        try { await chrome.storage.session.remove(THREAD_CACHE_SESSION_KEY); } catch {}
-        try { await chrome.storage.session.remove(CHAT_ACTIVITY_SESSION_KEY); } catch {}
-        const elapsedMs = Date.now() - t0;
-        console.log(`${LOG} COMPACT_DB: completed in ${elapsedMs}ms`);
-        return { ok: true, elapsedMs };
-      } catch (err) {
-        return { ok: false, error: (err as Error).message, elapsedMs: Date.now() - t0 };
+      // v0.57.46: async + status-polled. The previous synchronous version
+      // returned {ok, elapsedMs} only after compaction finished. On heavy
+      // installs db.compact() runs 30+ seconds and Chrome was killing the
+      // SW mid-await, closing the message channel and leaving the panel
+      // stuck on "Compacting…" forever.
+      // New flow: kick off compaction as a detached promise, write status
+      // to chrome.storage.session, return immediately. Panel polls
+      // GET_COMPACT_STATUS until state===done. Status survives SW death.
+      const trigger = String(msg.trigger || 'manual');
+      const existing = await getCompactStatus();
+      if (existing.state === 'running') {
+        return { ok: true, started: false, alreadyRunning: true, startedAt: existing.startedAt };
       }
+      const startedAt = Date.now();
+      await setCompactStatus({ state: 'running', startedAt });
+      // Detached — do NOT await here.
+      runCompaction(trigger, startedAt).catch(() => {});
+      return { ok: true, started: true, startedAt };
+    }
+    case 'GET_COMPACT_STATUS': {
+      const status = await getCompactStatus();
+      return { ok: true, status };
+    }
+    case 'GET_AUTO_MAINTENANCE': {
+      await loadMaintenanceState();
+      return { ok: true, state: maintenanceState };
     }
 
     // v0.57.36: panel-driven memory pressure release. The user reported the
@@ -2856,6 +3046,11 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
           if (now - v.time > 5 * 60_000) recentContactUpserts.delete(k);
         }
         console.log(`${LOG} mem-gc: queryCache ${beforeQuery}->${queryContactsCache.size}, autoTrain ${beforeAutoTrain}->${autoTrainedSet.size}, contactUpserts ${beforeContacts}->${recentContactUpserts.size}`);
+        // v0.57.46: piggy-back the auto-maintenance decision on the same
+        // 30-min cadence. Cheap (just reads counters); only acts when
+        // thresholds are exceeded. Adds free + compact when warranted
+        // without the user clicking anything.
+        await runAutoMaintenance().catch(e => console.warn(`${LOG} runAutoMaintenance error:`, e));
         break;
       }
       case 'grindr-login-check':

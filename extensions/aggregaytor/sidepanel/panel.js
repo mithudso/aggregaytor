@@ -283,15 +283,40 @@ function renderInboxLoadError(reason) {
   container.querySelector('#inbox-err-compact')?.addEventListener('click', async (e) => {
     const btn = e.currentTarget;
     btn.disabled = true;
-    btn.textContent = 'Compacting database… (this can take 30s on heavy installs)';
+    btn.textContent = 'Starting compaction…';
     try {
-      const res = await chrome.runtime.sendMessage({ type: 'COMPACT_DB' });
-      btn.textContent = res?.ok
-        ? `✓ Compacted in ${Math.round((res.elapsedMs || 0) / 1000)}s — retrying`
-        : `✗ Compact failed: ${res?.error || 'unknown'}`;
-      if (res?.ok) setTimeout(() => { container.innerHTML = ''; loadThreads(); }, 800);
+      const start = await chrome.runtime.sendMessage({ type: 'COMPACT_DB', trigger: 'inbox-error-card' });
+      if (!start?.ok) throw new Error(start?.error || 'SW refused COMPACT_DB');
     } catch (err) {
-      btn.textContent = `✗ Compact threw: ${err?.message || err}`;
+      btn.textContent = `✗ Compact failed to start: ${err?.message || err}`;
+      return;
+    }
+    // Poll for completion using the same SW-death-resilient pattern as
+    // the Settings → Compact button. Loops until done/error/timeout.
+    let ticks = 0;
+    while (true) {
+      let res;
+      try { res = await chrome.runtime.sendMessage({ type: 'GET_COMPACT_STATUS' }); } catch { res = null; }
+      const s = res?.status;
+      if (!s || s.state === 'idle') break;
+      if (s.state === 'running') {
+        const elapsed = Math.round((Date.now() - s.startedAt) / 1000);
+        btn.textContent = `Compacting… ${elapsed}s (safe to wait)`;
+      } else if (s.state === 'done') {
+        const sec = Math.round(s.elapsedMs / 1000);
+        btn.textContent = `✓ Compacted in ${sec}s — retrying`;
+        setTimeout(() => { container.innerHTML = ''; loadThreads(); }, 800);
+        return;
+      } else if (s.state === 'error') {
+        btn.textContent = `✗ Compact failed: ${s.error}`;
+        return;
+      }
+      ticks++;
+      await new Promise(r => setTimeout(r, ticks < 5 ? 1000 : 2000));
+      if (ticks > 150) {
+        btn.textContent = '✗ Timed out polling status';
+        return;
+      }
     }
   });
   container.querySelector('#inbox-err-reload')?.addEventListener('click', () => {
@@ -3327,30 +3352,135 @@ setInterval(refreshErrorCount, 30_000);
 // activity, query cache, autoTrained set, recent contact upserts,
 // dossier queue, search index, all LLM caches). Reports pre-clear sizes
 // so the user can see how much was held.
+// v0.57.46: compact button now polls status from chrome.storage.session
+// instead of awaiting a single sendMessage call. The previous version
+// stuck on "Compacting…" when the SW got killed mid-compaction (the
+// channel closed and our promise never resolved). The SW now writes
+// progress to session storage, so we keep polling until it lands on
+// a terminal state (done | error) regardless of whether the SW dies
+// and respawns. Panel can also be closed and reopened mid-compact —
+// reopening rejoins the existing run.
+async function pollCompactStatus(btn, status, origLabel) {
+  let elapsedTicks = 0;
+  while (true) {
+    let res;
+    try { res = await chrome.runtime.sendMessage({ type: 'GET_COMPACT_STATUS' }); }
+    catch { res = null; }
+    const s = res?.status;
+    if (!s || s.state === 'idle') {
+      // Either the SW lost the status, or compaction was never running.
+      btn.textContent = origLabel; btn.disabled = false;
+      if (status) { status.textContent = ''; status.style.color = ''; }
+      return;
+    }
+    if (s.state === 'running') {
+      const elapsed = Math.round((Date.now() - s.startedAt) / 1000);
+      btn.textContent = `Compacting… ${elapsed}s`;
+      if (status) {
+        status.textContent = `PouchDB compaction running for ${elapsed}s. Safe to close the panel — it'll keep running.`;
+        status.style.color = '#fbbf24';
+      }
+    } else if (s.state === 'done') {
+      const sec = Math.round(s.elapsedMs / 1000);
+      btn.textContent = `✓ Compacted in ${sec}s`;
+      if (status) {
+        status.textContent = `Compaction (${s.trigger}) finished in ${sec}s. Subsequent inbox loads should be much faster.`;
+        status.style.color = '#22c55e';
+      }
+      setTimeout(() => { btn.textContent = origLabel; btn.disabled = false; }, 5000);
+      return;
+    } else if (s.state === 'error') {
+      btn.textContent = '✗ Failed';
+      if (status) { status.textContent = `Compaction failed: ${s.error}`; status.style.color = '#f87171'; }
+      setTimeout(() => { btn.textContent = origLabel; btn.disabled = false; }, 5000);
+      return;
+    }
+    // Poll faster early, slower later — bounded total wait.
+    elapsedTicks++;
+    await new Promise(r => setTimeout(r, elapsedTicks < 5 ? 1000 : 2000));
+    // Hard stop after 5 minutes — almost certainly something else broke.
+    if (elapsedTicks > 150) {
+      btn.textContent = '✗ Timed out';
+      if (status) { status.textContent = 'Compaction polling exceeded 5 minutes. Try Reload Extension.'; status.style.color = '#f87171'; }
+      btn.disabled = false;
+      return;
+    }
+  }
+}
+
 document.getElementById('sp-compact-db')?.addEventListener('click', async () => {
   const btn = document.getElementById('sp-compact-db');
   const status = document.getElementById('sp-map-status');
   if (!btn) return;
   const orig = btn.textContent;
   btn.disabled = true;
-  btn.textContent = 'Compacting… (5–30s)';
-  if (status) { status.textContent = 'PouchDB compaction running. Don\'t close the panel.'; status.style.color = '#fbbf24'; }
+  btn.textContent = 'Starting compaction…';
   try {
-    const res = await chrome.runtime.sendMessage({ type: 'COMPACT_DB' });
-    if (res?.ok) {
-      const sec = Math.round((res.elapsedMs || 0) / 1000);
-      btn.textContent = `✓ Compacted in ${sec}s`;
-      if (status) { status.textContent = `Database compacted in ${sec}s. Subsequent inbox loads should be much faster.`; status.style.color = '#22c55e'; }
-    } else {
-      btn.textContent = '✗ Failed';
-      if (status) { status.textContent = `Compact failed: ${res?.error || 'unknown'}`; status.style.color = '#f87171'; }
+    const res = await chrome.runtime.sendMessage({ type: 'COMPACT_DB', trigger: 'manual' });
+    if (!res?.ok) throw new Error(res?.error || 'SW refused COMPACT_DB');
+    if (res.alreadyRunning) {
+      if (status) { status.textContent = 'Compaction is already running — joining its progress.'; status.style.color = '#fbbf24'; }
     }
   } catch (err) {
-    btn.textContent = '✗ Failed';
-    if (status) { status.textContent = `Compact threw: ${err?.message || err}`; status.style.color = '#f87171'; }
+    btn.textContent = '✗ Failed to start';
+    if (status) { status.textContent = `Could not start compaction: ${err?.message || err}`; status.style.color = '#f87171'; }
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 4000);
+    return;
   }
-  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 5000);
+  // Now poll until done/error
+  pollCompactStatus(btn, status, orig);
 });
+
+// v0.57.46: Auto-Maintenance status readout. Polls GET_AUTO_MAINTENANCE
+// every 30s and shows lastCompactAt / lastFreeAt / mutations / lastReason.
+// Lets the user see "yes, the extension is taking care of itself" without
+// having to babysit the SW console.
+async function refreshAutoMaintStatus() {
+  const el = document.getElementById('sp-automaint-text');
+  if (!el) return;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_AUTO_MAINTENANCE' });
+    const s = res?.state;
+    if (!s) { el.textContent = '(no data)'; return; }
+    const fmt = (t) => t > 0 ? new Date(t).toLocaleString() : 'never';
+    const ago = (t) => {
+      if (!t) return 'never';
+      const m = Math.round((Date.now() - t) / 60_000);
+      if (m < 1) return 'just now';
+      if (m < 60) return `${m}m ago`;
+      if (m < 1440) return `${Math.round(m/60)}h ago`;
+      return `${Math.round(m/1440)}d ago`;
+    };
+    el.innerHTML = `
+      <div>Last compact: <strong>${ago(s.lastCompactAt)}</strong> <span style="color:#6b7280">(${fmt(s.lastCompactAt)})</span></div>
+      <div>Last free: <strong>${ago(s.lastFreeAt)}</strong> <span style="color:#6b7280">(${fmt(s.lastFreeAt)})</span></div>
+      <div>Mutations since compact: <strong>${s.mutationsSinceCompact || 0}</strong></div>
+      <div>Last decision: <strong>${ago(s.lastDecisionAt)}</strong></div>
+      <div style="color:#6b7280;font-style:italic;margin-top:2px">${esc(s.lastReason || '')}</div>
+    `;
+  } catch {
+    el.textContent = '(unreachable)';
+  }
+}
+refreshAutoMaintStatus();
+setInterval(refreshAutoMaintStatus, 30_000);
+
+// On panel load, check if a compaction is already running (from auto-
+// maintenance or a previous manual click). If so, attach the poller so
+// the user sees live progress instead of a static button.
+(async function rejoinRunningCompaction() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_COMPACT_STATUS' });
+    if (res?.status?.state === 'running') {
+      const btn = document.getElementById('sp-compact-db');
+      const status = document.getElementById('sp-map-status');
+      if (btn) {
+        btn.disabled = true;
+        pollCompactStatus(btn, status, btn.textContent || 'Compact Database (fix slow scans)');
+      }
+    }
+  } catch {}
+})();
 
 document.getElementById('sp-free-memory')?.addEventListener('click', async () => {
   const btn = document.getElementById('sp-free-memory');
