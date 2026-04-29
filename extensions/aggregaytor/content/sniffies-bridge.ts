@@ -1770,56 +1770,132 @@ function checkUrlChange() {
  *     .fa-thumbtack                    — Font Awesome icon, present = conversation is pinned
  *     .unread-count                    — badge with unread message count
  */
+// v0.57.41: scraper went stale. Sniffies renamed/restructured the Recents
+// drawer at some point and `chat-list-vertical-item` no longer matches —
+// scrapeChatPanel returned 0 rows for ~13 days while the user's own UI
+// kept showing fresh DMs. The new scraper:
+//   1. Tries the original selector first, then falls back to anything that
+//      looks like a chat row (custom-element pattern, role=listitem, .row-
+//      class with an avatar image, etc.)
+//   2. Pulls the avatar URL from EITHER background-image OR <img src> OR
+//      child of the row matching the sniffiesassets pattern
+//   3. Pulls the preview from any descendant span/div with non-trivial
+//      text that's not the timestamp
+//   4. Always logs result counts so we can see in the console whether the
+//      scrape is finding rows even when 0 messages are emitted
 function scrapeChatPanel() {
   if (!contextValid || !checkContext()) return;
 
   const contacts: any[] = [];
   const messages: any[] = [];
+  let selectorUsed = '';
 
-  // Each conversation row is a custom Angular element
-  const rows = document.querySelectorAll('chat-list-vertical-item');
+  // Selector cascade — first hit wins.
+  let rows: NodeListOf<Element> = document.querySelectorAll('chat-list-vertical-item');
+  if (rows.length) selectorUsed = 'chat-list-vertical-item';
+  if (!rows.length) {
+    rows = document.querySelectorAll('[class*="chat-list-vertical-item" i]');
+    if (rows.length) selectorUsed = '[class*="chat-list-vertical-item"]';
+  }
+  if (!rows.length) {
+    rows = document.querySelectorAll('app-chat-list-item, app-conversation-row, app-recent-conversation');
+    if (rows.length) selectorUsed = 'app-chat-list-item|app-conversation-row|app-recent-conversation';
+  }
+  if (!rows.length) {
+    // Custom elements with "chat" or "conversation" in their tag name
+    const all = document.querySelectorAll('*');
+    const matches: Element[] = [];
+    for (const el of all) {
+      const tag = el.tagName.toLowerCase();
+      if (tag.includes('-') && (/chat-list|chat-row|conversation-row|conversation-item|recent-conversation/.test(tag))) {
+        matches.push(el);
+      }
+    }
+    if (matches.length) {
+      // Build a NodeList-like wrapper so the rest of the function works
+      rows = (matches as unknown) as NodeListOf<Element>;
+      selectorUsed = `tag-name-heuristic (${matches.length} elements: ${matches[0].tagName.toLowerCase()})`;
+    }
+  }
+  if (!rows.length) {
+    // Last resort: any element that contains a sniffiesassets profile avatar
+    // AND has at least one descendant text node — that's probably a chat row.
+    const avatarParents = new Set<Element>();
+    document.querySelectorAll('[style*="profile.sniffiesassets" i], img[src*="profile.sniffiesassets" i]').forEach(el => {
+      // Walk up to a reasonable container ancestor
+      let node: Element | null = el;
+      for (let i = 0; node && i < 6; i++, node = node.parentElement) {
+        if (!node.parentElement) break;
+        // Stop at a container that has at least 2 siblings sharing a tag
+        const parent = node.parentElement;
+        if (parent.children.length >= 2) {
+          avatarParents.add(node);
+          break;
+        }
+      }
+    });
+    if (avatarParents.size) {
+      rows = (Array.from(avatarParents) as unknown) as NodeListOf<Element>;
+      selectorUsed = `avatar-walk-up (${avatarParents.size} parents)`;
+    }
+  }
 
   rows.forEach(row => {
     try {
       // -- Profile ID from avatar URL --
-      // The avatar is rendered as a CSS background-image on a .avatar-img div.
-      // Real user avatars come from profile.sniffiesassets.com/{hexId}/...,
-      // while default avatars come from site.sniffiesassets.com (no hex ID).
-      // We skip default avatars since they don't give us a usable profile ID.
-      const avatarEl = row.querySelector('.avatar-img') as HTMLElement;
-      if (!avatarEl) return;
-      const bgStyle = avatarEl.style?.backgroundImage || '';
-      const idMatch = bgStyle.match(/profile\.sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+      // Try background-image on .avatar-img first (legacy), then any element
+      // with a sniffiesassets profile URL in its style or src.
+      let bgStyle = '';
+      let avatarUrl = '';
+      const avatarEl = (row.querySelector('.avatar-img') || row.querySelector('[class*="avatar" i]')) as HTMLElement | null;
+      if (avatarEl) {
+        bgStyle = avatarEl.style?.backgroundImage || '';
+        if (!bgStyle) {
+          try { bgStyle = getComputedStyle(avatarEl).backgroundImage || ''; } catch {}
+        }
+      }
+      // Fallback: search the entire row for a profile.sniffiesassets URL in any attribute
+      let idMatch = bgStyle.match(/profile\.sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+      if (!idMatch) {
+        const rowHtml = (row as HTMLElement).outerHTML || '';
+        idMatch = rowHtml.match(/profile\.sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+        if (idMatch) {
+          // Pull avatar URL out of the full HTML too
+          const urlMatch = rowHtml.match(/(https?:\/\/profile\.sniffiesassets\.com\/[^\s"'<>]+)/i);
+          if (urlMatch) avatarUrl = urlMatch[1];
+        }
+      } else {
+        avatarUrl = bgStyle.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/)?.[1] || '';
+      }
       if (!idMatch) return; // default avatar — no profile ID extractable
       const profileId = idMatch[1].toLowerCase();
-      const avatarUrl = bgStyle.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/)?.[1] || '';
 
       // -- Message preview text --
-      // The last message preview is inside a data-testid="msgConversationPreview"
-      // element (Angular test attribute), with the text in a child <span>.
+      // Original selectors first, then any text container.
       const previewEl = row.querySelector('[data-testid="msgConversationPreview"] span')
-        || row.querySelector('.content-preview span');
+        || row.querySelector('.content-preview span')
+        || row.querySelector('[class*="preview" i] span')
+        || row.querySelector('[class*="preview" i]')
+        || row.querySelector('[class*="snippet" i]');
       let preview = previewEl?.textContent?.trim() || '';
-      // Angular template bindings sometimes leave extra whitespace
       preview = preview.replace(/\s+/g, ' ').trim();
 
       // -- Direction detection --
-      // A .fa-reply icon (Font Awesome reply arrow) is present when the last
-      // message in the conversation was sent by the current user.
-      const sentByYou = !!row.querySelector('.fa-reply');
+      const sentByYou = !!row.querySelector('.fa-reply, [class*="reply" i] i, [aria-label*="sent" i]');
       const direction = sentByYou ? 'out' : 'in';
 
       // -- Timestamp --
-      const timeEl = row.querySelector('.message-date');
+      const timeEl = row.querySelector('.message-date')
+        || row.querySelector('[class*="message-date" i]')
+        || row.querySelector('[class*="timestamp" i]')
+        || row.querySelector('time');
       const timeText = timeEl?.textContent?.trim() || '';
 
       // -- Pinned status --
-      // A .fa-thumbtack icon indicates the user has pinned this conversation
-      const isPinned = !!row.querySelector('.fa-thumbtack');
+      const isPinned = !!row.querySelector('.fa-thumbtack, [class*="pin" i]');
 
       // -- Unread count --
-      // The .unread-count element contains a number badge (e.g., "3")
-      const unreadEl = row.querySelector('.unread-count');
+      const unreadEl = row.querySelector('.unread-count, [class*="unread-count" i], [class*="badge-unread" i]');
       const unreadCount = parseInt(unreadEl?.textContent?.trim() || '0') || 0;
 
       // Create a contact record for this conversation partner
@@ -1862,12 +1938,13 @@ function scrapeChatPanel() {
     } catch { /* skip individual row parse errors */ }
   });
 
-  // Only log non-empty scrapes — the scraper runs on every URL change
-  // and the Sniffies /chat panel is often empty, producing
-  // "0 contacts, 0 messages from 0 rows" many times per session.
-  if (contacts.length || messages.length || rows.length) {
-    console.log(`[Aggregaytor:Bridge:Sniffies] Chat panel scraped: ${contacts.length} contacts, ${messages.length} messages from ${rows.length} rows`);
-  }
+  // v0.57.41: log EVERY scrape, even when 0 rows found. The Apr 15 → Apr 28
+  // freeze went undetected for 13 days because the previous code suppressed
+  // empty-result logs — the scraper had silently stopped finding rows after
+  // a Sniffies DOM rename and we had no signal in the console. Per-scrape
+  // logging is cheap (~1 line / 15s) and is the only way to notice the
+  // selector going stale next time.
+  console.log(`[Aggregaytor:Bridge:Sniffies] scrape: ${rows.length} rows, ${contacts.length} contacts, ${messages.length} messages${selectorUsed ? ` (selector: ${selectorUsed})` : ''}`);
 
   // Send scraped contacts and messages to the service worker. safeSendMessage
   // catches the sync throw that fires when the extension is reloaded mid-
@@ -1988,6 +2065,48 @@ function tickDomDrivenProfileActions(): void {
 }
 registerBackgroundTimer(setInterval(tickDomDrivenProfileActions, 1500));
 setTimeout(tickDomDrivenProfileActions, 1200);
+
+// v0.57.41: console-callable diagnostic. Run __aggregaytor_diagnose() in
+// the Sniffies tab DevTools to print:
+//   - which scraper selector matches the current DOM (or "no rows found")
+//   - whether the MAIN-world adapter is loaded and how many API responses
+//     it has parsed (window.__aggregaytor_perf.stats() shape)
+//   - the latest scrape numbers, captured into a {sample} object so the
+//     user can paste the result into a bug report
+// Lives on ISOLATED window — the user runs it from the page console after
+// switching the execution-context dropdown to the Aggregaytor bridge.
+(window as any).__aggregaytor_diagnose = function (): unknown {
+  const out: Record<string, unknown> = { ts: new Date().toISOString(), url: location.href };
+  // 1. Probe each scrape selector and record the row count.
+  const selectors = [
+    'chat-list-vertical-item',
+    '[class*="chat-list-vertical-item" i]',
+    'app-chat-list-item',
+    'app-conversation-row',
+    'app-recent-conversation',
+    '[class*="conversation" i]',
+  ];
+  out.selectors = selectors.reduce((acc: Record<string, number>, s) => {
+    try { acc[s] = document.querySelectorAll(s).length; } catch { acc[s] = -1; }
+    return acc;
+  }, {});
+  // 2. Custom elements with chat/conversation in tag name
+  const customTags = new Set<string>();
+  document.querySelectorAll('*').forEach(el => {
+    const t = el.tagName.toLowerCase();
+    if (t.includes('-') && /chat|conv|message|recent/.test(t)) customTags.add(t);
+  });
+  out.relevantCustomTags = [...customTags].sort();
+  // 3. Avatar element count
+  out.avatarsOnPage = document.querySelectorAll('[style*="profile.sniffiesassets" i], img[src*="profile.sniffiesassets" i]').length;
+  // 4. Composer presence
+  out.hasComposer = !!document.querySelector('textarea[placeholder*="Say something" i]');
+  // 5. Adapter health from MAIN world (if available)
+  const w = window as any;
+  out.adapterPerf = w.__aggregaytor_perf?.stats?.() || 'unavailable (MAIN world script not loaded?)';
+  console.log('[Aggregaytor:Diagnose]', out);
+  return out;
+};
 
 // ── Seed Chat Activity for Map Filters ─────────────────────────────────────
 // map-filters.ts (MAIN world) uses a per-profile {myLastTs, theirLastTs}
