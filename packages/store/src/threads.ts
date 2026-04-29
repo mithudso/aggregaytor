@@ -50,13 +50,24 @@ export async function getThreadSummaries(
   // their last message wasn't in the scanned window. 5000 covers ~250
   // active threads at 20 msgs/thread; the SW cache still memoizes the
   // result for 5s so this only fires a few times per minute.
-  const startkey = opts?.platform ? `msg:${opts.platform}:` : 'msg:';
-  const endkey = opts?.platform ? `msg:${opts.platform}:\uffff` : 'msg:\uffff';
+  // v0.57.42: descending + smaller limit. We only need the latest message
+  // per contact, so iterate from the high end of the key range and stop at
+  // 2000 docs. With ~lex-sorted msg ids (msg:{platform}:{messageId} where
+  // messageId typically encodes a timestamp) the newest 2000 messages
+  // cover the most-recent ~250 active conversations comfortably. The
+  // previous 5000-doc scan was returning 5-10MB of message bodies and
+  // taking >8s on heavy DBs, hitting the new panel-side timeout. Cap
+  // halved AND descending order means we get useful data with way less
+  // work \u2014 a heavy user's "active in the last week" inbox finishes in
+  // ~1s instead of timing out.
+  const startkey = opts?.platform ? `msg:${opts.platform}:\uffff` : 'msg:\uffff';
+  const endkey = opts?.platform ? `msg:${opts.platform}:` : 'msg:';
   const result = await store.allDocs({
     startkey,
     endkey,
     include_docs: true,
-    limit: 5000,
+    descending: true,
+    limit: 2000,
   });
 
   // v0.57.36 memory fix \u2014 instead of materialising the full messages[] array

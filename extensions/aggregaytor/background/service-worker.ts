@@ -60,6 +60,27 @@ function swPerfTrack(name: string): () => void {
 // unread counts. See the ADAPTER_CONTACTS handler for the reasoning.
 let threadSummaryCache: { data: any; time: number; key: string } | null = null;
 const THREAD_CACHE_TTL = 5000; // 5 seconds — matches the value in code, was previously mis-documented as 3s
+// v0.57.42: persist thread summaries into chrome.storage.session so a SW
+// restart serves the inbox instantly from cache instead of triggering the
+// 1-2s allDocs scan that's been timing out on the panel side. The session
+// store is per-browser-session (clears on browser restart) which matches
+// how often we want to fully recompute.
+const THREAD_CACHE_SESSION_KEY = 'aggregaytor_thread_summary_cache_v1';
+async function persistThreadSummaryCache(): Promise<void> {
+  if (!threadSummaryCache) return;
+  try { await chrome.storage.session.set({ [THREAD_CACHE_SESSION_KEY]: threadSummaryCache }); } catch {}
+}
+async function rehydrateThreadSummaryCache(): Promise<void> {
+  if (threadSummaryCache) return;
+  try {
+    const got = await chrome.storage.session.get(THREAD_CACHE_SESSION_KEY);
+    const stored = got?.[THREAD_CACHE_SESSION_KEY];
+    if (stored && typeof stored === 'object' && Array.isArray(stored.data) && typeof stored.time === 'number') {
+      threadSummaryCache = stored;
+    }
+  } catch {}
+}
+rehydrateThreadSummaryCache().catch(() => {});
 
 // Device-local AES-GCM key used to encrypt platform credentials stored in
 // chrome.storage.local. Derived from the extension install ID so the key is
@@ -257,6 +278,10 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_THREAD_SUMMARIES': {
       const cacheKey = JSON.stringify(msg.opts || {});
       const now = Date.now();
+      // v0.57.42: rehydrate from chrome.storage.session before the in-memory
+      // cache check so a freshly-respawned SW doesn't trigger a heavy scan
+      // that the panel's 8s timeout would interrupt.
+      if (!threadSummaryCache) await rehydrateThreadSummaryCache();
       if (threadSummaryCache && threadSummaryCache.key === cacheKey &&
           (now - threadSummaryCache.time) < THREAD_CACHE_TTL) {
         swPerfTrack('getThreadSummaries:cached')();
@@ -265,6 +290,9 @@ async function handleMessage(msg: any): Promise<any> {
       const end = swPerfTrack('getThreadSummaries');
       const summaries = await getThreadSummaries(msg.opts);
       threadSummaryCache = { data: summaries, time: now, key: cacheKey };
+      // Fire-and-forget — the panel doesn't need to wait on session-store
+      // persistence to render the summaries it already has in hand.
+      persistThreadSummaryCache().catch(() => {});
       end();
       return { ok: true, summaries };
     }

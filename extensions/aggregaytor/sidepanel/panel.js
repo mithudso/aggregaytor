@@ -131,17 +131,20 @@ async function loadThreads() {
       </div>`).join('');
   }
   try {
-    // v0.57.38: 8s timeout per request so we never leave the user staring
-    // at frozen skeletons. If the SW is wedged on a heavy DB scan or has
-    // been suspended mid-await, surface the failure clearly instead of
-    // hanging silently.
+    // v0.57.42: 20s timeout per request. Was 8s in v0.57.38 — too tight
+    // for users with a 651-thread Sniffies inbox + Grindr/DList/A4A,
+    // where a cold-cache GET_THREAD_SUMMARIES call legitimately runs the
+    // 2000-doc allDocs scan once and finishes in ~1-3s but can spike on
+    // heavy IndexedDB compaction. The session-storage rehydrate added in
+    // v0.57.42 avoids most cold scans, so 20s is generous enough to catch
+    // worst case without hiding real wedges.
     const withTimeout = (p, ms, label) => Promise.race([
       p,
       new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)),
     ]);
     const [threadRes, metaRes] = await Promise.all([
-      withTimeout(chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} }), 8000, 'GET_THREAD_SUMMARIES'),
-      withTimeout(chrome.runtime.sendMessage({ type: 'GET_ALL_THREAD_META' }), 8000, 'GET_ALL_THREAD_META'),
+      withTimeout(chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} }), 20000, 'GET_THREAD_SUMMARIES'),
+      withTimeout(chrome.runtime.sendMessage({ type: 'GET_ALL_THREAD_META' }), 20000, 'GET_ALL_THREAD_META'),
     ]);
     if (metaRes?.ok) {
       allThreadMeta.clear();
