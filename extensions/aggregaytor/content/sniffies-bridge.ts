@@ -969,14 +969,16 @@ function injectProfileActions(contactId: string, platform: string): void {
   removeProfileActions();
   injectProfileActionsCSS();
 
-  const container = findProfileContainer();
-  // v0.57.37: previous code bailed silently when no container was found,
-  // which is exactly the state the user keeps hitting on the chat overlay.
-  // Now: always inject — if there's no good DOM anchor, append the bar
-  // to <body> with the .pa-floating class so it lives at the top of the
-  // viewport as a draggable strip. The user always sees Hide / Notes /
-  // Remind / Intro / stars regardless of which Sniffies route they're on.
-  const useFloating = !container;
+  // v0.57.43: ALWAYS float. Earlier versions tried to anchor the bar
+  // inside Sniffies' .his-profile / chat overlay container when one was
+  // found, but Sniffies' Angular tree re-renders parts of the chat
+  // overlay frequently — wiping the anchored bar AND leaving _lastDomInjectId
+  // pointing at a stale dead element so the next tick refused to re-inject.
+  // The floating fallback (fixed-position strip with a drag grip) is more
+  // robust: lives in document.body which Angular doesn't manage, has a
+  // ~max-int z-index that nothing can occlude, and the user can drag it
+  // out of the way once.
+  const useFloating = true;
 
   const profileId = contactId.replace(/^[a-z]+:/, '');
   const el = document.createElement('div');
@@ -2025,25 +2027,47 @@ window.addEventListener('popstate', checkUrlChange);
 // away, remove the bar. Independent of the URL path entirely — works
 // on every overlay variant.
 function activeProfileFromDom(): { contactId: string; container: HTMLElement | null } | null {
-  // First try the URL — when we DO have a hex profile id, prefer it because
-  // it's authoritative (works even before the chat overlay finishes rendering).
+  // v0.57.43: composer-first detection. The previous URL+container path
+  // missed the case the user keeps hitting — Sniffies' /chat route renders
+  // a chat overlay WITHOUT a /profile/{hex} URL, AND the chat overlay
+  // markup keeps drifting so findProfileContainer() returns null. The one
+  // signal that has stayed stable across every Sniffies UI revision is
+  // the "Say something..." composer textarea — it's on every chat view.
+  // If we see it, a chat is open.
+
+  // 1. Hex URL — authoritative when present.
   const m = location.pathname.match(/\/profile\/([0-9a-f]{6,})/i);
   if (m) {
-    const container = findProfileContainer();
-    return { contactId: `sniffies:${m[1].toLowerCase()}`, container };
+    return { contactId: `sniffies:${m[1].toLowerCase()}`, container: findProfileContainer() };
   }
-  // No hex URL → check whether the chat/profile overlay is open anyway.
-  // This catches anonymous cruisers, in-progress route transitions, and
-  // any other case where Sniffies opens a profile UI without a usable URL.
+
+  // 2. Composer textarea on screen → a chat is being viewed even without
+  //    a /profile URL. Try to extract the profile id from any avatar hex
+  //    in the same chat container; fall back to a stable synthetic id.
+  const composer = document.querySelector('textarea[placeholder*="Say something" i]') as HTMLElement | null;
+  if (composer) {
+    let root: HTMLElement | null = composer;
+    for (let i = 0; root && i < 10; i++) {
+      const r = root.getBoundingClientRect();
+      if (r.height > 300 && r.width > 250) break;
+      root = root.parentElement;
+    }
+    const html = (root || document.body).outerHTML || '';
+    const avatarHex = html.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+    return {
+      contactId: avatarHex ? `sniffies:${avatarHex[1].toLowerCase()}` : 'sniffies:active-chat',
+      container: root,
+    };
+  }
+
+  // 3. Standalone profile container (no chat composer, just a profile card).
   const container = findProfileContainer();
   if (!container) return null;
-  // Best-effort contact id: pull the avatar URL hex out of the container.
   const avatarHex = container.outerHTML.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
-  if (avatarHex) return { contactId: `sniffies:${avatarHex[1].toLowerCase()}`, container };
-  // Anonymous profile with no hex available — use a synthetic id so the
-  // bar still appears with the action set; meta operations write to a
-  // sentinel record but at least Hide / Intro / etc. work for the user.
-  return { contactId: 'sniffies:anonymous-overlay', container };
+  return {
+    contactId: avatarHex ? `sniffies:${avatarHex[1].toLowerCase()}` : 'sniffies:anonymous-overlay',
+    container,
+  };
 }
 
 let _lastDomInjectId = '';
