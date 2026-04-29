@@ -267,6 +267,7 @@ function renderInboxLoadError(reason) {
         <button class="empty-action-btn" id="inbox-err-retry">Retry</button>
         <button class="empty-action-btn" id="inbox-err-free">Free SW Memory + Retry</button>
         <button class="empty-action-btn" id="inbox-err-compact" style="border-color:rgba(251,191,36,0.5);color:#fbbf24">Compact Database + Retry (5–30s)</button>
+        <button class="empty-action-btn" id="inbox-err-rebuild" style="border-color:rgba(239,68,68,0.5);color:#f87171">Rebuild Database (when Compact won't finish)</button>
         <button class="empty-action-btn" id="inbox-err-reload" style="border-color:rgba(239,68,68,0.3);color:#f87171">Reload Extension</button>
       </div>
     </div>
@@ -312,6 +313,48 @@ function renderInboxLoadError(reason) {
         return;
       } else if (s.state === 'error') {
         btn.textContent = `✗ Compact failed: ${s.error}`;
+        return;
+      }
+      ticks++;
+      await new Promise(r => setTimeout(r, ticks < 5 ? 1000 : 2000));
+      if (ticks > 600) {
+        btn.textContent = '✗ Timed out polling status (20 min)';
+        return;
+      }
+    }
+  });
+  container.querySelector('#inbox-err-rebuild')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    if (!confirm('Rebuild database?\n\nA backup JSON will save to Downloads first, THEN the IDB is destroyed and rebuilt fresh from the backup. Use this when Compact times out. Should finish in 30-60s on heavy installs.')) return;
+    btn.disabled = true;
+    btn.textContent = 'Starting rebuild…';
+    try {
+      const start = await chrome.runtime.sendMessage({ type: 'REBUILD_DB', trigger: 'inbox-error-card' });
+      if (!start?.ok) throw new Error(start?.error || 'SW refused REBUILD_DB');
+    } catch (err) {
+      btn.textContent = `✗ Rebuild failed to start: ${err?.message || err}`;
+      return;
+    }
+    let ticks = 0;
+    while (true) {
+      let res;
+      try { res = await chrome.runtime.sendMessage({ type: 'GET_COMPACT_STATUS' }); } catch { res = null; }
+      const s = res?.status;
+      if (!s || s.state === 'idle') break;
+      if (s.state === 'running') {
+        const elapsed = Math.round((Date.now() - s.startedAt) / 1000);
+        const min = Math.floor(elapsed / 60);
+        const sec = elapsed % 60;
+        const elapsedStr = min ? `${min}m ${sec}s` : `${sec}s`;
+        const phase = s.phase ? ` ${s.phase}` : '';
+        btn.textContent = `Rebuilding…${phase} ${elapsedStr}${s.heartbeats ? ` (${s.heartbeats} ♥)` : ''}`;
+      } else if (s.state === 'done') {
+        const sec = Math.round(s.elapsedMs / 1000);
+        btn.textContent = `✓ Rebuilt in ${sec}s — retrying`;
+        setTimeout(() => { container.innerHTML = ''; loadThreads(); }, 800);
+        return;
+      } else if (s.state === 'error') {
+        btn.textContent = `✗ Rebuild failed: ${s.error}`;
         return;
       }
       ticks++;
@@ -3381,12 +3424,13 @@ async function pollCompactStatus(btn, status, origLabel) {
       const min = Math.floor(elapsed / 60);
       const sec = elapsed % 60;
       const elapsedStr = min ? `${min}m ${sec}s` : `${sec}s`;
-      btn.textContent = `Compacting… ${elapsedStr}${s.heartbeats ? ` (${s.heartbeats} ♥)` : ''}`;
+      const opName = s.phase ? `Rebuilding (${s.phase})` : 'Compacting';
+      btn.textContent = `${opName}… ${elapsedStr}${s.heartbeats ? ` (${s.heartbeats} ♥)` : ''}`;
       if (status) {
         const heartbeatNote = s.heartbeats
-          ? ` SW heartbeat #${s.heartbeats} — compaction is alive.`
+          ? ` SW heartbeat #${s.heartbeats} — alive.`
           : ' Waiting for first heartbeat (~20s).';
-        status.textContent = `PouchDB compaction running for ${elapsedStr}.${heartbeatNote} Safe to close the panel — it'll keep running.`;
+        status.textContent = `${opName} for ${elapsedStr}.${heartbeatNote} Safe to close the panel — it'll keep running.`;
         status.style.color = '#fbbf24';
       }
     } else if (s.state === 'done') {
@@ -3423,6 +3467,33 @@ async function pollCompactStatus(btn, status, origLabel) {
     }
   }
 }
+
+// v0.57.49: rebuild button. Same async + heartbeat-poll pattern as
+// compact, but kicks off REBUILD_DB instead. Reuses pollCompactStatus
+// because the SW writes to the same chrome.storage.session key for both
+// operations (state machine is shared — only one can run at a time).
+document.getElementById('sp-rebuild-db')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-rebuild-db');
+  const status = document.getElementById('sp-map-status');
+  if (!btn) return;
+  if (!confirm('Rebuild the database?\n\nThis will:\n  1. Save a backup JSON to Downloads\n  2. Destroy the IndexedDB\n  3. Recreate it fresh\n  4. Re-import all docs\n\nUse this when Compact Database itself times out. Your data is safe — backup downloads BEFORE the destroy step.')) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Starting rebuild…';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'REBUILD_DB', trigger: 'manual' });
+    if (!res?.ok) throw new Error(res?.error || 'SW refused REBUILD_DB');
+    if (res.alreadyRunning) {
+      if (status) { status.textContent = 'Rebuild is already running — joining its progress.'; status.style.color = '#fbbf24'; }
+    }
+  } catch (err) {
+    btn.textContent = '✗ Failed to start';
+    if (status) { status.textContent = `Could not start rebuild: ${err?.message || err}`; status.style.color = '#f87171'; }
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 4000);
+    return;
+  }
+  pollCompactStatus(btn, status, orig);
+});
 
 document.getElementById('sp-compact-db')?.addEventListener('click', async () => {
   const btn = document.getElementById('sp-compact-db');

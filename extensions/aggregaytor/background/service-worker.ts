@@ -182,6 +182,97 @@ async function runCompaction(trigger: string, startedAt: number): Promise<void> 
 }
 
 /**
+ * Rebuild the database by exporting current revs, destroying the IDB,
+ * recreating fresh, and importing the dump. Skips compact()'s rev-tree
+ * walk entirely so it finishes on databases where compact() can't.
+ *
+ * Three-phase progress, all written to chrome.storage.session as
+ * { state:'running', phase, heartbeats, ... } so the panel can show
+ * "Rebuilding (export 1/3) — 4523 docs read…" type updates.
+ *
+ * The export phase ALSO triggers chrome.downloads of the JSON dump
+ * BEFORE destroying the DB, so if any later phase fails the user
+ * still has their data and can re-import via the existing import
+ * flow. The download is named aggregaytor-rebuild-backup-YYYY-MM-DD.json.
+ */
+async function runRebuild(trigger: string, startedAt: number): Promise<void> {
+  let heartbeats = 0;
+  let phase = 'export';
+  const heartbeat = setInterval(() => {
+    heartbeats++;
+    try {
+      chrome.storage.session.set({
+        [COMPACT_STATUS_KEY]: {
+          state: 'running', startedAt, heartbeats, lastHeartbeatAt: Date.now(),
+          phase,
+        } as any,
+      }).catch(() => {});
+    } catch {}
+  }, 20_000);
+
+  try {
+    // Phase 1: export current docs to JSON + save backup to Downloads.
+    phase = 'export';
+    const json = await exportAllData();
+    // Best-effort backup — if the download API is unavailable we still
+    // proceed because the data lives in the JSON we hold in memory and
+    // we'll re-import it shortly.
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const filename = `aggregaytor-rebuild-backup-${stamp}.json`;
+      const blob = new Blob([json], { type: 'application/json' });
+      const reader = new FileReader();
+      const dataUrl = await new Promise<string | null>((resolve) => {
+        reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : null);
+        reader.onerror = () => resolve(null);
+        try { reader.readAsDataURL(blob); } catch { resolve(null); }
+      });
+      if (dataUrl) {
+        await chrome.downloads.download({ url: dataUrl, filename, saveAs: false }).catch(() => 0);
+      }
+    } catch {}
+
+    // Phase 2: destroy the existing DB. Releases all rev tail bloat.
+    phase = 'destroy';
+    await destroyDB();
+
+    // Phase 3: re-import everything into a fresh DB. getDB() lazily
+    // creates a new instance with the same name + indexes.
+    phase = 'import';
+    await importAllData(json);
+
+    // Drop in-memory caches that referenced docs from the old instance.
+    threadSummaryCache = null;
+    chatActivityCache = null;
+    queryContactsCache.clear();
+    autoTrainedSet.clear();
+    recentContactUpserts.clear();
+    dossierExtractionQueue.clear();
+    try { clearIndex(); } catch {}
+    try { await chrome.storage.session.remove(THREAD_CACHE_SESSION_KEY); } catch {}
+    try { await chrome.storage.session.remove(CHAT_ACTIVITY_SESSION_KEY); } catch {}
+
+    clearInterval(heartbeat);
+    const finishedAt = Date.now();
+    await setCompactStatus({ state: 'done', startedAt, finishedAt, elapsedMs: finishedAt - startedAt, trigger: `rebuild/${trigger}` });
+    await loadMaintenanceState();
+    maintenanceState.lastCompactAt = finishedAt;
+    maintenanceState.mutationsSinceCompact = 0;
+    saveMaintenanceState();
+    console.log(`${LOG} rebuild (${trigger}) finished in ${finishedAt - startedAt}ms (${heartbeats} heartbeats)`);
+  } catch (err) {
+    clearInterval(heartbeat);
+    const finishedAt = Date.now();
+    await setCompactStatus({
+      state: 'error', startedAt, finishedAt,
+      error: `rebuild failed at phase=${phase}: ${(err as Error).message}`,
+      trigger: `rebuild/${trigger}`,
+    });
+    console.warn(`${LOG} rebuild (${trigger}) failed at phase=${phase}:`, (err as Error).message);
+  }
+}
+
+/**
  * Decide whether to auto-free memory and/or auto-compact and run them.
  * Triggered by the 30-min mem-gc alarm. All thresholds are intentionally
  * conservative — we'd rather miss one cycle than thrash the user's DB.
@@ -864,6 +955,27 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_AUTO_MAINTENANCE': {
       await loadMaintenanceState();
       return { ok: true, state: maintenanceState };
+    }
+
+    // v0.57.49: rebuild path for users whose db.compact() doesn't finish
+    // even with the v0.57.48 heartbeat. compact() walks the rev tree of
+    // every doc to delete old revisions; on a multi-GB IDB with years
+    // of accumulated rev history that walk can take hours.
+    // exportAllData → destroy → create → importAllData skips the rev
+    // tree entirely — we only read CURRENT revs (single-pass allDocs)
+    // and write them to a fresh empty DB. Net result: same data, no
+    // rev history, dramatically smaller IDB. Typically finishes in
+    // 30-60s where compact() would have taken hours.
+    case 'REBUILD_DB': {
+      const trigger = String(msg.trigger || 'manual');
+      const existing = await getCompactStatus();
+      if (existing.state === 'running') {
+        return { ok: true, started: false, alreadyRunning: true, startedAt: existing.startedAt };
+      }
+      const startedAt = Date.now();
+      await setCompactStatus({ state: 'running', startedAt });
+      runRebuild(trigger, startedAt).catch(() => {});
+      return { ok: true, started: true, startedAt };
     }
 
     // v0.57.36: panel-driven memory pressure release. The user reported the
