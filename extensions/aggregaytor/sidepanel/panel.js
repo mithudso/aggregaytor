@@ -301,7 +301,10 @@ function renderInboxLoadError(reason) {
       if (!s || s.state === 'idle') break;
       if (s.state === 'running') {
         const elapsed = Math.round((Date.now() - s.startedAt) / 1000);
-        btn.textContent = `Compacting… ${elapsed}s (safe to wait)`;
+        const min = Math.floor(elapsed / 60);
+        const sec = elapsed % 60;
+        const elapsedStr = min ? `${min}m ${sec}s` : `${sec}s`;
+        btn.textContent = `Compacting… ${elapsedStr}${s.heartbeats ? ` (${s.heartbeats} ♥)` : ''} — safe to wait`;
       } else if (s.state === 'done') {
         const sec = Math.round(s.elapsedMs / 1000);
         btn.textContent = `✓ Compacted in ${sec}s — retrying`;
@@ -313,8 +316,8 @@ function renderInboxLoadError(reason) {
       }
       ticks++;
       await new Promise(r => setTimeout(r, ticks < 5 ? 1000 : 2000));
-      if (ticks > 150) {
-        btn.textContent = '✗ Timed out polling status';
+      if (ticks > 600) {
+        btn.textContent = '✗ Timed out polling status (20 min)';
         return;
       }
     }
@@ -3375,9 +3378,15 @@ async function pollCompactStatus(btn, status, origLabel) {
     }
     if (s.state === 'running') {
       const elapsed = Math.round((Date.now() - s.startedAt) / 1000);
-      btn.textContent = `Compacting… ${elapsed}s`;
+      const min = Math.floor(elapsed / 60);
+      const sec = elapsed % 60;
+      const elapsedStr = min ? `${min}m ${sec}s` : `${sec}s`;
+      btn.textContent = `Compacting… ${elapsedStr}${s.heartbeats ? ` (${s.heartbeats} ♥)` : ''}`;
       if (status) {
-        status.textContent = `PouchDB compaction running for ${elapsed}s. Safe to close the panel — it'll keep running.`;
+        const heartbeatNote = s.heartbeats
+          ? ` SW heartbeat #${s.heartbeats} — compaction is alive.`
+          : ' Waiting for first heartbeat (~20s).';
+        status.textContent = `PouchDB compaction running for ${elapsedStr}.${heartbeatNote} Safe to close the panel — it'll keep running.`;
         status.style.color = '#fbbf24';
       }
     } else if (s.state === 'done') {
@@ -3398,10 +3407,17 @@ async function pollCompactStatus(btn, status, origLabel) {
     // Poll faster early, slower later — bounded total wait.
     elapsedTicks++;
     await new Promise(r => setTimeout(r, elapsedTicks < 5 ? 1000 : 2000));
-    // Hard stop after 5 minutes — almost certainly something else broke.
-    if (elapsedTicks > 150) {
+    // v0.57.48: hard-stop bumped 5min → 20min. Compaction on a multi-GB
+    // PouchDB legitimately takes 10-15 minutes for the first run after
+    // years of un-compacted writes. With the v0.57.48 SW heartbeat
+    // keeping the worker alive, the underlying compact() actually
+    // completes on these timescales. The SW also auto-resets stale
+    // 'running' state to 'error' if heartbeats stop, so this poll
+    // terminates either way.
+    // ~5 ticks × 1s + 595 ticks × 2s = ~20 min.
+    if (elapsedTicks > 600) {
       btn.textContent = '✗ Timed out';
-      if (status) { status.textContent = 'Compaction polling exceeded 5 minutes. Try Reload Extension.'; status.style.color = '#f87171'; }
+      if (status) { status.textContent = 'Compaction polling exceeded 20 minutes. Try Reload Extension.'; status.style.color = '#f87171'; }
       btn.disabled = false;
       return;
     }

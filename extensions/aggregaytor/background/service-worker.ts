@@ -105,24 +105,62 @@ loadMaintenanceState().catch(() => {});
 const COMPACT_STATUS_KEY = 'aggregaytor_compact_status_v1';
 type CompactStatus =
   | { state: 'idle' }
-  | { state: 'running'; startedAt: number }
+  | { state: 'running'; startedAt: number; heartbeats?: number; lastHeartbeatAt?: number }
   | { state: 'done'; startedAt: number; finishedAt: number; elapsedMs: number; trigger: string }
   | { state: 'error'; startedAt: number; finishedAt: number; error: string; trigger: string };
 async function getCompactStatus(): Promise<CompactStatus> {
   try {
     const got = await chrome.storage.session.get(COMPACT_STATUS_KEY);
-    return (got?.[COMPACT_STATUS_KEY] as CompactStatus) || { state: 'idle' };
+    const s = (got?.[COMPACT_STATUS_KEY] as CompactStatus) || { state: 'idle' };
+    // v0.57.48: stale-state detection. If state is 'running' but the
+    // heartbeat is >90s old (or there's no heartbeat after 60s since
+    // start), the SW that started compaction was killed and never
+    // respawned to finish. Auto-reset to 'error: stalled' so the panel
+    // poller doesn't infinite-spin.
+    if (s.state === 'running') {
+      const now = Date.now();
+      const lastBeat = s.lastHeartbeatAt || s.startedAt;
+      const stale = (now - lastBeat) > 90_000;
+      const noBeatYet = !s.heartbeats && (now - s.startedAt) > 60_000;
+      if (stale || noBeatYet) {
+        const errorStatus: CompactStatus = {
+          state: 'error', startedAt: s.startedAt, finishedAt: now,
+          error: 'SW killed mid-compact (no heartbeat for ' + Math.round((now - lastBeat) / 1000) + 's)',
+          trigger: 'unknown',
+        };
+        await setCompactStatus(errorStatus);
+        return errorStatus;
+      }
+    }
+    return s;
   } catch { return { state: 'idle' }; }
 }
 async function setCompactStatus(status: CompactStatus): Promise<void> {
   try { await chrome.storage.session.set({ [COMPACT_STATUS_KEY]: status }); } catch {}
 }
 
-/** Run db.compact() and write progress/result into chrome.storage.session. */
+/** Run db.compact() and write progress/result into chrome.storage.session.
+ *  v0.57.48: SW keepalive during compaction. db.compact() on a multi-GB
+ *  IndexedDB can run 10+ minutes. Pure-JS work doesn't reset Chrome's
+ *  ~30s SW idle timer, so the SW gets killed mid-await and the compact
+ *  silently dies. Pinging chrome.storage.session every 20s with a
+ *  heartbeat counter keeps the SW alive AND gives the panel a way to
+ *  see that progress is happening. The chrome.* call is what resets
+ *  the idle timer; the value we write is just a tick number. */
 async function runCompaction(trigger: string, startedAt: number): Promise<void> {
+  let heartbeats = 0;
+  const heartbeat = setInterval(() => {
+    heartbeats++;
+    try {
+      chrome.storage.session.set({
+        [COMPACT_STATUS_KEY]: { state: 'running', startedAt, heartbeats, lastHeartbeatAt: Date.now() } as CompactStatus,
+      }).catch(() => {});
+    } catch {}
+  }, 20_000);
   try {
     const db = await getDB();
     await db.compact();
+    clearInterval(heartbeat);
     // Drop in-memory + session-mirror caches that may reference stale revs
     threadSummaryCache = null;
     chatActivityCache = null;
@@ -134,8 +172,9 @@ async function runCompaction(trigger: string, startedAt: number): Promise<void> 
     maintenanceState.lastCompactAt = finishedAt;
     maintenanceState.mutationsSinceCompact = 0;
     saveMaintenanceState();
-    console.log(`${LOG} compaction (${trigger}) finished in ${finishedAt - startedAt}ms`);
+    console.log(`${LOG} compaction (${trigger}) finished in ${finishedAt - startedAt}ms (${heartbeats} heartbeats)`);
   } catch (err) {
+    clearInterval(heartbeat);
     const finishedAt = Date.now();
     await setCompactStatus({ state: 'error', startedAt, finishedAt, error: (err as Error).message, trigger });
     console.warn(`${LOG} compaction (${trigger}) failed:`, (err as Error).message);
