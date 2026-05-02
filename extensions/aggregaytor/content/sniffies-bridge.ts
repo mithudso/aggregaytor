@@ -1339,7 +1339,7 @@ function showTopFilterBar(): void {
     bar.querySelectorAll('input[data-key]').forEach((cb) => {
       const el = cb as HTMLInputElement;
       update[el.dataset.key as string] = el.checked;
-      el.closest('.fb-chip')!.classList.toggle('on', el.checked);
+      el.closest('.fb-chip')?.classList.toggle('on', el.checked);
       if (el.checked) onCount++;
     });
     const label = bar.querySelector('.fb-label');

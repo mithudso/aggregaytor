@@ -678,11 +678,19 @@ function applyFilters(): void {
   let nWaiting = 0, nActivityEntries = 0;
   nActivityEntries = chatActivity.size;
 
+  // v0.57.59: belt-and-suspenders — strip FRESH_CLASS from EVERY marker
+  // in the DOM, not just the ones that made it into idToMarker. The
+  // previous loop only revealed markers with extractable IDs; markers
+  // whose ID couldn't be parsed (avatarless, mid-render, partial-load)
+  // got tagged FRESH by the MutationObserver but never had FRESH stripped,
+  // so they stayed invisible forever. This sweep happens before the
+  // per-id filter loop so any marker that ends up filtered still gets
+  // HIDE_CLASS afterward.
+  document.querySelectorAll(`.${FRESH_CLASS}`).forEach((el) => el.classList.remove(FRESH_CLASS));
+
   for (const [id, marker] of idToMarker) {
     nMarkers++;
-    // Remove all classes first. FRESH_CLASS gets stripped here too —
-    // by the time this loop runs the marker has been evaluated, so it
-    // either gets HIDE_CLASS below or fades back in as native.
+    // Remove all classes first.
     marker.classList.remove(HIDE_CLASS, SHOW_CLASS, FRESH_CLASS, HIGHLIGHT_CLASS, HIGHLIGHT_ATTITUDE_CLASS);
 
     // Priority 1: manually blocked

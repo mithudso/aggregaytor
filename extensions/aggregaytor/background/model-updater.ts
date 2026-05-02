@@ -164,6 +164,14 @@ interface ProviderEndpoint {
   // TypeError, we use this list as the "available models" set so
   // family-rank selection still works.
   staticFallbackModels?: string[];
+  // v0.57.59: bypass the live fetch entirely for providers we know
+  // block CORS. The browser logs "Access to fetch ... blocked by CORS
+  // policy" synchronously to the live console BEFORE our code can
+  // catch the rejection — we can filter our rolling log buffer but
+  // can't suppress the browser's own console output. The only way to
+  // stop the noise is to never make the fetch. When alwaysUseFallback
+  // is true, checkProvider() skips the fetch and uses staticFallbackModels.
+  alwaysUseFallback?: boolean;
 }
 
 const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
@@ -182,11 +190,12 @@ const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
     url: () => 'https://api.anthropic.com/v1/models',
     headers: (k) => ({ 'x-api-key': k, 'anthropic-version': '2023-06-01' }),
     extract: (j) => Array.isArray(j?.data) ? (j.data as any[]).map(m => String(m.id || '')) : [],
-    // Anthropic's /v1/models doesn't include Access-Control-Allow-Origin
-    // for browser-origin fetches. We can't reach it from a Chrome
-    // extension SW without a relay. Static list maintained here —
-    // updated when Anthropic announces new models. The family-rank
-    // logic still works against this list.
+    // v0.57.59: alwaysUseFallback so we never even attempt the fetch.
+    // The browser logs CORS preflight failures to the live console
+    // synchronously and we can't suppress that — only stop making
+    // the request. Static list maintained here, updated manually
+    // when Anthropic announces new models.
+    alwaysUseFallback: true,
     staticFallbackModels: [
       'claude-haiku-4-5-20251001',
       'claude-haiku-4-5',
@@ -231,7 +240,12 @@ async function checkProvider(
 
   let ids: string[] = [];
   let usedFallback = false;
-  try {
+
+  // v0.57.59: bypass live fetch for known-CORS-blocked providers.
+  if (ep.alwaysUseFallback && ep.staticFallbackModels) {
+    ids = ep.staticFallbackModels;
+    usedFallback = true;
+  } else try {
     const headers: Record<string, string> = ep.headers ? ep.headers(apiKey) : {};
     headers['Accept'] = 'application/json';
     const res = await fetch(ep.url(apiKey), { method: 'GET', headers });
