@@ -4485,6 +4485,83 @@ async function loadAdvisoryBanner() {
 }
 loadAdvisoryBanner();
 
+// v0.57.54: Model auto-updater UI. Polls SW state for the suggestion
+// list, renders one row per suggestion with Apply/Dismiss, plus a manual
+// "Check now" button and the auto-apply toggle. Refreshes when the
+// AI tab opens or after any user action.
+async function refreshModelUpdaterUI() {
+  const statusEl = document.getElementById('sp-mu-status');
+  const sugEl = document.getElementById('sp-mu-suggestions');
+  const autoEl = document.getElementById('sp-mu-auto-apply');
+  if (!statusEl || !sugEl || !autoEl) return;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_MODEL_UPDATE_STATE' });
+    if (!res?.ok) { statusEl.textContent = '(unreachable)'; return; }
+    const s = res.state;
+    autoEl.checked = !!s.autoApply;
+    const ago = (t) => {
+      if (!t) return 'never';
+      const m = Math.round((Date.now() - t) / 60_000);
+      if (m < 1) return 'just now';
+      if (m < 60) return `${m}m ago`;
+      if (m < 1440) return `${Math.round(m/60)}h ago`;
+      return `${Math.round(m/1440)}d ago`;
+    };
+    const errLine = s.lastError ? `<div style="color:#f87171;margin-top:2px">⚠ ${esc(s.lastError)}</div>` : '';
+    statusEl.innerHTML = `Last check: <strong>${ago(s.lastCheckAt)}</strong> · Suggestions: <strong>${s.suggestions.length}</strong>${errLine}`;
+    if (!s.suggestions.length) {
+      sugEl.innerHTML = '<div style="color:#6b7280;font-size:10px;padding:6px;text-align:center;font-style:italic">No newer models found. You\'re on the latest.</div>';
+      return;
+    }
+    sugEl.innerHTML = s.suggestions.map(sg => `
+      <div style="border:1px solid rgba(34,197,94,0.3);background:rgba(34,197,94,0.05);border-radius:6px;padding:6px 8px;margin-bottom:4px;font-size:11px">
+        <div style="display:flex;justify-content:space-between;gap:6px;align-items:flex-start">
+          <div style="flex:1;min-width:0">
+            <div><strong style="color:#22c55e;text-transform:capitalize">${esc(sg.provider)}</strong> ${sg.applied ? '<span style="color:#22c55e">✓ applied</span>' : ''}</div>
+            <div style="color:#9ca3af;overflow:hidden;text-overflow:ellipsis">${esc(sg.current)} → <strong style="color:#e7e9ea">${esc(sg.suggested)}</strong></div>
+            <div style="color:#6b7280;font-size:9px;font-style:italic">${esc(sg.reason)}</div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:3px">
+            ${sg.applied ? '' : `<button class="settings-btn sp-mu-apply" data-provider="${esc(sg.provider)}" style="font-size:10px;padding:2px 6px;border-color:rgba(34,197,94,0.5);color:#22c55e">Apply</button>`}
+            <button class="settings-btn sp-mu-dismiss" data-provider="${esc(sg.provider)}" style="font-size:10px;padding:2px 6px;color:#6b7280">Dismiss</button>
+          </div>
+        </div>
+      </div>`).join('');
+    sugEl.querySelectorAll('.sp-mu-apply').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const p = e.currentTarget.dataset.provider;
+        await chrome.runtime.sendMessage({ type: 'APPLY_MODEL_SUGGESTIONS', providers: [p] });
+        refreshModelUpdaterUI();
+      });
+    });
+    sugEl.querySelectorAll('.sp-mu-dismiss').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const p = e.currentTarget.dataset.provider;
+        await chrome.runtime.sendMessage({ type: 'DISMISS_MODEL_SUGGESTION', provider: p });
+        refreshModelUpdaterUI();
+      });
+    });
+  } catch {
+    statusEl.textContent = '(error fetching state)';
+  }
+}
+document.getElementById('sp-mu-check')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-mu-check');
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Checking…';
+  try {
+    await chrome.runtime.sendMessage({ type: 'CHECK_MODEL_UPDATES' });
+    refreshModelUpdaterUI();
+  } catch {}
+  btn.disabled = false; btn.textContent = orig;
+});
+document.getElementById('sp-mu-auto-apply')?.addEventListener('change', async (e) => {
+  await chrome.runtime.sendMessage({ type: 'SET_MODEL_AUTO_APPLY', enabled: e.target.checked });
+  refreshModelUpdaterUI();
+});
+refreshModelUpdaterUI();
+setInterval(refreshModelUpdaterUI, 60_000);
+
 loadThreads();
 loadDrafts();
 

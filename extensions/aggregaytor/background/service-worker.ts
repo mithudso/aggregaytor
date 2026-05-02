@@ -21,7 +21,7 @@ import {
   exportAllData, importAllData, exportBlocked, importBlocked,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
-import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS, clearLLMCaches, queryContacts, getDeprecationWarnings, generateConversationSummary } from './llm.js';
+import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS, clearLLMCaches, queryContacts, getDeprecationWarnings, generateConversationSummary, setProviderModelOverride, getEffectiveModelForProvider, getAllProviderModels, getAllProviderKeys } from './llm.js';
 import type { ContactQueryRow } from './llm.js';
 import { seedIndex, indexMessages, removeFromIndex, clearIndex, searchMessages as fulltextSearch, isIndexReady, getIndexSize, getEvictedCount, getLastEvictionAt, getLifetimeStats, SEARCH_INDEX_MAX_DOCS } from './search-index.js';
 import { getDossier, upsertDossier, setAutoExtractedField } from '@aggregaytor/store';
@@ -32,6 +32,10 @@ import {
   rankCandidates, nextDelayMs, estimateRemainingMs, FF_ALARM,
   type FFCandidate, type FFRunState,
 } from './friend-finder.js';
+import {
+  getUpdaterState, saveUpdaterState, checkAllProviders,
+  MODEL_UPDATER_ALARM, type ModelSuggestion,
+} from './model-updater.js';
 
 const LOG = '[Aggregaytor:SW]';
 console.log(`${LOG} Service worker starting...`);
@@ -142,6 +146,24 @@ async function getCompactStatus(): Promise<CompactStatus> {
 }
 async function setCompactStatus(status: CompactStatus): Promise<void> {
   try { await chrome.storage.session.set({ [COMPACT_STATUS_KEY]: status }); } catch {}
+}
+
+/**
+ * Apply a list of model suggestions: write each {provider, suggested}
+ * to the per-provider override map. If the suggestion is for the
+ * currently-active provider, also update LLMConfig.model so the next
+ * generateXxx call uses it immediately instead of after a config reload.
+ */
+async function applyModelSuggestions(suggestions: ModelSuggestion[]): Promise<void> {
+  if (!suggestions.length) return;
+  const cfg = await getLLMConfig();
+  for (const s of suggestions) {
+    await setProviderModelOverride(s.provider, s.suggested);
+    if (cfg.provider === s.provider) {
+      await saveLLMConfig({ ...cfg, model: s.suggested });
+    }
+    console.log(`${LOG} model-updater: applied ${s.provider} ${s.current} → ${s.suggested}`);
+  }
 }
 
 /** Run db.compact() and write progress/result into chrome.storage.session.
@@ -1122,6 +1144,85 @@ async function handleMessage(msg: any): Promise<any> {
       const state = await getFFState();
       const remainingMs = estimateRemainingMs(runState.queue.length, state.filters);
       return { ok: true, runState, etaMs: remainingMs };
+    }
+
+    // ── Model auto-updater (v0.57.54) ─────────────────────────────────
+    case 'CHECK_MODEL_UPDATES': {
+      const cfg = await getLLMConfig();
+      const state = await getUpdaterState();
+      // Map provider → API key from the multi-provider key store, plus
+      // the currently-active provider's apiKey if the multi-store is
+      // missing it.
+      const keys = await getAllProviderKeys();
+      if (cfg.provider && cfg.apiKey && !keys[cfg.provider]) keys[cfg.provider] = cfg.apiKey;
+      const getKey = (p: string) => keys[p];
+      // Map provider → current effective model (override > active model > default)
+      const overrides = await getAllProviderModels();
+      const getModel = (p: string) => {
+        if (overrides[p]) return overrides[p];
+        if (p === cfg.provider && cfg.model) return cfg.model;
+        // Fall back to the in-memory DEFAULT_MODELS via getEffectiveModelForProvider
+        // (sync wrapper). We can't await per-call inside the closure cleanly,
+        // so we pass the per-provider override map and let the closure pick.
+        return '';
+      };
+      // For providers without an override, we need the default. Build that
+      // up-front from the supported provider list using the synchronous
+      // getDefaultModel exported alongside the override helpers.
+      const allProviders = Object.keys(keys);
+      for (const p of allProviders) {
+        if (!getModel(p)) {
+          // Pull the default synchronously via the LLMConfig fallback.
+          // getDefaultModel is exported in llm.ts.
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const { getDefaultModel } = await import('./llm.js');
+          overrides[p] = overrides[p] || getDefaultModel(p as any);
+        }
+      }
+      const finalGetModel = (p: string) => overrides[p] || (p === cfg.provider ? cfg.model : '') || '';
+      const result = await checkAllProviders(getKey, finalGetModel);
+      state.lastCheckAt = Date.now();
+      state.suggestions = result.suggestions;
+      state.lastError = result.errors.length
+        ? result.errors.map(e => `${e.provider}: ${e.error}`).join('; ')
+        : '';
+      await saveUpdaterState(state);
+      console.log(`${LOG} model-updater: checked ${Object.keys(keys).length} provider(s), found ${result.suggestions.length} suggestion(s), ${result.errors.length} error(s)`);
+      // Auto-apply if the user opted in.
+      if (state.autoApply && result.suggestions.length) {
+        await applyModelSuggestions(result.suggestions);
+        for (const s of state.suggestions) s.applied = true;
+        await saveUpdaterState(state);
+      }
+      return { ok: true, state };
+    }
+    case 'GET_MODEL_UPDATE_STATE': {
+      const state = await getUpdaterState();
+      return { ok: true, state };
+    }
+    case 'SET_MODEL_AUTO_APPLY': {
+      const state = await getUpdaterState();
+      state.autoApply = !!msg.enabled;
+      await saveUpdaterState(state);
+      return { ok: true, state };
+    }
+    case 'APPLY_MODEL_SUGGESTIONS': {
+      const ids: string[] = Array.isArray(msg.providers) ? msg.providers : [];
+      const state = await getUpdaterState();
+      const accepted = state.suggestions.filter(s => ids.includes(s.provider));
+      await applyModelSuggestions(accepted);
+      for (const s of state.suggestions) {
+        if (ids.includes(s.provider)) s.applied = true;
+      }
+      await saveUpdaterState(state);
+      return { ok: true, state, applied: accepted.length };
+    }
+    case 'DISMISS_MODEL_SUGGESTION': {
+      const provider = String(msg.provider || '');
+      const state = await getUpdaterState();
+      state.suggestions = state.suggestions.filter(s => s.provider !== provider);
+      await saveUpdaterState(state);
+      return { ok: true, state };
     }
 
     case 'REBUILD_DB': {
@@ -3323,6 +3424,21 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       case 'block-rule-check':
         await runPeriodicBlockRules().catch(e => console.warn(`${LOG} Block rule error:`, e));
         break;
+      // v0.57.54: daily check for newer LLM models. Queries each
+      // provider's /models endpoint, picks the best newer family-match
+      // for the user's current tier, surfaces or auto-applies depending
+      // on the autoApply toggle.
+      case 'model-updater-daily-check': {
+        try {
+          // Reuse the same handler logic by routing through ourselves.
+          // chrome.runtime.sendMessage to self isn't allowed, so call
+          // handleMessage directly. Cheap — one provider sweep per 24h.
+          await handleMessage({ type: 'CHECK_MODEL_UPDATES' });
+        } catch (err) {
+          console.warn(`${LOG} model-updater daily check failed:`, (err as Error).message);
+        }
+        break;
+      }
       // v0.57.50: Friend Finder paced send tick. One greeting per tick;
       // alarm reschedules itself with a fresh jittered gap until queue
       // is empty or run state flipped to 'stopped'/'done'.
@@ -3480,6 +3596,20 @@ chrome.alarms.create('badge-refresh', { periodInMinutes: 1 });
 chrome.alarms.create('reminder-check', { periodInMinutes: 0.25 });
 // v0.57.36: periodic memory pressure release for long-lived SWs.
 chrome.alarms.create('mem-gc', { periodInMinutes: 30 });
+// v0.57.54: daily LLM-model auto-discovery. Runs once at startup if the
+// last check was >20h ago, then every 24h. delayInMinutes:1 so the first
+// fire happens after the SW has settled.
+(async () => {
+  try {
+    const s = await getUpdaterState();
+    const dayMs = 24 * 60 * 60_000;
+    const due = !s.lastCheckAt || (Date.now() - s.lastCheckAt) > 20 * 60 * 60_000;
+    chrome.alarms.create(MODEL_UPDATER_ALARM, {
+      delayInMinutes: due ? 1 : Math.max(1, Math.round((dayMs - (Date.now() - s.lastCheckAt)) / 60_000)),
+      periodInMinutes: 24 * 60,
+    });
+  } catch {}
+})().catch(() => {});
 // Removed 25s keepalive alarm — was causing unnecessary CPU usage
 
 // ── Dev Auto-Reload ────────────────────────────────────────────────────────

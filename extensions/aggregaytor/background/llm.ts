@@ -492,7 +492,7 @@ export async function getLLMConfig(): Promise<LLMConfig> {
 /**
  * Get all configured API keys for failover.
  */
-async function getAllProviderKeys(): Promise<Record<string, string>> {
+export async function getAllProviderKeys(): Promise<Record<string, string>> {
   const keys = await getCachedStorage<Record<string, string>>(PROVIDER_KEYS_KEY);
   return keys || {};
 }
@@ -502,6 +502,37 @@ export async function saveProviderKey(provider: string, apiKey: string): Promise
   const next = { ...keys, [provider]: apiKey };
   await chrome.storage.local.set({ [PROVIDER_KEYS_KEY]: next });
   invalidateStorageCache(PROVIDER_KEYS_KEY);
+}
+
+// v0.57.54: per-provider model overrides. The model auto-updater writes
+// here when it discovers a newer model for any provider — even ones
+// that aren't currently active. getEffectiveModelForProvider() reads
+// this first, then falls back to the active LLMConfig.model (if same
+// provider), then to DEFAULT_MODELS.
+const PROVIDER_MODELS_KEY = 'aggregaytor_provider_models_v1';
+export async function getProviderModelOverride(provider: string): Promise<string | undefined> {
+  try {
+    const got = await getCachedStorage<Record<string, string>>(PROVIDER_MODELS_KEY);
+    return got?.[provider];
+  } catch { return undefined; }
+}
+export async function setProviderModelOverride(provider: string, model: string): Promise<void> {
+  const got = await getCachedStorage<Record<string, string>>(PROVIDER_MODELS_KEY);
+  const next = { ...(got || {}), [provider]: model };
+  await chrome.storage.local.set({ [PROVIDER_MODELS_KEY]: next });
+  invalidateStorageCache(PROVIDER_MODELS_KEY);
+}
+export async function getAllProviderModels(): Promise<Record<string, string>> {
+  const got = await getCachedStorage<Record<string, string>>(PROVIDER_MODELS_KEY);
+  return got || {};
+}
+export function getDefaultModel(provider: LLMProvider): string {
+  return DEFAULT_MODELS[provider];
+}
+export async function getEffectiveModelForProvider(provider: LLMProvider): Promise<string> {
+  const override = await getProviderModelOverride(provider);
+  if (override) return override;
+  return DEFAULT_MODELS[provider];
 }
 
 /**

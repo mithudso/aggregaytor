@@ -274,6 +274,14 @@
     <!-- AI tab -->
     <div class="settings-tab-content active" id="tab-ai">
       <div class="settings-section">
+        <h3 class="settings-heading">Model Auto-Updater</h3>
+        <div class="settings-info">Periodically checks each configured provider for newer model versions in the same family/tier as your current pick (e.g. <code>gemini-2.5-flash-lite</code> → <code>gemini-3.1-flash-lite</code>). Runs daily; manual check available below.</div>
+        <label class="settings-checkbox-label" title="When checked, newer-model suggestions are applied automatically. When unchecked, suggestions appear here for you to apply or dismiss."><input type="checkbox" id="sp-mu-auto-apply"> Auto-apply newer models without asking</label>
+        <button class="settings-btn" id="sp-mu-check" style="margin-top:4px">Check now</button>
+        <div id="sp-mu-status" style="margin-top:6px;padding:6px 8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;font-size:10px;color:#9ca3af;line-height:1.5">checking…</div>
+        <div id="sp-mu-suggestions" style="margin-top:6px"></div>
+      </div>
+      <div class="settings-section">
         <h3 class="settings-heading">Provider</h3>
         <select id="sp-provider" class="settings-select">
           <option value="local">Local (no API key)</option>
