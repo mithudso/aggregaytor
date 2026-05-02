@@ -159,10 +159,25 @@ let _lastSettingsSig = '';
 
 // ── CSS Injection ──────────────────────────────────────────────────────────
 
+// v0.57.58: bumped CSS version-tag so hot-reloads always replace stale
+// CSS. The previous code did `if (existing) return` which kept the
+// v0.57.55 default-hide rule alive on tabs that didn't get refreshed
+// after the extension hot-reload. That caused "all profile photos
+// still hidden" reports even after v0.57.57. Now we use a unique id
+// per CSS revision and remove any prior aggregaytor-map-filter-css*
+// element on each install.
+const FILTER_CSS_ID = 'aggregaytor-map-filter-css-v58';
+
 function injectStyles(): void {
-  if (document.getElementById('aggregaytor-map-filter-css')) return;
+  // Strip any prior CSS revisions (including the stale v0.57.55
+  // default-hide rule). The id prefix scopes the cleanup so we don't
+  // touch unrelated stylesheets.
+  document.querySelectorAll('style[id^="aggregaytor-map-filter-css"]').forEach((el) => {
+    if (el.id !== FILTER_CSS_ID) el.remove();
+  });
+  if (document.getElementById(FILTER_CSS_ID)) return;
   const style = document.createElement('style');
-  style.id = 'aggregaytor-map-filter-css';
+  style.id = FILTER_CSS_ID;
   style.textContent = `
     /* v0.57.57: per-marker anti-FOUC. The previous v0.57.55 used a
        body-class default-hide that hid EVERY marker until applyFilters
@@ -1534,14 +1549,20 @@ export function initMapFilters(): void {
   setInterval(tickPartialsPrefetch, 4000);
   setTimeout(tickPartialsPrefetch, 5000);
 
-  // v0.57.57 one-shot recovery: a previous build (v0.57.55/56) may have
-  // left body.aggregaytor-filtering on the page from before the user
-  // restarted. With the new CSS that selector is harmless, but we strip
-  // it AND any orphan show/fresh classes from markers so the recovery
-  // is instant on first load.
+  // v0.57.58 one-shot recovery: aggressively strip every aggregaytor-
+  // injected class from every element in the DOM so a stale extension
+  // build (v0.57.55/56 default-hide leftovers, etc) can't keep markers
+  // invisible. Done up-front, before the first applyFilters tick.
   document.body.classList.remove(FILTERING_BODY_CLASS);
-  document.querySelectorAll(`.${SHOW_CLASS}, .${FRESH_CLASS}`).forEach((el) => {
-    el.classList.remove(SHOW_CLASS, FRESH_CLASS);
+  document.querySelectorAll(
+    `.${SHOW_CLASS}, .${FRESH_CLASS}, .${HIDE_CLASS}, .${HIGHLIGHT_CLASS}, .${HIGHLIGHT_ATTITUDE_CLASS}`
+  ).forEach((el) => {
+    el.classList.remove(SHOW_CLASS, FRESH_CLASS, HIDE_CLASS, HIGHLIGHT_CLASS, HIGHLIGHT_ATTITUDE_CLASS);
+    // Belt-and-suspenders: clear any lingering inline opacity:0 from
+    // older builds that wrote it directly.
+    if ((el as HTMLElement).style?.opacity === '0') {
+      (el as HTMLElement).style.opacity = '';
+    }
   });
 
   console.log('[Aggregaytor:MapFilters] Initialized — scanning every 5s + DOM observer for new markers');
