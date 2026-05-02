@@ -4447,18 +4447,35 @@ async function loadAdvisoryBanner() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_DEPRECATION_WARNINGS' });
     if (!res?.ok || !res.warnings?.length) { banner.style.display = 'none'; return; }
-    // Respect user-dismissed banner IDs for the current day.
+    // v0.57.53: dismissal is now PERMANENT, not per-day. The user
+    // explicitly asked for the Gemini 2.5 deprecation notice to "go
+    // away" — daily reminder was annoying after the first acknowledgement.
+    // We store the dismissed banner id with a 'permanent' marker so any
+    // future warning with a NEW id (a different deprecation later) still
+    // shows up — only the specific message the user X'd is silenced.
     const dismissed = JSON.parse(localStorage.getItem('aggregaytor_advisory_dismissed') || '{}');
-    const today = new Date().toISOString().slice(0, 10);
-    const active = res.warnings.find(w => dismissed[w.id] !== today);
+    // One-time migration: every user who upgrades to v0.57.53 has the
+    // current Gemini banner pre-dismissed. They asked for it to go away;
+    // we honor that without forcing them to click X first. Other deprecation
+    // ids that show up in the future are unaffected.
+    const MIGRATION_KEY = 'aggregaytor_advisory_migration_v53_done';
+    if (!localStorage.getItem(MIGRATION_KEY)) {
+      dismissed['gemini-2.5-deprecation'] = 'permanent';
+      dismissed['gemini-2.5-deprecated'] = 'permanent';
+      try {
+        localStorage.setItem('aggregaytor_advisory_dismissed', JSON.stringify(dismissed));
+        localStorage.setItem(MIGRATION_KEY, '1');
+      } catch {}
+    }
+    const active = res.warnings.find(w => dismissed[w.id] !== 'permanent' && !dismissed[w.id]?.startsWith?.('permanent'));
     if (!active) { banner.style.display = 'none'; return; }
     banner.className = 'advisory-banner' + (active.active ? ' active' : '');
     banner.innerHTML = `<span class="advisory-text">⚠ ${esc(active.message)}</span>` +
-      `<button class="advisory-close" data-banner-id="${esc(active.id)}" title="Dismiss for today">✕</button>`;
+      `<button class="advisory-close" data-banner-id="${esc(active.id)}" title="Dismiss permanently">✕</button>`;
     banner.style.display = '';
     banner.querySelector('.advisory-close').addEventListener('click', (e) => {
       const id = e.currentTarget.dataset.bannerId;
-      const next = { ...dismissed, [id]: today };
+      const next = { ...dismissed, [id]: 'permanent' };
       try { localStorage.setItem('aggregaytor_advisory_dismissed', JSON.stringify(next)); } catch {}
       banner.style.display = 'none';
     });
