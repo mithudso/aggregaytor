@@ -758,7 +758,8 @@ function showFloatingPanel(contactId: string, platform: string): void {
     // The MAIN world listens for these via window.addEventListener('message').
     window.postMessage({ type: '__aggregaytor_block', profileId: pid }, '*');
     // Mark as blocked in the aggregator service worker
-    chrome.runtime.sendMessage({
+    // v0.57.51: safeSendMessage swallows the sync throw on context loss.
+    safeSendMessage({
       type: 'PROFILE_BLOCKED',
       contactId: fpContactId,
       platform: fpPlatform,
@@ -784,7 +785,7 @@ function showFloatingPanel(contactId: string, platform: string): void {
   // Reminder — quick 1-hour reminder
   panel.querySelector('.fp-reminder-btn')!.addEventListener('click', () => {
     const dueAt = new Date(Date.now() + 3600_000).toISOString(); // 1 hour from now
-    chrome.runtime.sendMessage({
+    safeSendMessage({
       type: 'CREATE_REMINDER',
       contactId: fpContactId,
       platform: fpPlatform,
@@ -807,25 +808,35 @@ function showFloatingPanel(contactId: string, platform: string): void {
   panel.querySelector('#fp-notes-input')!.addEventListener('input', (e) => {
     if (nt) clearTimeout(nt);
     nt = setTimeout(() => {
-      chrome.runtime.sendMessage({ type: 'UPSERT_THREAD_META', contactId: fpContactId, platform: fpPlatform, updates: { notes: (e.target as HTMLTextAreaElement).value } }).catch(() => {});
+      safeSendMessage({ type: 'UPSERT_THREAD_META', contactId: fpContactId, platform: fpPlatform, updates: { notes: (e.target as HTMLTextAreaElement).value } }).catch(() => {});
       const st = panel.querySelector('#fp-status') as HTMLElement;
       if (st) { st.textContent = 'Saved'; setTimeout(() => { st.textContent = ''; }, 1500); }
     }, 800);
   });
 
-  // Stars
+  // Stars — v0.57.51: routed through safeSendMessage. Direct
+  // chrome.runtime.sendMessage was throwing synchronously when the
+  // extension was reloaded mid-session; the throw escaped the .catch()
+  // chain because .catch only catches async rejections. Same fix
+  // class as v0.57.32's seedChatTimestamps and scrapeChatPanel.
   panel.querySelectorAll('.fp-star').forEach(star => {
     star.addEventListener('click', () => {
-      const r = parseInt((star as HTMLElement).dataset.star || '0');
-      const cur = panel.querySelectorAll('.fp-star.active').length;
-      const nr = r === cur ? 0 : r;
-      panel.querySelectorAll('.fp-star').forEach((s, i) => s.classList.toggle('active', i < nr));
-      chrome.runtime.sendMessage({ type: 'SET_RATING', contactId: fpContactId, platform: fpPlatform, rating: nr }).catch(() => {});
+      try {
+        const r = parseInt((star as HTMLElement).dataset.star || '0');
+        const cur = panel.querySelectorAll('.fp-star.active').length;
+        const nr = r === cur ? 0 : r;
+        panel.querySelectorAll('.fp-star').forEach((s, i) => s.classList.toggle('active', i < nr));
+        safeSendMessage({ type: 'SET_RATING', contactId: fpContactId, platform: fpPlatform, rating: nr }).catch(() => {});
+      } catch (err) {
+        // Defensive — if the panel was orphaned by a reload mid-click, we
+        // don't want the error to bubble up as Uncaught and fill the log.
+        console.warn(`${LOG} fp star click error:`, (err as Error).message);
+      }
     });
   });
 
   // Populate data
-  chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId }).then((res: any) => {
+  safeSendMessage({ type: 'GET_THREAD_META', contactId }).then((res: any) => {
     const m = res?.meta || {};
     (panel.querySelector('#fp-notes-input') as HTMLTextAreaElement).value = m.notes || '';
     const rating = m.rating || 0;

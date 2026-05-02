@@ -4430,6 +4430,8 @@ function ffPopulateFilters(f) {
   document.getElementById('ff-zero-deletes').checked = !!f.requireZeroDeletes;
   document.getElementById('ff-currently-active').checked = !!f.requireCurrentlyActive;
   document.getElementById('ff-respect-prefs').checked = !!f.respectPreferences;
+  const autoApproveEl = document.getElementById('ff-auto-approve');
+  if (autoApproveEl) autoApproveEl.checked = !!f.autoApprove;
   document.getElementById('ff-active-min').value = f.activeWindowMinutes;
   document.getElementById('ff-max-distance').value = f.maxDistanceMiles;
   document.getElementById('ff-max-candidates').value = f.maxCandidates;
@@ -4443,6 +4445,7 @@ function ffReadFilters() {
     requireZeroDeletes: document.getElementById('ff-zero-deletes').checked,
     requireCurrentlyActive: document.getElementById('ff-currently-active').checked,
     respectPreferences: document.getElementById('ff-respect-prefs').checked,
+    autoApprove: !!document.getElementById('ff-auto-approve')?.checked,
     activeWindowMinutes: parseInt(document.getElementById('ff-active-min').value) || 30,
     maxDistanceMiles: parseInt(document.getElementById('ff-max-distance').value) || 0,
     maxCandidates: parseInt(document.getElementById('ff-max-candidates').value) || 50,
@@ -4465,6 +4468,26 @@ document.getElementById('ff-build')?.addEventListener('click', async () => {
     if (!ffCurrentCandidates.length) {
       status.textContent = `No candidates found from ${res.totalContacts} contacts. Loosen your filters.`;
       status.style.color = '#fbbf24';
+      return;
+    }
+    // v0.57.51: auto-approve fast-path. When the toggle is on, skip the
+    // approve step entirely — fire FF_APPROVE_RUN with every candidate
+    // checked, no permanent-ignore additions, jump straight to running.
+    // Confirm prompt still shows so the user sees the count + pace before
+    // intros actually start firing.
+    if (filters.autoApprove) {
+      const ids = ffCurrentCandidates.map(c => c.contactId);
+      const proceed = confirm(`Auto-approve is ON.\n\nSend intros to ${ids.length} matching profiles?\n\nNo deselection step. Pace: ~${filters.paceSeconds}s between sends. Click Stop Now any time to abort.`);
+      if (!proceed) {
+        // User backed out — fall through to manual review.
+        ffRenderCandidates();
+        ffStep('approve');
+        return;
+      }
+      const apprRes = await chrome.runtime.sendMessage({ type: 'FF_APPROVE_RUN', approvedIds: ids, ignoredIds: [] });
+      if (!apprRes?.ok) { alert(`Failed to start: ${apprRes?.error || 'unknown'}`); return; }
+      ffStep('running');
+      ffStartPolling();
       return;
     }
     ffRenderCandidates();

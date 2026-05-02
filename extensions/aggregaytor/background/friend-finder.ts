@@ -35,6 +35,12 @@ export interface FFFilters {
   maxCandidates: number;
   paceSeconds: number;
   paceJitterPercent: number;
+  // v0.57.51: skip the approve step entirely. When true, FF_BUILD_CANDIDATES
+  // returns the ranked list AND the panel immediately calls FF_APPROVE_RUN
+  // with every candidate checked. No deselection step, no permanent-ignore
+  // additions for this run. Useful when the user already trusts their
+  // filter set and just wants to fire the queue.
+  autoApprove: boolean;
 }
 
 export interface FFCandidate {
@@ -76,6 +82,7 @@ const DEFAULT_FILTERS: FFFilters = {
   maxCandidates: 50,
   paceSeconds: 90,
   paceJitterPercent: 30,
+  autoApprove: false, // off by default — review-first is the safer default
 };
 
 export async function getFFState(): Promise<FFState> {
