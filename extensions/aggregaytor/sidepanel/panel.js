@@ -199,6 +199,8 @@ async function loadThreads() {
       return;
     }
     if (threadRes?.ok) {
+      // v0.57.52: clean load → reset auto-escalation ladder.
+      _inboxFailureCount = 0;
       const all = threadRes.summaries;
       // Filter by active platforms for display, but use ALL for badge counts
       let filtered;
@@ -247,6 +249,47 @@ async function loadThreads() {
   }
 }
 
+// v0.57.52: track consecutive inbox-load failures so we can auto-escalate
+// through the recovery actions without the user clicking each one. Resets
+// to 0 on the first successful loadThreads call.
+let _inboxFailureCount = 0;
+const AUTO_ESCALATION_STEPS = [
+  // Each step has: a label (shown in the status banner), a function that
+  // performs the recovery action, and the user-visible button id it
+  // corresponds to (so we can highlight which action ran).
+  { label: 'Retrying load',                      action: 'retry',   run: () => loadThreads() },
+  { label: 'Freeing SW memory then retrying',    action: 'free',    run: async () => {
+      try { await chrome.runtime.sendMessage({ type: 'FREE_SW_MEMORY' }); } catch {}
+      await new Promise(r => setTimeout(r, 200));
+      loadThreads();
+  } },
+  { label: 'Compacting database (5–30s)',        action: 'compact', run: () => kickOffAndPollCompact('COMPACT_DB') },
+  { label: 'Rebuilding database (30–90s)',       action: 'rebuild', run: () => kickOffAndPollCompact('REBUILD_DB') },
+  { label: 'Reloading extension',                action: 'reload',  run: () => chrome.runtime.reload() },
+];
+
+async function kickOffAndPollCompact(type) {
+  try {
+    const start = await chrome.runtime.sendMessage({ type, trigger: 'auto-escalation' });
+    if (!start?.ok) throw new Error(start?.error || 'SW refused');
+  } catch {
+    return;
+  }
+  // Poll status until done, then trigger loadThreads
+  let ticks = 0;
+  while (true) {
+    let res;
+    try { res = await chrome.runtime.sendMessage({ type: 'GET_COMPACT_STATUS' }); } catch { res = null; }
+    const s = res?.status;
+    if (!s || s.state === 'idle') break;
+    if (s.state === 'done') { setTimeout(() => loadThreads(), 600); return; }
+    if (s.state === 'error') return;
+    ticks++;
+    await new Promise(r => setTimeout(r, ticks < 5 ? 1000 : 2000));
+    if (ticks > 600) return;
+  }
+}
+
 // v0.57.38: surface inbox-load failures in the UI instead of leaving the
 // user staring at frozen skeletons. Replaces the thread-list with an
 // actionable error card: explains what happened, offers Retry + Free SW
@@ -255,23 +298,62 @@ async function loadThreads() {
 //   2. SW returned undefined (channel closed)
 //   3. SW returned { ok: false, error }
 //   4. catch block on sync throw
+//
+// v0.57.52: auto-escalation. The card now starts a countdown that fires
+// the next recovery step automatically if the user doesn't click a
+// button manually. Each consecutive failure climbs one step up the
+// ladder: Retry → Free Mem → Compact → Rebuild → Reload. The status
+// banner names the action and the countdown so the user can intervene.
 function renderInboxLoadError(reason) {
+  _inboxFailureCount++;
   const container = document.getElementById('thread-list');
   if (!container) return;
+  // Pick the auto-escalation step based on consecutive failure count.
+  // 1st fail → Retry, 2nd → Free, 3rd → Compact, 4th → Rebuild, 5th+ → Reload.
+  const stepIdx = Math.min(_inboxFailureCount - 1, AUTO_ESCALATION_STEPS.length - 1);
+  const step = AUTO_ESCALATION_STEPS[stepIdx];
+  // Countdown: 30s before auto-escalating. User can click a button or wait.
+  const COUNTDOWN_SEC = 30;
   container.innerHTML = `
     <div class="empty-state">
-      <h2>Inbox load failed</h2>
-      <p style="color:#fbbf24;font-size:11px;margin:4px 0 12px">${esc(reason)}</p>
-      <p style="color:#9ca3af;font-size:11px">The service worker may be busy on a heavy database scan, suspended by Chrome, or wedged. Try:</p>
+      <h2>Inbox load failed (attempt #${_inboxFailureCount})</h2>
+      <p style="color:#fbbf24;font-size:11px;margin:4px 0 8px">${esc(reason)}</p>
+      <div id="inbox-err-banner" style="background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.4);border-radius:6px;padding:8px;margin:6px 0;font-size:11px;color:#fbbf24">
+        <strong>Auto-recovery:</strong> ${esc(step.label)} in <span id="inbox-err-countdown">${COUNTDOWN_SEC}</span>s.
+        <span style="color:#9ca3af">Click a button below to act now or pick a different recovery.</span>
+      </div>
+      <p style="color:#9ca3af;font-size:11px;margin-bottom:6px">The service worker may be busy on a heavy database scan, suspended by Chrome, or wedged. Recovery options:</p>
       <div class="empty-actions" style="flex-direction:column;gap:6px;align-items:stretch">
-        <button class="empty-action-btn" id="inbox-err-retry">Retry</button>
-        <button class="empty-action-btn" id="inbox-err-free">Free SW Memory + Retry</button>
-        <button class="empty-action-btn" id="inbox-err-compact" style="border-color:rgba(251,191,36,0.5);color:#fbbf24">Compact Database + Retry (5–30s)</button>
-        <button class="empty-action-btn" id="inbox-err-rebuild" style="border-color:rgba(239,68,68,0.5);color:#f87171">Rebuild Database (when Compact won't finish)</button>
-        <button class="empty-action-btn" id="inbox-err-reload" style="border-color:rgba(239,68,68,0.3);color:#f87171">Reload Extension</button>
+        <button class="empty-action-btn" id="inbox-err-retry"${stepIdx === 0 ? ' style="border-color:rgba(251,191,36,0.6);box-shadow:0 0 0 1px rgba(251,191,36,0.4)"' : ''}>Retry${stepIdx === 0 ? ' (will auto-fire)' : ''}</button>
+        <button class="empty-action-btn" id="inbox-err-free"${stepIdx === 1 ? ' style="border-color:rgba(251,191,36,0.6);box-shadow:0 0 0 1px rgba(251,191,36,0.4)"' : ''}>Free SW Memory + Retry${stepIdx === 1 ? ' (will auto-fire)' : ''}</button>
+        <button class="empty-action-btn" id="inbox-err-compact" style="border-color:rgba(251,191,36,0.5);color:#fbbf24${stepIdx === 2 ? ';box-shadow:0 0 0 1px rgba(251,191,36,0.6)' : ''}">Compact Database + Retry (5–30s)${stepIdx === 2 ? ' — will auto-fire' : ''}</button>
+        <button class="empty-action-btn" id="inbox-err-rebuild" style="border-color:rgba(239,68,68,0.5);color:#f87171${stepIdx === 3 ? ';box-shadow:0 0 0 1px rgba(239,68,68,0.6)' : ''}">Rebuild Database (when Compact won't finish)${stepIdx === 3 ? ' — will auto-fire' : ''}</button>
+        <button class="empty-action-btn" id="inbox-err-reload" style="border-color:rgba(239,68,68,0.3);color:#f87171${stepIdx === 4 ? ';box-shadow:0 0 0 1px rgba(239,68,68,0.6)' : ''}">Reload Extension${stepIdx === 4 ? ' — will auto-fire' : ''}</button>
+        <button class="empty-action-btn" id="inbox-err-cancel-auto" style="border-color:rgba(255,255,255,0.2);color:#9ca3af;font-size:10px">Cancel auto-recovery</button>
       </div>
     </div>
   `;
+  // Countdown timer — fires the auto-escalation step when it hits 0.
+  let remaining = COUNTDOWN_SEC;
+  const cd = container.querySelector('#inbox-err-countdown');
+  let cancelled = false;
+  const tick = setInterval(() => {
+    remaining--;
+    if (cd) cd.textContent = String(Math.max(0, remaining));
+    if (remaining <= 0) {
+      clearInterval(tick);
+      if (!cancelled) {
+        const banner = container.querySelector('#inbox-err-banner');
+        if (banner) banner.innerHTML = `<strong>Running:</strong> ${esc(step.label)}…`;
+        try { step.run(); } catch (err) { console.error('[Panel] Auto-recovery step threw:', err); }
+      }
+    }
+  }, 1000);
+  container.querySelector('#inbox-err-cancel-auto')?.addEventListener('click', () => {
+    cancelled = true; clearInterval(tick);
+    const banner = container.querySelector('#inbox-err-banner');
+    if (banner) banner.innerHTML = '<strong>Auto-recovery cancelled.</strong> Click a button to recover manually.';
+  });
   container.querySelector('#inbox-err-retry')?.addEventListener('click', () => {
     container.innerHTML = '';
     loadThreads();
