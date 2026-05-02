@@ -156,6 +156,14 @@ interface ProviderEndpoint {
   url: (apiKey: string) => string;
   headers?: (apiKey: string) => Record<string, string>;
   extract: (json: any) => string[];
+  // v0.57.56: hardcoded fallback list for providers whose /models
+  // endpoint blocks cross-origin fetches from the extension SW.
+  // Anthropic is the well-known case (no Access-Control-Allow-Origin
+  // header for browser-origin requests; can't be worked around in MV3
+  // without a relay server). When fetch fails with a CORS-class
+  // TypeError, we use this list as the "available models" set so
+  // family-rank selection still works.
+  staticFallbackModels?: string[];
 }
 
 const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
@@ -174,6 +182,22 @@ const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
     url: () => 'https://api.anthropic.com/v1/models',
     headers: (k) => ({ 'x-api-key': k, 'anthropic-version': '2023-06-01' }),
     extract: (j) => Array.isArray(j?.data) ? (j.data as any[]).map(m => String(m.id || '')) : [],
+    // Anthropic's /v1/models doesn't include Access-Control-Allow-Origin
+    // for browser-origin fetches. We can't reach it from a Chrome
+    // extension SW without a relay. Static list maintained here —
+    // updated when Anthropic announces new models. The family-rank
+    // logic still works against this list.
+    staticFallbackModels: [
+      'claude-haiku-4-5-20251001',
+      'claude-haiku-4-5',
+      'claude-haiku-5-0',
+      'claude-haiku-5-20260301',
+      'claude-sonnet-4-5-20250929',
+      'claude-sonnet-4-5',
+      'claude-sonnet-5-0',
+      'claude-opus-4-1-20250805',
+      'claude-opus-4-1',
+    ],
   },
   groq: {
     url: () => 'https://api.groq.com/openai/v1/models',
@@ -206,6 +230,7 @@ async function checkProvider(
   if (!ep || !rule) return null;
 
   let ids: string[] = [];
+  let usedFallback = false;
   try {
     const headers: Record<string, string> = ep.headers ? ep.headers(apiKey) : {};
     headers['Accept'] = 'application/json';
@@ -216,10 +241,21 @@ async function checkProvider(
     const json = await res.json();
     ids = ep.extract(json);
   } catch (err) {
-    // Single-provider failure shouldn't kill the whole sweep — caller
-    // collects errors but still returns suggestions from successful
-    // providers.
-    throw err;
+    // v0.57.56: classify the failure. Fetch errors that surface as
+    // TypeError with no status are almost always CORS or network-level
+    // (browser blocks before the request even leaves). For providers
+    // we know block CORS (Anthropic), fall back to the static model
+    // list and continue. For others, propagate so the caller surfaces
+    // the error to the user.
+    const msg = (err as Error).message || String(err);
+    const isCorsLike = err instanceof TypeError && /failed to fetch|network/i.test(msg);
+    if (isCorsLike && ep.staticFallbackModels) {
+      ids = ep.staticFallbackModels;
+      usedFallback = true;
+      console.log(`[Aggregaytor:ModelUpdater] ${provider} /models blocked by CORS, using static fallback (${ids.length} models)`);
+    } else {
+      throw err;
+    }
   }
 
   // Filter to family + rank
@@ -243,7 +279,7 @@ async function checkProvider(
     provider,
     current: currentModel,
     suggested: best,
-    reason: `Family rank ${bestRank} > current ${currentRank} (matched ${matching.length} ${provider} models)`,
+    reason: `Family rank ${bestRank} > current ${currentRank} (matched ${matching.length} ${provider} models${usedFallback ? ', from static fallback list — provider blocks browser /models fetches' : ''})`,
     foundAt: Date.now(),
   };
 }

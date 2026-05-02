@@ -1183,8 +1183,16 @@ async function handleMessage(msg: any): Promise<any> {
       const result = await checkAllProviders(getKey, finalGetModel);
       state.lastCheckAt = Date.now();
       state.suggestions = result.suggestions;
-      state.lastError = result.errors.length
-        ? result.errors.map(e => `${e.provider}: ${e.error}`).join('; ')
+      // v0.57.56: filter out CORS-class errors from the user-facing
+      // status string. They're known limitations (Anthropic blocks
+      // browser-origin /models) and the static fallback path already
+      // produced suggestions if any. Surfacing them as errors makes
+      // it look like something's broken when it's working as designed.
+      const realErrors = result.errors.filter(e =>
+        !/failed to fetch|cors|network/i.test(e.error)
+      );
+      state.lastError = realErrors.length
+        ? realErrors.map(e => `${e.provider}: ${e.error}`).join('; ')
         : '';
       await saveUpdaterState(state);
       console.log(`${LOG} model-updater: checked ${Object.keys(keys).length} provider(s), found ${result.suggestions.length} suggestion(s), ${result.errors.length} error(s)`);
