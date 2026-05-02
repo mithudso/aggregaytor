@@ -61,6 +61,8 @@ interface MapFilterSettings {
 
 const SCAN_INTERVAL_MS = 5000;
 const HIDE_CLASS = 'aggregaytor-hide';
+const SHOW_CLASS = 'aggregaytor-show';   // v0.57.55: explicit reveal — opposes the default-hide
+const FILTERING_BODY_CLASS = 'aggregaytor-filtering';
 const HIGHLIGHT_CLASS = 'aggregaytor-highlight';
 const HIGHLIGHT_ATTITUDE_CLASS = 'aggregaytor-highlight-attitude';
 const BADGE_CLASS = 'aggregaytor-chat-badge';
@@ -161,6 +163,28 @@ function injectStyles(): void {
   const style = document.createElement('style');
   style.id = 'aggregaytor-map-filter-css';
   style.textContent = `
+    /* v0.57.55: anti-FOUC default-hide. The body gets
+       'aggregaytor-filtering' added whenever ANY filter is active.
+       While that class is present, every map marker that hasn't been
+       explicitly classified as passing (.aggregaytor-show) starts
+       invisible. The filter pass then either keeps it hidden via
+       .aggregaytor-hide or reveals it via .aggregaytor-show. The net
+       effect: no more brief visible flash before a marker is hidden —
+       it's invisible until the filter says otherwise. Markers with
+       known-good attitude/text live for ~16ms before reveal (the next
+       requestAnimationFrame tick) which is below the flicker threshold. */
+    body.aggregaytor-filtering .maplibregl-marker:not(.${SHOW_CLASS}):not(.${HIDE_CLASS}),
+    body.aggregaytor-filtering .marker-container:not(.${SHOW_CLASS}):not(.${HIDE_CLASS}),
+    body.aggregaytor-filtering [data-testid="cv-marker"]:not(.${SHOW_CLASS}):not(.${HIDE_CLASS}) {
+      opacity: 0 !important;
+      pointer-events: none !important;
+      transition: opacity 0.12s;
+    }
+    .${SHOW_CLASS} {
+      opacity: 1 !important;
+      pointer-events: auto !important;
+      transition: opacity 0.12s;
+    }
     .${HIDE_CLASS} {
       display: none !important;
       visibility: hidden !important;
@@ -619,7 +643,19 @@ function applyFilters(): void {
     settings.highlightVersTop || settings.highlightTop ||
     settings.showChatAgeBadges ||
     settings.hideInactiveOver2h;
-  if (!anyFilterOn) return;
+  // v0.57.55: toggle the body class that drives default-hide. The CSS
+  // hides every marker that doesn't have .aggregaytor-show or .hide
+  // while this class is present. Removed when no filter is active so
+  // the map looks normal.
+  if (anyFilterOn) document.body.classList.add(FILTERING_BODY_CLASS);
+  else document.body.classList.remove(FILTERING_BODY_CLASS);
+  if (!anyFilterOn) {
+    // Strip our show/hide classes so the markers go back to native behavior.
+    for (const marker of idToMarker.values()) {
+      marker.classList.remove(HIDE_CLASS, SHOW_CLASS, HIGHLIGHT_CLASS, HIGHLIGHT_ATTITUDE_CLASS);
+    }
+    return;
+  }
   let nMarkers = 0;
   let nHiddenByBlock = 0, nHiddenByText = 0, nHiddenByAttitude = 0;
   let nHiddenByWaiting24h = 0, nHiddenByWaitingEver = 0;
@@ -630,7 +666,7 @@ function applyFilters(): void {
   for (const [id, marker] of idToMarker) {
     nMarkers++;
     // Remove all classes first
-    marker.classList.remove(HIDE_CLASS, HIGHLIGHT_CLASS, HIGHLIGHT_ATTITUDE_CLASS);
+    marker.classList.remove(HIDE_CLASS, SHOW_CLASS, HIGHLIGHT_CLASS, HIGHLIGHT_ATTITUDE_CLASS);
 
     // Priority 1: manually blocked
     if (settings.blockedIds.has(id)) {
@@ -710,6 +746,12 @@ function applyFilters(): void {
       nHiddenByAttitude++;
       continue;
     }
+
+    // v0.57.55: passing marker — explicitly reveal so the body-class
+    // default-hide doesn't keep it invisible. Without this every passing
+    // marker would also stay hidden (CSS doesn't know the difference
+    // between "not yet evaluated" and "evaluated, passes").
+    marker.classList.add(SHOW_CLASS);
 
     // Not hidden — check highlights
     if (settings.includeEnabled && settings.includeTerms.length) {
@@ -1429,11 +1471,51 @@ export function initMapFilters(): void {
   // Initial scan after DOM settles
   setTimeout(() => requestAnimationFrame(applyFilters), 3000);
 
+  // v0.57.55: anti-FOUC MutationObserver. The 5s scan interval is fine
+  // for catching ongoing changes but useless for the moment a marker
+  // first enters the DOM — Sniffies renders it visible, then we hide
+  // it 0-5s later, producing the user-visible flash. With the new
+  // body.aggregaytor-filtering default-hide CSS in place, new markers
+  // are already invisible by default; this observer just kicks
+  // applyFilters() the moment a marker is added so passing ones get
+  // .aggregaytor-show within one rAF tick (~16ms) instead of up to 5s.
+  // Debounced so a burst of marker mutations only triggers one scan.
+  let _moDebounce: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const mo = new MutationObserver((mutations) => {
+      let saw = false;
+      for (const m of mutations) {
+        for (const node of m.addedNodes) {
+          if (node.nodeType !== Node.ELEMENT_NODE) continue;
+          const el = node as Element;
+          if (el.classList?.contains('maplibregl-marker') ||
+              el.querySelector?.('.maplibregl-marker') ||
+              el.classList?.contains('marker-container') ||
+              el.querySelector?.('.marker-container')) {
+            saw = true; break;
+          }
+        }
+        if (saw) break;
+      }
+      if (!saw) return;
+      if (_moDebounce) return;
+      _moDebounce = setTimeout(() => {
+        _moDebounce = null;
+        requestAnimationFrame(applyFilters);
+      }, 50); // 50ms debounce — marker bursts collapse into one scan
+    });
+    mo.observe(document.body || document.documentElement, {
+      childList: true, subtree: true,
+    });
+  } catch (err) {
+    console.warn('[Aggregaytor:MapFilters] MutationObserver setup failed:', (err as Error).message);
+  }
+
   // Partials prefetcher — keeps markerAttitudes populated so position
   // filters work for profiles the user hasn't manually opened yet.
   // Rate-limited internally; runs only when a position chip is on.
   setInterval(tickPartialsPrefetch, 4000);
   setTimeout(tickPartialsPrefetch, 5000);
 
-  console.log('[Aggregaytor:MapFilters] Initialized — scanning every 5s');
+  console.log('[Aggregaytor:MapFilters] Initialized — scanning every 5s + DOM observer for new markers');
 }
