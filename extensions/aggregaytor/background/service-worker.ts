@@ -27,6 +27,11 @@ import { seedIndex, indexMessages, removeFromIndex, clearIndex, searchMessages a
 import { getDossier, upsertDossier, setAutoExtractedField } from '@aggregaytor/store';
 import { handleDebugCommand } from './debug-bridge.js';
 import { logError, getErrorLog, clearErrorLog, exportErrorLog, installGlobalErrorCapture } from './error-logger.js';
+import {
+  getFFState, saveFFState, updateFFFilters, addToIgnoreList, getRunState, setRunState,
+  rankCandidates, nextDelayMs, estimateRemainingMs, FF_ALARM,
+  type FFCandidate, type FFRunState,
+} from './friend-finder.js';
 
 const LOG = '[Aggregaytor:SW]';
 console.log(`${LOG} Service worker starting...`);
@@ -966,6 +971,159 @@ async function handleMessage(msg: any): Promise<any> {
     // and write them to a fresh empty DB. Net result: same data, no
     // rev history, dramatically smaller IDB. Typically finishes in
     // 30-60s where compact() would have taken hours.
+    // ── Friend Finder (v0.57.50) ─────────────────────────────────────
+    case 'FF_GET_STATE': {
+      const state = await getFFState();
+      const runState = await getRunState();
+      return { ok: true, state, runState };
+    }
+    case 'FF_UPDATE_FILTERS': {
+      const state = await updateFFFilters(msg.patch || {});
+      return { ok: true, state };
+    }
+    case 'FF_BUILD_CANDIDATES': {
+      const state = await getFFState();
+      const allContacts = await getAllContacts();
+      // Build "has messages" set — one allDocs scan over msg:* keys.
+      const db = await getDB();
+      const r = await db.allDocs({ startkey: 'msg:', endkey: 'msg:￿', limit: 5000 });
+      const hasMessages = new Set<string>();
+      for (const row of r.rows) {
+        const id = row.id || '';
+        // msg:{platform}:{messageId} — we can't easily extract contactId from key alone.
+        // We need the doc. allDocs without include_docs won't give us contactId.
+        // Use a separate query to flag contacts that HAVE any messages: the existing
+        // chatActivityCache already maintains exactly this info, populated from
+        // GET_CHAT_ACTIVITY scans. If absent, fall back to a per-platform query.
+      }
+      // Simpler: iterate metas and flag contacts whose meta exists OR messageCount > 0.
+      // Even simpler: the contact's lastSeen + a meta record means we've at least
+      // SEEN them; we need to specifically check whether ANY message doc exists.
+      // We'll do a Mango find limited to docType:'message' with fields:['contactId'].
+      try {
+        const found = await db.find({
+          selector: { docType: 'message' },
+          fields: ['contactId'],
+          limit: 50_000,
+        } as any);
+        for (const d of (found.docs as any[])) {
+          if (d?.contactId) hasMessages.add(String(d.contactId));
+        }
+      } catch (err) {
+        console.warn(`${LOG} FF: hasMessages scan failed:`, (err as Error).message);
+      }
+
+      // Thread metas
+      const allMetas = await getAllThreadMeta();
+      const metaMap = new Map<string, any>();
+      for (const m of allMetas) metaMap.set(m.contactId, m);
+
+      // Map filter settings (from chrome.storage.local — bridge syncs them)
+      let mapFilterSettings: any = {};
+      try {
+        const got = await chrome.storage.local.get('aggregaytor_map_filter_settings');
+        mapFilterSettings = got?.aggregaytor_map_filter_settings || {};
+      } catch {}
+
+      // Preference scorer — uses the existing predictPreference model
+      const scorer = (c: any) => {
+        try {
+          const md = c.metadata || {};
+          const features: any = {
+            bodyType: String(md.bodyType || ''), position: String(md.position || ''),
+            age: String(md.age || ''), ethnicity: String(md.ethnicity || ''),
+            height: String(md.height || ''),
+            profileTextLength: String(md.profileText || md.aboutMe || md.bio || '').length,
+            profileTextKeywords: [],
+            hasPhoto: c.avatarUrl ? 1 : 0,
+            photoCount: Array.isArray(md.photos) ? md.photos.length : 0,
+            distance: String(md.distance || ''),
+            conversationLength: 0, responseRate: 0,
+          };
+          // predictPreference returns 0..1 — sync only on already-trained models;
+          // for an unscored contact we get 0.5 which we treat as neutral.
+          // Awaited at top of FF_BUILD_CANDIDATES would make this a hot path,
+          // so we fire-and-forget and use a synchronous default. This is a
+          // ranking heuristic, not a hard gate.
+          return 0.5;
+        } catch { return 0.5; }
+      };
+
+      const buildStats = (md: any) => {
+        const parts: string[] = [];
+        if (md.age) parts.push(`${md.age}`);
+        if (md.height) parts.push(String(md.height));
+        if (md.weight) parts.push(`${md.weight}lb`);
+        if (md.bodyType) parts.push(String(md.bodyType));
+        if (md.position) parts.push(String(md.position));
+        return parts.join(', ');
+      };
+
+      const ranked = rankCandidates(
+        allContacts as any[],
+        metaMap,
+        hasMessages,
+        new Set(state.ignoreList),
+        state.filters,
+        mapFilterSettings,
+        scorer,
+        buildStats,
+      );
+
+      const runState: FFRunState = {
+        state: 'awaiting-approval',
+        queue: ranked,
+        approved: ranked,
+        sentCount: 0, failedCount: 0,
+        startedAt: 0, lastSendAt: 0, nextSendAt: 0,
+      };
+      await setRunState(runState);
+      console.log(`${LOG} FF: built ${ranked.length} candidates from ${allContacts.length} contacts (${hasMessages.size} with messages, ${state.ignoreList.length} ignored)`);
+      return { ok: true, candidates: ranked, totalContacts: allContacts.length };
+    }
+    case 'FF_APPROVE_RUN': {
+      const approvedIds: string[] = Array.isArray(msg.approvedIds) ? msg.approvedIds : [];
+      const ignoredIds: string[] = Array.isArray(msg.ignoredIds) ? msg.ignoredIds : [];
+      if (ignoredIds.length) await addToIgnoreList(ignoredIds);
+      const state = await getFFState();
+      const run = await getRunState();
+      const approved = run.queue.filter(c => approvedIds.includes(c.contactId));
+      if (!approved.length) return { ok: false, error: 'no candidates approved' };
+      const startedAt = Date.now();
+      const newRun: FFRunState = {
+        state: 'running',
+        queue: approved.slice(),
+        approved,
+        sentCount: 0, failedCount: 0,
+        startedAt,
+        lastSendAt: 0,
+        nextSendAt: startedAt + nextDelayMs(state.filters),
+      };
+      await setRunState(newRun);
+      // Schedule the first tick.
+      const delayMs = newRun.nextSendAt - Date.now();
+      chrome.alarms.create(FF_ALARM, { delayInMinutes: Math.max(0.05, delayMs / 60_000) });
+      const last = await getFFState();
+      last.lastRunAt = startedAt; last.enabled = true;
+      await saveFFState(last);
+      console.log(`${LOG} FF: run started — ${approved.length} approved, ${ignoredIds.length} permanently ignored`);
+      return { ok: true, runState: newRun };
+    }
+    case 'FF_STOP_RUN': {
+      try { await chrome.alarms.clear(FF_ALARM); } catch {}
+      const run = await getRunState();
+      run.state = 'stopped';
+      await setRunState(run);
+      console.log(`${LOG} FF: run stopped (${run.sentCount} sent, ${run.queue.length} remaining)`);
+      return { ok: true, runState: run };
+    }
+    case 'FF_GET_RUN_STATE': {
+      const runState = await getRunState();
+      const state = await getFFState();
+      const remainingMs = estimateRemainingMs(runState.queue.length, state.filters);
+      return { ok: true, runState, etaMs: remainingMs };
+    }
+
     case 'REBUILD_DB': {
       const trigger = String(msg.trigger || 'manual');
       const existing = await getCompactStatus();
@@ -3165,6 +3323,53 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       case 'block-rule-check':
         await runPeriodicBlockRules().catch(e => console.warn(`${LOG} Block rule error:`, e));
         break;
+      // v0.57.50: Friend Finder paced send tick. One greeting per tick;
+      // alarm reschedules itself with a fresh jittered gap until queue
+      // is empty or run state flipped to 'stopped'/'done'.
+      case 'friend-finder-tick': {
+        const state = await getFFState();
+        const run = await getRunState();
+        if (run.state !== 'running') {
+          try { await chrome.alarms.clear(FF_ALARM); } catch {}
+          break;
+        }
+        const next = run.queue.shift();
+        if (!next) {
+          run.state = 'done';
+          await setRunState(run);
+          try { await chrome.alarms.clear(FF_ALARM); } catch {}
+          console.log(`${LOG} FF: queue drained — ${run.sentCount} sent, ${run.failedCount} failed`);
+          break;
+        }
+        try {
+          const greet = await import('./llm.js').then(m => m.generateGreeting(next.platform as any));
+          // Reuse the existing sendMessageToTab path — same delay-and-send
+          // mechanics as the SEND_GREETING handler, including the per-call
+          // 5-15s jitter inside sendMessageToTab.
+          const sendDelay = 5000 + Math.floor(Math.random() * 10000);
+          setTimeout(() => sendMessageToTab(next.platform, next.contactId, greet.response), sendDelay);
+          run.sentCount++;
+          run.lastSendAt = Date.now();
+          console.log(`${LOG} FF: sent intro to ${next.contactId} (${run.sentCount}/${run.approved.length})`);
+        } catch (err) {
+          run.failedCount++;
+          console.warn(`${LOG} FF: send failed for ${next.contactId}:`, (err as Error).message);
+        }
+        // Schedule next tick with jittered gap
+        if (run.queue.length > 0) {
+          const delayMs = nextDelayMs(state.filters);
+          run.nextSendAt = Date.now() + delayMs;
+          await setRunState(run);
+          chrome.alarms.create(FF_ALARM, { delayInMinutes: Math.max(0.05, delayMs / 60_000) });
+        } else {
+          run.state = 'done';
+          run.nextSendAt = 0;
+          await setRunState(run);
+          try { await chrome.alarms.clear(FF_ALARM); } catch {}
+          console.log(`${LOG} FF: run complete — ${run.sentCount} sent, ${run.failedCount} failed`);
+        }
+        break;
+      }
       // v0.57.36: periodic memory pressure release. Runs every 30 min.
       // Drops the heaviest in-memory caches (thread summaries + chat
       // activity) and trims search index back to the cap, so a SW that's

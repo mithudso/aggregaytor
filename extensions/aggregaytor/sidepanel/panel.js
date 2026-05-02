@@ -4388,3 +4388,198 @@ loadAdvisoryBanner();
 
 loadThreads();
 loadDrafts();
+
+// ── Friend Finder (v0.57.50) ───────────────────────────────────────────────
+// Toggle next to AR opens a modal that walks the user through filters →
+// candidate list (deselectable) → live run with progress bar + Stop button.
+// All persistent state (filters, ignore list, run) lives in the SW.
+const ffOverlay = document.getElementById('ff-overlay');
+const ffCheckbox = document.getElementById('finder-checkbox');
+let ffPollTimer = null;
+let ffCurrentCandidates = [];
+
+function ffShow() { ffOverlay.style.display = 'flex'; }
+function ffHide() { ffOverlay.style.display = 'none'; if (ffPollTimer) { clearInterval(ffPollTimer); ffPollTimer = null; } }
+function ffStep(name) {
+  for (const id of ['ff-step-filters', 'ff-step-approve', 'ff-step-running']) {
+    document.getElementById(id).style.display = (id === `ff-step-${name}`) ? '' : 'none';
+  }
+}
+
+document.getElementById('ff-close')?.addEventListener('click', () => { ffHide(); ffCheckbox.checked = false; });
+
+ffCheckbox?.addEventListener('change', async () => {
+  if (!ffCheckbox.checked) { ffHide(); return; }
+  // Load current state — if a run is in progress, jump to the running step.
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'FF_GET_STATE' });
+    if (res?.ok) {
+      ffPopulateFilters(res.state.filters);
+      if (res.runState?.state === 'running') {
+        ffShow(); ffStep('running'); ffStartPolling();
+        return;
+      }
+    }
+  } catch {}
+  ffShow(); ffStep('filters');
+});
+
+function ffPopulateFilters(f) {
+  document.getElementById('ff-inherit-map').checked = !!f.inheritMapFilters;
+  document.getElementById('ff-never-chatted').checked = !!f.requireNeverChatted;
+  document.getElementById('ff-zero-deletes').checked = !!f.requireZeroDeletes;
+  document.getElementById('ff-currently-active').checked = !!f.requireCurrentlyActive;
+  document.getElementById('ff-respect-prefs').checked = !!f.respectPreferences;
+  document.getElementById('ff-active-min').value = f.activeWindowMinutes;
+  document.getElementById('ff-max-distance').value = f.maxDistanceMiles;
+  document.getElementById('ff-max-candidates').value = f.maxCandidates;
+  document.getElementById('ff-pace-sec').value = f.paceSeconds;
+}
+
+function ffReadFilters() {
+  return {
+    inheritMapFilters: document.getElementById('ff-inherit-map').checked,
+    requireNeverChatted: document.getElementById('ff-never-chatted').checked,
+    requireZeroDeletes: document.getElementById('ff-zero-deletes').checked,
+    requireCurrentlyActive: document.getElementById('ff-currently-active').checked,
+    respectPreferences: document.getElementById('ff-respect-prefs').checked,
+    activeWindowMinutes: parseInt(document.getElementById('ff-active-min').value) || 30,
+    maxDistanceMiles: parseInt(document.getElementById('ff-max-distance').value) || 0,
+    maxCandidates: parseInt(document.getElementById('ff-max-candidates').value) || 50,
+    paceSeconds: parseInt(document.getElementById('ff-pace-sec').value) || 90,
+    paceJitterPercent: 30,
+  };
+}
+
+document.getElementById('ff-build')?.addEventListener('click', async () => {
+  const btn = document.getElementById('ff-build');
+  const status = document.getElementById('ff-build-status');
+  btn.disabled = true; btn.textContent = 'Searching…';
+  status.textContent = ''; status.style.color = '';
+  try {
+    const filters = ffReadFilters();
+    await chrome.runtime.sendMessage({ type: 'FF_UPDATE_FILTERS', patch: filters });
+    const res = await chrome.runtime.sendMessage({ type: 'FF_BUILD_CANDIDATES' });
+    if (!res?.ok) throw new Error(res?.error || 'build failed');
+    ffCurrentCandidates = res.candidates || [];
+    if (!ffCurrentCandidates.length) {
+      status.textContent = `No candidates found from ${res.totalContacts} contacts. Loosen your filters.`;
+      status.style.color = '#fbbf24';
+      return;
+    }
+    ffRenderCandidates();
+    ffStep('approve');
+  } catch (err) {
+    status.textContent = `Build failed: ${err?.message || err}`;
+    status.style.color = '#f87171';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Find Candidates →';
+  }
+});
+
+function ffRenderCandidates() {
+  const wrap = document.getElementById('ff-candidates');
+  document.getElementById('ff-total-count').textContent = ffCurrentCandidates.length;
+  wrap.innerHTML = ffCurrentCandidates.map((c, i) => `
+    <label class="ff-row" data-idx="${i}" style="display:flex;align-items:center;gap:8px;padding:6px 4px;border-bottom:1px solid rgba(255,255,255,0.04);cursor:pointer">
+      <input type="checkbox" class="ff-cb" data-cid="${esc(c.contactId)}" checked>
+      ${c.avatarUrl ? `<img src="${esc(c.avatarUrl)}" alt="" style="width:32px;height:32px;border-radius:50%;object-fit:cover;flex-shrink:0">` : `<div style="width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,0.05);flex-shrink:0"></div>`}
+      <div style="flex:1;min-width:0">
+        <div style="font-size:11px;color:#e7e9ea;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+          ${esc(c.displayName || stripPrefix(c.contactId))}
+          ${c.distance && c.distance < 9999 ? `<span style="color:#9ca3af;font-size:10px">— ${c.distance} mi</span>` : ''}
+        </div>
+        <div style="font-size:10px;color:#9ca3af;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.stats || '(no stats)')}</div>
+      </div>
+    </label>`).join('');
+  wrap.querySelectorAll('.ff-cb').forEach(cb => cb.addEventListener('change', ffUpdateSelectedCount));
+  ffUpdateSelectedCount();
+}
+
+function ffUpdateSelectedCount() {
+  const n = document.querySelectorAll('#ff-candidates .ff-cb:checked').length;
+  document.getElementById('ff-selected-count').textContent = n;
+}
+
+document.getElementById('ff-select-all')?.addEventListener('click', () => {
+  document.querySelectorAll('#ff-candidates .ff-cb').forEach(cb => cb.checked = true);
+  ffUpdateSelectedCount();
+});
+document.getElementById('ff-select-none')?.addEventListener('click', () => {
+  document.querySelectorAll('#ff-candidates .ff-cb').forEach(cb => cb.checked = false);
+  ffUpdateSelectedCount();
+});
+document.getElementById('ff-back')?.addEventListener('click', () => ffStep('filters'));
+
+document.getElementById('ff-approve')?.addEventListener('click', async () => {
+  const approvedIds = [...document.querySelectorAll('#ff-candidates .ff-cb:checked')].map(cb => cb.dataset.cid);
+  const ignoredIds = [...document.querySelectorAll('#ff-candidates .ff-cb:not(:checked)')].map(cb => cb.dataset.cid);
+  if (!approvedIds.length) { alert('Approve at least one profile.'); return; }
+  if (!confirm(`Send intros to ${approvedIds.length} profiles?\n\n${ignoredIds.length} unchecked profiles will be PERMANENTLY ignored in future Friend Finder runs.\n\nPaced send: ~${ffReadFilters().paceSeconds}s between sends. Click Stop Now any time to abort.`)) return;
+  const res = await chrome.runtime.sendMessage({ type: 'FF_APPROVE_RUN', approvedIds, ignoredIds });
+  if (!res?.ok) { alert(`Failed: ${res?.error || 'unknown'}`); return; }
+  ffStep('running');
+  ffStartPolling();
+});
+
+document.getElementById('ff-stop')?.addEventListener('click', async () => {
+  if (!confirm('Stop the current run? Already-sent intros remain sent.')) return;
+  await chrome.runtime.sendMessage({ type: 'FF_STOP_RUN' });
+  setTimeout(() => ffPoll(), 200);
+});
+
+function ffStartPolling() {
+  if (ffPollTimer) clearInterval(ffPollTimer);
+  ffPoll();
+  ffPollTimer = setInterval(ffPoll, 5000);
+}
+
+async function ffPoll() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'FF_GET_RUN_STATE' });
+    if (!res?.ok) return;
+    const run = res.runState;
+    const total = run.approved?.length || 0;
+    const sent = run.sentCount || 0;
+    const failed = run.failedCount || 0;
+    const remaining = run.queue?.length || 0;
+    const pct = total ? Math.round((sent / total) * 100) : 0;
+    document.getElementById('ff-progress-fill').style.width = `${pct}%`;
+    document.getElementById('ff-progress-stats').textContent =
+      `${sent} sent · ${failed} failed · ${remaining} remaining · ${pct}%`;
+    const eta = res.etaMs || 0;
+    if (eta > 0) {
+      const m = Math.floor(eta / 60_000);
+      const s = Math.round((eta % 60_000) / 1000);
+      document.getElementById('ff-eta').textContent = `Est. time remaining: ${m}m ${s}s · State: ${run.state}`;
+    } else {
+      document.getElementById('ff-eta').textContent = `State: ${run.state}`;
+    }
+    // Render queue
+    const qWrap = document.getElementById('ff-queue');
+    if (qWrap) {
+      qWrap.innerHTML = (run.queue || []).map(c => `
+        <div style="display:flex;align-items:center;gap:8px;padding:4px;border-bottom:1px solid rgba(255,255,255,0.04)">
+          ${c.avatarUrl ? `<img src="${esc(c.avatarUrl)}" alt="" style="width:24px;height:24px;border-radius:50%;object-fit:cover">` : `<div style="width:24px;height:24px;border-radius:50%;background:rgba(255,255,255,0.05)"></div>`}
+          <div style="flex:1;font-size:10px;color:#9ca3af;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+            ${esc(c.displayName || stripPrefix(c.contactId))} · ${c.distance < 9999 ? c.distance + 'mi · ' : ''}${esc(c.stats || '')}
+          </div>
+        </div>`).join('') || '<div style="color:#6b7280;font-size:11px;padding:8px;text-align:center">Queue empty</div>';
+    }
+    // Stop polling once run finishes
+    if (run.state === 'done' || run.state === 'stopped' || run.state === 'idle') {
+      if (ffPollTimer) { clearInterval(ffPollTimer); ffPollTimer = null; }
+    }
+  } catch {}
+}
+
+// On panel load — if a run is already going, restore the running view
+(async function ffRehydrate() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'FF_GET_RUN_STATE' });
+    if (res?.ok && res.runState?.state === 'running') {
+      // Light-weight resume — toggle the indicator on but DON'T auto-open the modal
+      if (ffCheckbox) ffCheckbox.checked = true;
+    }
+  } catch {}
+})();

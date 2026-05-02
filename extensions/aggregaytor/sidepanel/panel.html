@@ -82,6 +82,96 @@
           <span class="toggle-slider"></span>
         </label>
       </div>
+      <div class="global-ar" style="margin-left:6px">
+        <label class="global-ar-toggle" id="finder-toggle" title="Friend Finder — find and intro yourself to nearby profiles passing your filters that you've never chatted with">
+          <span class="global-ar-label">FF</span>
+          <input type="checkbox" id="finder-checkbox">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- Friend Finder modal -->
+  <div id="ff-overlay" class="settings-overlay" style="display:none">
+    <div class="settings-modal" style="max-width:560px">
+      <div class="settings-header">
+        <h2>Friend Finder</h2>
+        <button class="settings-close" id="ff-close">×</button>
+      </div>
+      <div class="settings-body">
+        <div id="ff-step-filters">
+          <div class="settings-section">
+            <h3 class="settings-heading">Intro Filters</h3>
+            <div class="settings-info">By default the finder uses your map-filter settings (position, exclude/include keywords, etc). Toggle these on top of those:</div>
+            <label class="settings-checkbox-label"><input type="checkbox" id="ff-inherit-map" checked> Inherit map filters (position, text exclude/include, etc)</label>
+            <label class="settings-checkbox-label"><input type="checkbox" id="ff-never-chatted" checked> Have never chatted before</label>
+            <label class="settings-checkbox-label"><input type="checkbox" id="ff-zero-deletes" checked> Neither party has ever deleted the chats</label>
+            <label class="settings-checkbox-label"><input type="checkbox" id="ff-currently-active" checked> Is currently active</label>
+            <label class="settings-checkbox-label"><input type="checkbox" id="ff-respect-prefs" checked> Matches my saved preferences (ML feedback model)</label>
+            <div style="display:flex;gap:8px;margin-top:6px">
+              <label style="flex:1">
+                <span style="display:block;font-size:10px;color:#9ca3af;margin-bottom:2px">Active window (min)</span>
+                <input type="number" id="ff-active-min" value="30" min="1" max="360" class="settings-input" style="width:100%">
+              </label>
+              <label style="flex:1">
+                <span style="display:block;font-size:10px;color:#9ca3af;margin-bottom:2px">Max distance (mi, 0 = any)</span>
+                <input type="number" id="ff-max-distance" value="0" min="0" max="500" class="settings-input" style="width:100%">
+              </label>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:6px">
+              <label style="flex:1">
+                <span style="display:block;font-size:10px;color:#9ca3af;margin-bottom:2px">Max candidates</span>
+                <input type="number" id="ff-max-candidates" value="50" min="1" max="500" class="settings-input" style="width:100%">
+              </label>
+              <label style="flex:1">
+                <span style="display:block;font-size:10px;color:#9ca3af;margin-bottom:2px">Pace (sec between sends)</span>
+                <input type="number" id="ff-pace-sec" value="90" min="30" max="3600" class="settings-input" style="width:100%">
+              </label>
+            </div>
+          </div>
+          <div class="settings-section">
+            <button class="settings-btn" id="ff-build" style="width:100%">Find Candidates →</button>
+            <div id="ff-build-status" class="settings-status"></div>
+          </div>
+        </div>
+
+        <div id="ff-step-approve" style="display:none">
+          <div class="settings-section">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+              <h3 class="settings-heading" style="margin:0">Candidates (<span id="ff-selected-count">0</span> selected of <span id="ff-total-count">0</span>)</h3>
+              <div>
+                <button class="settings-btn" id="ff-select-all" style="font-size:10px;padding:2px 8px">All</button>
+                <button class="settings-btn" id="ff-select-none" style="font-size:10px;padding:2px 8px">None</button>
+              </div>
+            </div>
+            <div class="settings-info">Uncheck anyone you don't want to message. Unchecked profiles are <strong>permanently ignored</strong> in future finder runs.</div>
+            <div id="ff-candidates" style="max-height:340px;overflow-y:auto;border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:4px"></div>
+          </div>
+          <div class="settings-section" style="display:flex;gap:8px">
+            <button class="settings-btn" id="ff-back" style="flex:1">← Back</button>
+            <button class="settings-btn" id="ff-approve" style="flex:2;border-color:rgba(34,197,94,0.5);color:#22c55e">Approve & Start</button>
+          </div>
+        </div>
+
+        <div id="ff-step-running" style="display:none">
+          <div class="settings-section">
+            <h3 class="settings-heading">Sending Intros</h3>
+            <div id="ff-progress-bar" style="height:8px;background:rgba(255,255,255,0.05);border-radius:4px;overflow:hidden;margin:6px 0">
+              <div id="ff-progress-fill" style="height:100%;width:0%;background:linear-gradient(90deg,#3b82f6,#22c55e);transition:width 0.3s"></div>
+            </div>
+            <div id="ff-progress-stats" style="font-size:11px;color:#9ca3af;margin-bottom:4px">…</div>
+            <div id="ff-eta" style="font-size:10px;color:#6b7280;font-style:italic">…</div>
+          </div>
+          <div class="settings-section">
+            <h3 class="settings-heading">Remaining Queue</h3>
+            <div id="ff-queue" style="max-height:280px;overflow-y:auto;border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:4px"></div>
+          </div>
+          <div class="settings-section">
+            <button class="settings-btn" id="ff-stop" style="width:100%;border-color:rgba(239,68,68,0.5);color:#f87171">Stop Now</button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
