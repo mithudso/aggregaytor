@@ -1350,12 +1350,37 @@ function showTopFilterBar(): void {
     const merged = { ...prev, ...update };
     delete (merged as any).blockedIds;
     localStorage.setItem('aggregaytor_map_filter_settings', JSON.stringify(merged));
-    window.postMessage({ type: '__aggregaytor_map_filter_settings', update: merged }, '*');
+    // v0.57.57: tag with source so the floating Map Filters window
+    // (also listening on this message) can ignore its own echoes and
+    // re-render only when the OTHER UI changed settings.
+    window.postMessage({ type: '__aggregaytor_map_filter_settings', update: merged, _source: 'topbar' }, '*');
   }
 
   bar.querySelectorAll('input[data-key]').forEach(cb => {
     cb.addEventListener('change', applyFromBar);
   });
+
+  // v0.57.57: receive settings updates from the floating Map Filters
+  // window and re-sync our chips. We ignore our own broadcasts via
+  // the _source check so we don't loop. localStorage is the source of
+  // truth; we just re-read and update checkbox + chip-on states.
+  const topbarSyncListener = (event: MessageEvent) => {
+    if (!event.data || event.data.type !== '__aggregaytor_map_filter_settings') return;
+    if (event.data._source === 'topbar') return; // own post, skip
+    const settings = event.data.update || {};
+    let onCount = 0;
+    bar.querySelectorAll('input[data-key]').forEach((cb) => {
+      const el = cb as HTMLInputElement;
+      const key = el.dataset.key as string;
+      const v = !!settings[key];
+      el.checked = v;
+      el.closest('.fb-chip')!.classList.toggle('on', v);
+      if (v) onCount++;
+    });
+    const label = bar.querySelector('.fb-label');
+    if (label) label.textContent = `Filter${onCount ? ` (${onCount})` : ''}:`;
+  };
+  window.addEventListener('message', topbarSyncListener);
 
   // Undo last hide
   bar.querySelector('.fb-undo')!.addEventListener('click', () => {
@@ -1638,7 +1663,9 @@ function showMapFilterPanel(): void {
 
     // Cross the ISOLATED→MAIN world boundary via postMessage.
     // sniffies.ts relays this to the map-filters CustomEvent listener.
-    window.postMessage({ type: '__aggregaytor_map_filter_settings', update: merged }, '*');
+    // v0.57.57: tag _source so the top filter bar can re-sync its
+    // chips without echoing our own broadcasts back at us.
+    window.postMessage({ type: '__aggregaytor_map_filter_settings', update: merged, _source: 'mapfilters' }, '*');
 
     const state = panel.querySelector('#fp-save-state') as HTMLElement;
     if (state) {
@@ -1690,6 +1717,41 @@ function showMapFilterPanel(): void {
 
   // Sync on first render in case settings drifted between panel opens
   collectAndApply('Synced');
+
+  // v0.57.57: receive settings updates from the top filter bar (or any
+  // other source) and re-render our checkboxes / textareas without
+  // echoing back. The _source check prevents the loop. localStorage is
+  // the source of truth — we just re-read it and refresh the controls.
+  const mapfiltersSyncListener = (event: MessageEvent) => {
+    if (!event.data || event.data.type !== '__aggregaytor_map_filter_settings') return;
+    if (event.data._source === 'mapfilters') return;
+    const settings = event.data.update || {};
+    panel.querySelectorAll('.fp-filter-cb').forEach((cb) => {
+      const el = cb as HTMLInputElement;
+      const key = el.dataset.key as string;
+      el.checked = !!settings[key];
+    });
+    const exTerms = panel.querySelector('#fp-exclude-terms') as HTMLTextAreaElement;
+    if (exTerms) exTerms.value = (settings.excludeTerms || []).join('\n');
+    const inTerms = panel.querySelector('#fp-include-terms') as HTMLTextAreaElement;
+    if (inTerms) inTerms.value = (settings.includeTerms || []).join('\n');
+    // Refresh visual switch / chip states without re-broadcasting
+    panel.querySelectorAll('.fp-switch').forEach((sw) => {
+      const key = (sw as HTMLElement).dataset.switch;
+      const cb = sw.querySelector('input') as HTMLInputElement | null;
+      if (!cb) return;
+      sw.classList.toggle('on', cb.checked);
+      const label = sw.querySelector('span');
+      if (label) label.textContent = cb.checked ? 'ON' : 'off';
+      const wrap = panel.querySelector(`[data-wrap-for="${key}"]`);
+      if (wrap) wrap.classList.toggle('fp-disabled', !cb.checked);
+    });
+    panel.querySelectorAll('.fp-chip').forEach((chip) => {
+      const cb = chip.querySelector('input') as HTMLInputElement | null;
+      if (cb) chip.classList.toggle('checked', cb.checked);
+    });
+  };
+  window.addEventListener('message', mapfiltersSyncListener);
 }
 
 // ── URL Change Detection ────────────────────────────────────────────────────

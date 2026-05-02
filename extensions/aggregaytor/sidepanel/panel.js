@@ -9,7 +9,22 @@
 // in the side panel to the SW's rolling error log. Same pattern as the
 // content-script bridges. Lets us diagnose panel-side bugs from the
 // exported JSON file instead of asking the user to copy DevTools output.
+//
+// v0.57.57: filter known browser-emitted noise (CORS, "Failed to fetch")
+// that we handle gracefully in code. The browser logs these synchronously
+// before our try/catch can see the rejection.
+const _PANEL_NOISE_PATTERNS = [
+  /access to fetch at .* has been blocked by cors/i,
+  /preflight (?:request|response)/i,
+  /no 'access-control-allow-origin'/i,
+  /^(?:typeerror: )?failed to fetch$/i,
+];
+function _isPanelNoise(message) {
+  const s = String(message || '');
+  return _PANEL_NOISE_PATTERNS.some(re => re.test(s));
+}
 function _panelForwardError(level, message, stack) {
+  if (_isPanelNoise(message)) return;
   try {
     chrome.runtime.sendMessage({
       type: 'LOG_ERROR',

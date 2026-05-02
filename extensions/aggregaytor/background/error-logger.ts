@@ -163,30 +163,53 @@ export function installGlobalErrorCapture(source: string): void {
     target.addEventListener?.('unhandledrejection', (ev: PromiseRejectionEvent) => {
       try {
         const reason: any = ev.reason;
-        logError({
-          source, level: 'rejection',
-          message: typeof reason === 'string' ? reason : (reason?.message || JSON.stringify(reason).slice(0, 500)),
-          stack: reason?.stack,
-        });
+        const msg = typeof reason === 'string' ? reason : (reason?.message || JSON.stringify(reason).slice(0, 500));
+        // Drop CORS-class rejections — same pattern as the console.error
+        // filter. The fetch call site already handles them via static
+        // fallback list, so they're not actionable in the log.
+        if (/(blocked by cors|preflight|access-control-allow-origin|^(?:typeerror: )?failed to fetch$)/i.test(msg)) return;
+        logError({ source, level: 'rejection', message: msg, stack: reason?.stack });
       } catch {}
     });
   } catch {}
 
   // Patch console.error so existing console.error('...', err) call sites
   // also flow into the log. We DON'T patch console.warn — too noisy.
+  //
+  // v0.57.57: filter known browser-emitted noise that we already handle
+  // gracefully in code. CORS preflight failures are the canonical case —
+  // the browser logs them synchronously before our fetch try/catch can
+  // see the rejection, so they appeared in the rolling log every daily
+  // model-updater check despite us already falling back to the static
+  // model list. Anything matching these patterns is a known "we know,
+  // it's fine" signal and gets dropped from the captured log (still
+  // shows in the live console for debugging).
+  const NOISE_PATTERNS: RegExp[] = [
+    /access to fetch at .* has been blocked by cors policy/i,
+    /preflight (?:request|response)/i,
+    /no 'access-control-allow-origin'/i,
+    /response to preflight request doesn't pass access control check/i,
+    // Failed to fetch with no other context — almost always CORS or
+    // network; the call site that cares already logs a meaningful error.
+    /^(?:typeerror: )?failed to fetch$/i,
+  ];
   const origError = console.error.bind(console);
   console.error = function (...args: unknown[]) {
     try {
       const [first, ...rest] = args;
       const message = typeof first === 'string' ? first : String(first);
       const err = rest.find((a) => a instanceof Error) as Error | undefined;
-      logError({
-        source, level: 'error',
-        message: [message, ...rest.filter(a => a !== err).map(a =>
-          typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })()
-        )].join(' ').slice(0, 2000),
-        stack: err?.stack,
-      });
+      const fullMsg = [message, ...rest.filter(a => a !== err).map(a =>
+        typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })()
+      )].join(' ');
+      const isNoise = NOISE_PATTERNS.some((re) => re.test(fullMsg));
+      if (!isNoise) {
+        logError({
+          source, level: 'error',
+          message: fullMsg.slice(0, 2000),
+          stack: err?.stack,
+        });
+      }
     } catch {}
     origError.apply(console, args as []);
   };
