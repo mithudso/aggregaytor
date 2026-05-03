@@ -660,7 +660,9 @@ function applyFilters(): void {
   // in case v0.57.55 left it on someone's page. Per-marker FRESH_CLASS
   // is the new approach. When no filter is active, also strip every
   // class we own so markers go back to fully native rendering.
-  document.body.classList.remove(FILTERING_BODY_CLASS);
+  // v0.57.60: optional chain — applyFilters can race with very early
+  // page load before <body> exists; document.body is null then.
+  document.body?.classList.remove(FILTERING_BODY_CLASS);
   if (!anyFilterOn) {
     for (const marker of idToMarker.values()) {
       marker.classList.remove(HIDE_CLASS, SHOW_CLASS, FRESH_CLASS, HIGHLIGHT_CLASS, HIGHLIGHT_ATTITUDE_CLASS);
@@ -1561,7 +1563,11 @@ export function initMapFilters(): void {
   // injected class from every element in the DOM so a stale extension
   // build (v0.57.55/56 default-hide leftovers, etc) can't keep markers
   // invisible. Done up-front, before the first applyFilters tick.
-  document.body.classList.remove(FILTERING_BODY_CLASS);
+  // v0.57.60: optional chain — sniffies.js is injected at
+  // document_start before <body> exists, so document.body can be null
+  // here. The recovery is harmless to skip in that case (a freshly
+  // loaded page has no aggregaytor classes to recover from yet).
+  document.body?.classList.remove(FILTERING_BODY_CLASS);
   document.querySelectorAll(
     `.${SHOW_CLASS}, .${FRESH_CLASS}, .${HIDE_CLASS}, .${HIGHLIGHT_CLASS}, .${HIGHLIGHT_ATTITUDE_CLASS}`
   ).forEach((el) => {

@@ -93,6 +93,56 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') convertTitlesToTips();
 });
 
+// ── Toast + safe sendMessage ────────────────────────────────────────────────
+// v0.57.61: Lightweight toast for action feedback. Used by block-rule and
+// other settings actions that previously failed silently inside
+// `try {} catch {}` blocks, leaving the user thinking buttons were dead.
+function showSpToast(message, kind = 'info', durationMs = 2200) {
+  try {
+    let host = document.getElementById('sp-toast-host');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'sp-toast-host';
+      host.style.cssText = 'position:fixed;bottom:12px;left:50%;transform:translateX(-50%);z-index:99999;display:flex;flex-direction:column;gap:4px;pointer-events:none';
+      document.body.appendChild(host);
+    }
+    const colors = {
+      info:    { bg: 'rgba(59,130,246,0.92)',  fg: '#ffffff' },
+      success: { bg: 'rgba(16,185,129,0.92)',  fg: '#ffffff' },
+      error:   { bg: 'rgba(239,68,68,0.92)',   fg: '#ffffff' },
+      warn:    { bg: 'rgba(251,191,36,0.92)',  fg: '#1f2937' },
+    };
+    const c = colors[kind] || colors.info;
+    const el = document.createElement('div');
+    el.textContent = message;
+    el.style.cssText = `padding:6px 12px;border-radius:6px;background:${c.bg};color:${c.fg};font-size:11px;box-shadow:0 2px 8px rgba(0,0,0,0.4);max-width:80vw`;
+    host.appendChild(el);
+    setTimeout(() => { el.style.transition = 'opacity 0.2s'; el.style.opacity = '0'; setTimeout(() => el.remove(), 220); }, durationMs);
+  } catch {}
+}
+// Wrap chrome.runtime.sendMessage so callers always get a defined response
+// shape ({ ok, error? } at minimum) and any sync throw or rejection becomes
+// a structured error rather than crashing the click handler. Surfaces a
+// toast on failure so users see what broke instead of a dead button.
+async function spSend(msg, { silent = false } = {}) {
+  try {
+    const res = await chrome.runtime.sendMessage(msg);
+    if (res === undefined) {
+      if (!silent) showSpToast(`No response from background (${msg?.type})`, 'error', 3000);
+      return { ok: false, error: 'no response' };
+    }
+    if (res && res.ok === false && !silent) {
+      showSpToast(`${msg?.type} failed: ${res.error || 'unknown error'}`, 'error', 3500);
+    }
+    return res;
+  } catch (err) {
+    const message = (err && err.message) || String(err);
+    if (!silent) showSpToast(`${msg?.type} threw: ${message}`, 'error', 3500);
+    console.error('[Panel] spSend failed:', msg?.type, err);
+    return { ok: false, error: message };
+  }
+}
+
 // ── User Preferences (loaded from chrome.storage.local) ─────────────────────
 let prefTimestampAbsolute = false; // true = "11:42 PM", false = "5m" (relative)
 let prefAutoNavigate = true;       // true = open platform tab on thread click
@@ -2397,53 +2447,89 @@ document.getElementById('sp-derive-style')?.addEventListener('click', async () =
 });
 
 // Block rules
+//
+// v0.57.61: rebuilt to use spSend (surfaces failures via toast) and
+// event delegation on the list (one click listener handles every
+// row's Disable/Enable/Delete button so a botched re-render can't
+// orphan listeners). Previously every action used silent try/catch +
+// per-row addEventListener which made dead buttons indistinguishable
+// from "no rules in the DB." Now a failed request shows an error toast
+// and a successful one shows a confirmation toast.
 async function loadBlockRules() {
-  try {
-    const res = await chrome.runtime.sendMessage({ type: 'GET_ALL_BLOCK_RULES' });
-    const list = document.getElementById('sp-rule-list');
-    if (!res?.ok || !res.rules?.length) { list.innerHTML = '<div class="settings-info">No rules yet.</div>'; return; }
-    list.innerHTML = res.rules.map(r => {
-      const statusColor = r.enabled ? '#34d399' : '#6b7280';
-      const statusDot = r.enabled ? '🟢' : '⚪';
-      const statusLabel = r.enabled ? 'Active' : 'Disabled';
-      const toggleLabel = r.enabled ? 'Disable' : 'Enable';
-      return `
-      <div style="display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:11px">
-        <span style="font-size:10px" title="${statusLabel}">${statusDot}</span>
-        <span style="flex:1">${esc(r.name)}</span>
-        <span style="color:#6b7280;font-size:9px" title="Times this rule has triggered">${r.executedCount} triggered</span>
-        <button class="settings-btn" data-toggle-rule="${r._id}" data-enabled="${!r.enabled}" style="font-size:10px;padding:2px 6px">${toggleLabel}</button>
-        <button class="settings-btn" style="border-color:rgba(239,68,68,0.3);color:#f87171;font-size:10px;padding:2px 6px" data-delete-rule="${r._id}">✕</button>
-      </div>`;
-    }).join('');
-    list.querySelectorAll('[data-toggle-rule]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        await chrome.runtime.sendMessage({ type: 'UPDATE_BLOCK_RULE', id: btn.dataset.toggleRule, updates: { enabled: btn.dataset.enabled === 'true' } });
-        loadBlockRules();
-      });
-    });
-    list.querySelectorAll('[data-delete-rule]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        await chrome.runtime.sendMessage({ type: 'DELETE_BLOCK_RULE', id: btn.dataset.deleteRule });
-        loadBlockRules();
-      });
-    });
-  } catch {}
+  const list = document.getElementById('sp-rule-list');
+  if (!list) { console.warn('[Panel] sp-rule-list not in DOM'); return; }
+  const res = await spSend({ type: 'GET_ALL_BLOCK_RULES' });
+  if (!res?.ok) { list.innerHTML = '<div class="settings-info" style="color:#f87171">Failed to load rules — see toast.</div>'; return; }
+  if (!res.rules?.length) { list.innerHTML = '<div class="settings-info">No rules yet.</div>'; return; }
+  list.innerHTML = res.rules.map(r => {
+    const statusDot = r.enabled ? '🟢' : '⚪';
+    const statusLabel = r.enabled ? 'Active' : 'Disabled';
+    const toggleLabel = r.enabled ? 'Disable' : 'Enable';
+    return `
+    <div style="display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:11px">
+      <span style="font-size:10px" title="${statusLabel}">${statusDot}</span>
+      <span style="flex:1">${esc(r.name)}</span>
+      <span style="color:#6b7280;font-size:9px" title="Times this rule has triggered">${r.executedCount} triggered</span>
+      <button type="button" class="settings-btn" data-toggle-rule="${esc(r._id)}" data-enabled="${!r.enabled}" style="font-size:10px;padding:2px 6px;width:auto">${toggleLabel}</button>
+      <button type="button" class="settings-btn" style="border-color:rgba(239,68,68,0.3);color:#f87171;font-size:10px;padding:2px 6px;width:auto" data-delete-rule="${esc(r._id)}">✕</button>
+    </div>`;
+  }).join('');
 }
+// Event delegation — one listener on the list survives every re-render.
+document.getElementById('sp-rule-list')?.addEventListener('click', async (e) => {
+  const btn = e.target?.closest?.('button');
+  if (!btn) return;
+  const toggleId = btn.dataset.toggleRule;
+  const deleteId = btn.dataset.deleteRule;
+  if (toggleId) {
+    btn.disabled = true;
+    const enabled = btn.dataset.enabled === 'true';
+    const res = await spSend({ type: 'UPDATE_BLOCK_RULE', id: toggleId, updates: { enabled } });
+    if (res?.ok) showSpToast(enabled ? 'Rule enabled' : 'Rule disabled', 'success');
+    loadBlockRules();
+  } else if (deleteId) {
+    btn.disabled = true;
+    const res = await spSend({ type: 'DELETE_BLOCK_RULE', id: deleteId });
+    if (res?.ok) showSpToast('Rule deleted', 'success');
+    loadBlockRules();
+  }
+});
 document.getElementById('sp-rule-type')?.addEventListener('change', (e) => {
-  document.getElementById('sp-rule-keywords').style.display = e.target.value === 'keyword' ? '' : 'none';
+  const kw = document.getElementById('sp-rule-keywords');
+  if (kw) kw.style.display = e.target.value === 'keyword' ? '' : 'none';
 });
 document.getElementById('sp-add-rule')?.addEventListener('click', async () => {
-  const type = document.getElementById('sp-rule-type').value;
-  const threshold = parseInt(document.getElementById('sp-rule-threshold').value) || 3;
-  const keywords = (document.getElementById('sp-rule-keywords').value || '').split(',').map(k => k.trim()).filter(Boolean);
-  const action = document.getElementById('sp-rule-action').value;
+  const addBtn = document.getElementById('sp-add-rule');
+  const typeEl = document.getElementById('sp-rule-type');
+  const threshEl = document.getElementById('sp-rule-threshold');
+  const kwEl = document.getElementById('sp-rule-keywords');
+  const actionEl = document.getElementById('sp-rule-action');
+  if (!typeEl || !threshEl || !actionEl) {
+    showSpToast('Rule form is missing inputs — reload the panel', 'error');
+    return;
+  }
+  const type = typeEl.value;
+  const threshold = parseInt(threshEl.value) || 3;
+  const keywords = (kwEl?.value || '').split(',').map(k => k.trim()).filter(Boolean);
+  const action = actionEl.value;
+  if (type === 'keyword' && !keywords.length) {
+    showSpToast('Add at least one keyword for a keyword rule', 'warn');
+    return;
+  }
   const condition = { type };
   if (type === 'keyword') condition.keywords = keywords;
   else if (type === 'no_response_days') condition.days = threshold;
   else condition.threshold = threshold;
-  const names = { ignored_count: `Ignored ${threshold}x`, no_response_days: `No reply ${threshold}d`, deleted_chat: `Deleted ${threshold}x`, keyword: `Keyword: ${keywords.slice(0,2).join(', ')}` };
-  await chrome.runtime.sendMessage({ type: 'CREATE_BLOCK_RULE', input: { name: names[type] || type, condition, action } });
+  const names = {
+    ignored_count: `Ignored ${threshold}x`,
+    no_response_days: `No reply ${threshold}d`,
+    deleted_chat: `Deleted ${threshold}x`,
+    keyword: `Keyword: ${keywords.slice(0, 2).join(', ')}`,
+  };
+  if (addBtn) { addBtn.disabled = true; addBtn.textContent = 'Adding…'; }
+  const res = await spSend({ type: 'CREATE_BLOCK_RULE', input: { name: names[type] || type, condition, action } });
+  if (addBtn) { addBtn.disabled = false; addBtn.textContent = 'Add Rule'; }
+  if (res?.ok) showSpToast(`Added rule: ${names[type] || type}`, 'success');
   loadBlockRules();
 });
 
