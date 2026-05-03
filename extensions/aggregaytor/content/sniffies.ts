@@ -209,39 +209,135 @@ window.addEventListener('message', (event) => {
 });
 
 // ── Auto-Send Mechanism ────────────────────────────────────────────────────
-// When the service worker wants to auto-send a message (from the auto-respond
-// system), it sends a command through the bridge, which dispatches this event.
-// We type the text into the chat input using React-compatible event dispatching
-// (native setter + input/change events), then find and click the send button.
+// v0.57.63: rewritten to port the userscript v0.7.46 strategy after users
+// reported the random-intro button doing nothing. The previous one-shot
+// querySelector + 500ms-then-click was too fragile for Sniffies' Angular
+// re-renders — the chat composer can take 1-3s to fully mount when switching
+// profiles, and the send button isn't always discoverable by class name.
+//
+// New approach (mirrors userscript fillChatInput + clickChatSendButton +
+// pressEnterToSend):
+//   1. Score-based input search: prefer textarea/contentEditable with
+//      placeholder/aria mentioning "message" or "chat", positioned in the
+//      lower half of the viewport. Excludes our own injected panels.
+//   2. Retry up to 8x at 400ms intervals for both input AND send button.
+//   3. Send via button.click(); if no button matches, fall back to dispatching
+//      Enter keydown/keypress/keyup on the input (Sniffies' React form often
+//      submits on Enter).
+//   4. Use the native value setter for textarea/input (React overrides it);
+//      for contenteditable, set textContent.
+function isElementVisible(el: Element): boolean {
+  if (!(el instanceof HTMLElement)) return false;
+  const style = getComputedStyle(el);
+  if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') < 0.01) return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 1 && r.height > 1;
+}
+
+const OUR_PANEL_SELECTORS = '#aggregaytor-profile-actions, #aggregaytor-floating-actions, #aggregaytor-top-filter-bar, .aggregaytor-toast, .aggregaytor-map-filter-panel';
+
+function findChatInput(): HTMLElement | null {
+  const candidates = Array.from(document.querySelectorAll<HTMLElement>(
+    'textarea, input[type="text"], [contenteditable="true"]'
+  )).filter(isElementVisible).filter((el) => !el.closest(OUR_PANEL_SELECTORS));
+  if (!candidates.length) return null;
+  let best: HTMLElement | null = null;
+  let bestScore = -1;
+  for (const el of candidates) {
+    const ph = (el.getAttribute('placeholder') || '').toLowerCase();
+    const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+    let score = 0;
+    if (ph.includes('message') || ph.includes('chat')) score += 4;
+    if (aria.includes('message') || aria.includes('chat')) score += 4;
+    if (el.tagName === 'TEXTAREA' || el.isContentEditable) score += 2;
+    if (el.getBoundingClientRect().bottom > window.innerHeight * 0.45) score += 1;
+    if (score > bestScore) { bestScore = score; best = el; }
+  }
+  return best;
+}
+
+function fillChatInput(el: HTMLElement, text: string): boolean {
+  try {
+    if (el.isContentEditable) {
+      el.focus();
+      el.textContent = text;
+      try { el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' })); }
+      catch { el.dispatchEvent(new Event('input', { bubbles: true })); }
+      return true;
+    }
+    if ('value' in el) {
+      el.focus();
+      // Use the native setter so React's value tracker sees the change.
+      const nativeSet = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+        || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      if (nativeSet) nativeSet.call(el, text);
+      else (el as any).value = text;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+function clickSendButton(inputEl: HTMLElement): boolean {
+  // Scope to the input's containing form/chat panel so we don't click some
+  // unrelated send button in another widget.
+  const scope = inputEl.closest('form, [class*="chat"], [class*="message"], [class*="composer"]') || document;
+  const buttons = Array.from(scope.querySelectorAll<HTMLElement>('button, [role="button"]'))
+    .filter(isElementVisible)
+    .filter((b) => !b.closest(OUR_PANEL_SELECTORS));
+  for (const btn of buttons) {
+    const text = (btn.textContent || '').trim().toLowerCase();
+    const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+    const title = (btn.getAttribute('title') || '').toLowerCase();
+    if (text === 'send' || aria.includes('send') || title.includes('send')) {
+      (btn as HTMLButtonElement).click();
+      return true;
+    }
+  }
+  return false;
+}
+
+function pressEnter(el: HTMLElement): void {
+  try {
+    el.focus();
+    for (const t of ['keydown', 'keypress', 'keyup'] as const) {
+      el.dispatchEvent(new KeyboardEvent(t, { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+    }
+  } catch {}
+}
+
 window.addEventListener('__aggregaytor_send_message', ((event: CustomEvent) => {
   const { text } = event.detail || {};
   if (!text) return;
-  console.log('[Aggregaytor:Sniffies] Auto-sending:', text.slice(0, 30));
-  // Find the chat input — try multiple selectors for different UI states
-  const input = document.querySelector<HTMLTextAreaElement | HTMLInputElement>(
-    'textarea[placeholder*="message"], textarea[placeholder*="Message"], ' +
-    '[contenteditable="true"], ' +
-    'input[placeholder*="message"], input[placeholder*="Message"]'
-  );
-  if (!input) { console.warn('[Aggregaytor:Sniffies] Chat input not found'); return; }
-  // Set value with React-compatible events (React overrides the native setter,
-  // so we must use the original HTMLTextAreaElement.prototype.value setter to
-  // bypass React's synthetic event system and actually update the DOM value).
-  const nativeSet = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
-    || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-  if (nativeSet) nativeSet.call(input, text);
-  else (input as any).value = text;
-  // Dispatch input + change events so React/Angular picks up the new value
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  input.dispatchEvent(new Event('change', { bubbles: true }));
-  // Find and click the send button after a short delay (allows UI to update)
-  setTimeout(() => {
-    const sendBtn = document.querySelector<HTMLButtonElement>(
-      'button[aria-label*="send" i], button[aria-label*="Send"], ' +
-      'button[type="submit"], button.send-button, ' +
-      '[data-testid*="send"], [class*="send" i]'
-    );
-    if (sendBtn) { sendBtn.click(); console.log('[Aggregaytor:Sniffies] Send clicked'); }
-    else console.warn('[Aggregaytor:Sniffies] Send button not found');
-  }, 500);
+  console.log('[Aggregaytor:Sniffies] Auto-sending:', text.slice(0, 50));
+
+  let attempts = 0;
+  const MAX_ATTEMPTS = 8;
+  const INTERVAL_MS = 400;
+  const tick = (): void => {
+    attempts++;
+    const input = findChatInput();
+    if (!input) {
+      if (attempts >= MAX_ATTEMPTS) console.warn('[Aggregaytor:Sniffies] Auto-send: chat input never appeared');
+      else setTimeout(tick, INTERVAL_MS);
+      return;
+    }
+    if (!fillChatInput(input, text)) {
+      if (attempts >= MAX_ATTEMPTS) console.warn('[Aggregaytor:Sniffies] Auto-send: fillChatInput failed');
+      else setTimeout(tick, INTERVAL_MS);
+      return;
+    }
+    // Give React/Angular ~250ms to enable the send button after the value change
+    setTimeout(() => {
+      if (!clickSendButton(input)) {
+        console.log('[Aggregaytor:Sniffies] Send button not found, falling back to Enter key');
+        pressEnter(input);
+      } else {
+        console.log('[Aggregaytor:Sniffies] Send clicked');
+      }
+    }, 250);
+  };
+  tick();
 }) as EventListener);
