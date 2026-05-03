@@ -721,9 +721,10 @@
       <div class="settings-section">
         <h3 class="settings-heading">Memory Breakdown</h3>
         <div class="settings-info">Per-cache size across the service worker, content scripts, and persistent storage. Auto-refreshes every 5s while this tab is visible. Click a cache name to clear it.</div>
-        <div style="display:flex;gap:6px;margin:6px 0;align-items:center">
+        <div style="display:flex;gap:6px;margin:6px 0;align-items:center;flex-wrap:wrap">
           <button class="settings-btn" id="sp-mem-refresh" style="width:auto">Refresh now</button>
           <button class="settings-btn" id="sp-mem-free-all" style="width:auto;border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.1);color:#f87171">Free all SW caches</button>
+          <button class="settings-btn" id="sp-mem-reload-ext" style="width:auto;border-color:rgba(251,191,36,0.5);background:rgba(251,191,36,0.1);color:#fbbf24" title="Restart the entire extension — nukes the service worker process and forces a fresh start. Use when caches won't drop and SW heap is stuck.">⟲ Reload extension</button>
           <span id="sp-mem-summary" style="font-size:10px;color:#9ca3af;flex:1;text-align:right"></span>
         </div>
         <div id="sp-mem-body" style="font-size:11px"></div>
