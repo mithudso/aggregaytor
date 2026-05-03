@@ -811,7 +811,13 @@ function renderThreads(summaries) {
 // rendered HTML strings in memory (each ~1-3KB).
 const hoverPreviewCache = new Map();
 const HOVER_CACHE_TTL = 30_000; // 30 seconds
-const HOVER_CACHE_MAX_ENTRIES = 100;
+// v0.57.62: dropped cap from 100 → 30. Each entry is rendered HTML up to
+// ~5KB (and embedded avatar URLs the browser materializes into image data
+// when the panel paints). 100 × 5KB × multi-tab × image-data was
+// contributing meaningfully to the panel's heap on heavy hover sessions.
+// Combined with the new on-access TTL eviction below (drop expired AND
+// any entry past the cap on every get), the cache stays well-bounded.
+const HOVER_CACHE_MAX_ENTRIES = 30;
 
 function setHoverPreviewCache(contactId, entry) {
   if (hoverPreviewCache.size >= HOVER_CACHE_MAX_ENTRIES) {
@@ -821,7 +827,19 @@ function setHoverPreviewCache(contactId, entry) {
   hoverPreviewCache.set(contactId, entry);
 }
 
+// v0.57.62: opportunistic TTL prune. Called from loadHoverPreview before
+// reading; drops every entry whose ts is past HOVER_CACHE_TTL so we don't
+// hold stale HTML strings (with their inline avatar URLs) for hours after
+// the last hover. Cheap — Map iteration of ≤30 entries.
+function pruneExpiredHoverCache() {
+  const now = Date.now();
+  for (const [k, v] of hoverPreviewCache) {
+    if (now - v.ts > HOVER_CACHE_TTL) hoverPreviewCache.delete(k);
+  }
+}
+
 async function loadHoverPreview(contactId, platform, previewEl, threadEl) {
+  pruneExpiredHoverCache();
   // Check cache first
   const cached = hoverPreviewCache.get(contactId);
   if (cached && Date.now() - cached.ts < HOVER_CACHE_TTL) {
@@ -2426,7 +2444,145 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     if (tab.dataset.tab === 'tab-data') loadTextExpansions();
     if (tab.dataset.tab === 'tab-sync') { loadCalendarStatus(); checkGoogleAuth(); }
     if (tab.dataset.tab === 'tab-personality') loadStyleGuide();
+    if (tab.dataset.tab === 'tab-memory') startMemoryAutoRefresh();
+    else stopMemoryAutoRefresh(); // pause when switching away — keeps the SW from waking on every other tab
   });
+});
+
+// ── Memory Tab ──────────────────────────────────────────────────────────────
+// v0.57.62: granular per-cache monitoring. Renders a table of every known
+// cache (SW + content scripts + chrome.storage + IndexedDB estimate) with
+// its entry count and rough byte estimate. Clicking a cache name calls
+// FREE_CACHE for that single cache so the user can drop the one structure
+// hogging memory without nuking everything via FREE_SW_MEMORY.
+let _memoryAutoRefreshTimer = null;
+function fmtBytes(b) {
+  if (!b || b < 0) return '—';
+  if (b < 1024) return `${b}B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)}KB`;
+  if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)}MB`;
+  return `${(b / 1024 / 1024 / 1024).toFixed(2)}GB`;
+}
+function fmtPct(n, cap) {
+  if (!cap) return '';
+  const pct = Math.round((n / cap) * 100);
+  const color = pct > 80 ? '#f87171' : pct > 60 ? '#fbbf24' : '#9ca3af';
+  return `<span style="color:${color}">${pct}%</span>`;
+}
+async function loadMemoryBreakdown() {
+  const body = document.getElementById('sp-mem-body');
+  const summary = document.getElementById('sp-mem-summary');
+  if (!body) return;
+  const res = await spSend({ type: 'GET_MEMORY_BREAKDOWN' }, { silent: true });
+  if (!res?.ok) {
+    body.innerHTML = '<div class="settings-info" style="color:#f87171">Failed to fetch memory breakdown.</div>';
+    return;
+  }
+  const sectionStyle = 'margin-top:8px;border-top:1px solid rgba(255,255,255,0.06);padding-top:6px';
+  const rowStyle = 'display:grid;grid-template-columns:1fr 60px 60px 60px 50px;gap:6px;padding:3px 0;align-items:center';
+  const headerStyle = rowStyle + ';font-weight:600;color:#9ca3af;font-size:9px;text-transform:uppercase;border-bottom:1px solid rgba(255,255,255,0.04)';
+
+  // SW caches
+  const swRows = res.sw.caches.map(c => `
+    <div style="${rowStyle}">
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name)}</span>
+      <span style="text-align:right">${c.entries.toLocaleString()}</span>
+      <span style="text-align:right">${c.cap ? c.cap.toLocaleString() : '—'}</span>
+      <span style="text-align:right">${fmtBytes(c.bytesEstimate)}</span>
+      <button class="settings-btn" data-free-cache="${esc(c.name)}" style="font-size:9px;padding:1px 4px;width:auto" title="Drop this cache">Clear</button>
+    </div>
+  `).join('');
+
+  // Per-content-script reports — show one row per platform/tab
+  const csSections = res.contentScripts.map(rep => {
+    const entries = Object.entries(rep.data || {}).sort((a, b) => b[1] - a[1]);
+    if (!entries.length) return '';
+    const rows = entries.map(([k, v]) => `
+      <div style="${rowStyle}">
+        <span style="color:#d1d5db;padding-left:8px">${esc(k)}</span>
+        <span style="text-align:right">${v.toLocaleString()}</span>
+        <span style="text-align:right;color:#6b7280">—</span>
+        <span style="text-align:right;color:#6b7280">—</span>
+        <span></span>
+      </div>
+    `).join('');
+    return `
+      <div style="${sectionStyle}">
+        <div style="font-size:10px;color:#93c5fd;margin-bottom:3px">${esc(rep.platform)} <span style="color:#6b7280">(tab, ${rep.ageSec}s ago)</span></div>
+        ${rows}
+      </div>`;
+  }).join('');
+
+  // Storage breakdown — top 8 keys by size
+  const localTotal = res.storage.local.totalBytes || 0;
+  const localTop = Object.entries(res.storage.local.byKey || {})
+    .sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const storageRows = localTop.map(([k, b]) => `
+    <div style="${rowStyle}">
+      <span style="color:#d1d5db;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:8px" title="${esc(k)}">${esc(k)}</span>
+      <span></span><span></span>
+      <span style="text-align:right">${fmtBytes(b)}</span>
+      <span></span>
+    </div>
+  `).join('');
+
+  const idbBytes = res.indexedDB?.usageBytes || 0;
+  const idbQuota = res.indexedDB?.quotaBytes || 0;
+  const idbPct = idbQuota ? Math.round((idbBytes / idbQuota) * 100) : 0;
+
+  body.innerHTML = `
+    <div style="${headerStyle}">
+      <span>Cache</span><span style="text-align:right">Entries</span><span style="text-align:right">Cap</span><span style="text-align:right">~Bytes</span><span></span>
+    </div>
+    <div style="margin-top:4px;font-size:10px;color:#93c5fd">Service Worker (uptime: ${res.sw.uptimeHrs}h${res.sw.heapBytes ? `, heap ${fmtBytes(res.sw.heapBytes)}` : ''})</div>
+    ${swRows}
+    ${csSections}
+    <div style="${sectionStyle}">
+      <div style="font-size:10px;color:#93c5fd;margin-bottom:3px">Persistent storage</div>
+      <div style="${rowStyle}">
+        <span style="color:#d1d5db;padding-left:8px">chrome.storage.local total</span>
+        <span></span><span></span>
+        <span style="text-align:right">${fmtBytes(localTotal)}</span>
+        <span></span>
+      </div>
+      ${storageRows}
+      <div style="${rowStyle}">
+        <span style="color:#d1d5db;padding-left:8px">IndexedDB (PouchDB)</span>
+        <span style="text-align:right">${idbPct}%</span>
+        <span style="text-align:right">${fmtBytes(idbQuota)}</span>
+        <span style="text-align:right">${fmtBytes(idbBytes)}</span>
+        <span></span>
+      </div>
+    </div>`;
+  summary.textContent = `SW heap caches: ${fmtBytes(res.sw.caches.reduce((s, c) => s + c.bytesEstimate, 0))} · IDB: ${fmtBytes(idbBytes)}`;
+
+  // Wire up per-cache clear buttons (delegation works fine on innerHTML)
+  body.querySelectorAll('[data-free-cache]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const name = btn.dataset.freeCache;
+      btn.disabled = true; btn.textContent = '…';
+      const r = await spSend({ type: 'FREE_CACHE', name });
+      if (r?.ok) showSpToast(`Cleared ${name} (${r.cleared} entries)`, 'success');
+      loadMemoryBreakdown();
+    });
+  });
+}
+function startMemoryAutoRefresh() {
+  loadMemoryBreakdown();
+  stopMemoryAutoRefresh();
+  _memoryAutoRefreshTimer = setInterval(loadMemoryBreakdown, 5000);
+}
+function stopMemoryAutoRefresh() {
+  if (_memoryAutoRefreshTimer) { clearInterval(_memoryAutoRefreshTimer); _memoryAutoRefreshTimer = null; }
+}
+document.getElementById('sp-mem-refresh')?.addEventListener('click', loadMemoryBreakdown);
+document.getElementById('sp-mem-free-all')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-mem-free-all');
+  btn.disabled = true; btn.textContent = 'Freeing…';
+  const r = await spSend({ type: 'FREE_SW_MEMORY' });
+  btn.disabled = false; btn.textContent = 'Free all SW caches';
+  if (r?.ok) showSpToast('Freed all SW caches', 'success');
+  loadMemoryBreakdown();
 });
 
 // Style guide

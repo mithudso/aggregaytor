@@ -269,6 +269,7 @@
       <span class="settings-tab" data-tab="tab-map">Map</span>
       <span class="settings-tab" data-tab="tab-sync">Sync</span>
       <span class="settings-tab" data-tab="tab-data">Data</span>
+      <span class="settings-tab" data-tab="tab-memory">Memory</span>
     </div>
 
     <!-- AI tab -->
@@ -712,6 +713,20 @@
         <h3 class="settings-heading">Developer</h3>
         <button class="settings-btn" id="sp-toggle-devlog">Show activity log</button>
         <div id="sp-devlog" style="display:none;max-height:200px;overflow-y:auto;font-family:monospace;font-size:9px;color:#6b7280;margin-top:6px;background:rgba(0,0,0,0.3);border-radius:6px;padding:6px"></div>
+      </div>
+    </div>
+
+    <!-- Memory tab — granular per-cache breakdown so the user can spot which structure is bloating -->
+    <div class="settings-tab-content" id="tab-memory">
+      <div class="settings-section">
+        <h3 class="settings-heading">Memory Breakdown</h3>
+        <div class="settings-info">Per-cache size across the service worker, content scripts, and persistent storage. Auto-refreshes every 5s while this tab is visible. Click a cache name to clear it.</div>
+        <div style="display:flex;gap:6px;margin:6px 0;align-items:center">
+          <button class="settings-btn" id="sp-mem-refresh" style="width:auto">Refresh now</button>
+          <button class="settings-btn" id="sp-mem-free-all" style="width:auto;border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.1);color:#f87171">Free all SW caches</button>
+          <span id="sp-mem-summary" style="font-size:10px;color:#9ca3af;flex:1;text-align:right"></span>
+        </div>
+        <div id="sp-mem-body" style="font-size:11px"></div>
       </div>
     </div>
   </div>

@@ -1579,5 +1579,93 @@ export function initMapFilters(): void {
     }
   });
 
+  // v0.57.62: detached-element prune. idToMarker and badgeElements hold raw
+  // HTMLElement refs; when Sniffies's MapLibre layer rebuilds (zoom, filter,
+  // re-render) the old DOM nodes are removed but our Map keeps strong refs,
+  // preventing GC of entire marker subtrees. Every 60s walk both Maps and
+  // drop entries whose element is no longer in the live tree. Cheap (just
+  // document.body.contains checks) and reclaims megabytes per hour for heavy
+  // map-browsing sessions.
+  setInterval(() => {
+    if (!document.body) return;
+    let prunedMarkers = 0, prunedBadges = 0;
+    for (const [id, el] of idToMarker) {
+      if (!document.body.contains(el)) {
+        idToMarker.delete(id);
+        prunedMarkers++;
+      }
+    }
+    for (const [id, el] of badgeElements) {
+      if (!document.body.contains(el)) {
+        badgeElements.delete(id);
+        prunedBadges++;
+      }
+    }
+    if (prunedMarkers > 0 || prunedBadges > 0) {
+      console.log(`[Aggregaytor:MapFilters] detach-prune: ${prunedMarkers} markers, ${prunedBadges} badges`);
+    }
+  }, 60_000);
+
+  // v0.57.62: visibility-driven offload. When the tab is hidden (other tab
+  // foregrounded, sidebar collapsed, window minimized), we keep growing the
+  // chatPreviews / markerProfileText / markerLastActive Maps while the user
+  // can't even see the map. After 5 min hidden, dump the half-most-recent
+  // entries — they re-populate from adapter scrapes on visibility return
+  // within a few seconds. Cheap insurance against day-long-tab bloat.
+  let hiddenSinceMs = 0;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      hiddenSinceMs = Date.now();
+    } else {
+      hiddenSinceMs = 0;
+    }
+  });
+  setInterval(() => {
+    if (!hiddenSinceMs) return;
+    if (Date.now() - hiddenSinceMs < 5 * 60_000) return;
+    // Trim each cache to half its current size, dropping insertion-order-oldest.
+    const trim = <V,>(m: Map<string, V>, name: string) => {
+      if (m.size < 100) return; // tiny — not worth the work
+      const target = Math.floor(m.size / 2);
+      const it = m.keys();
+      let drop = m.size - target;
+      while (drop-- > 0) { const n = it.next(); if (n.done) break; m.delete(n.value as string); }
+      console.log(`[Aggregaytor:MapFilters] hidden-tab trim: ${name} → ${m.size}`);
+    };
+    trim(chatPreviews, 'chatPreviews');
+    trim(markerProfileText, 'markerProfileText');
+    trim(markerLastActive, 'markerLastActive');
+    // Reset the timer so the next trim is another 5 min away — without
+    // this we'd keep halving every minute.
+    hiddenSinceMs = Date.now();
+  }, 60_000);
+
+  // v0.57.62: respond to memory inspection requests from the bridge so the
+  // side panel's Memory tab can show per-cache sizes for the MAIN-world map
+  // filter state. Synchronous reply via postMessage; the bridge forwards to
+  // chrome.storage.session for the SW to read on demand.
+  function buildMemoryReport(): Record<string, number> {
+    return {
+      idToMarker: idToMarker.size,
+      markerAttitudes: markerAttitudes.size,
+      manualAttitudes: manualAttitudes.size,
+      markerProfileText: markerProfileText.size,
+      markerLastActive: markerLastActive.size,
+      chatActivity: chatActivity.size,
+      chatPreviews: chatPreviews.size,
+      badgeElements: badgeElements.size,
+      hideHistory: hideHistory.length,
+      blockedIds: settings.blockedIds.size,
+    };
+  }
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    if (event.data?.type !== '__aggregaytor_memory_request') return;
+    window.postMessage(
+      { type: '__aggregaytor_memory_response', caches: buildMemoryReport() },
+      '*',
+    );
+  });
+
   console.log('[Aggregaytor:MapFilters] Initialized — scanning every 5s + DOM observer for new markers');
 }

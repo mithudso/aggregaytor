@@ -2440,3 +2440,41 @@ if (checkContext()) {
   (document.head || document.documentElement).appendChild(script);
   script.onload = () => script.remove(); // clean up — code is already executing
 }
+
+// ── Memory Self-Reporting ──────────────────────────────────────────────────
+// v0.57.62: every 60s (and immediately on first load) ask the MAIN world for
+// its cache sizes via postMessage round-trip, then write the report to
+// chrome.storage.session under `mem:sniffies:<tabId>` so the SW's
+// GET_MEMORY_BREAKDOWN can read it. Tab-id keyed so multiple sniffies tabs
+// each report independently. Stale entries (>3 min) are GCd by the SW on
+// read. Cheap (one Map iteration + one storage write per minute).
+(function startMemoryReporter() {
+  if (!checkContext()) return;
+  let latestCaches: Record<string, number> = {};
+  // Listen for the MAIN-world reply
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    if (event.data?.type !== '__aggregaytor_memory_response') return;
+    latestCaches = event.data.caches || {};
+  });
+
+  async function reportOnce() {
+    if (!checkContext()) return;
+    // Ask MAIN world for fresh sizes
+    window.postMessage({ type: '__aggregaytor_memory_request' }, '*');
+    // Brief delay for the synchronous reply to land before we read
+    await new Promise((r) => setTimeout(r, 100));
+    try {
+      // Resolve our tab id once via background — chrome.tabs is unavailable
+      // in content scripts, so we ask the SW which sender it sees us as.
+      // For simplicity, key by URL+startTime as a tab-uid surrogate.
+      const tabKey = `${location.origin}_${Math.floor(performance.timeOrigin / 1000)}`;
+      await chrome.storage.session.set({
+        [`mem:sniffies:${tabKey}`]: { ts: Date.now(), caches: latestCaches },
+      });
+    } catch { /* SW gone — next tick will retry */ }
+  }
+  // First report after 5s (let MAIN world initialize), then every 60s
+  setTimeout(reportOnce, 5000);
+  setInterval(reportOnce, 60_000);
+})();
