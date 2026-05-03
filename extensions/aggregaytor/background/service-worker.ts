@@ -51,6 +51,17 @@ installGlobalErrorCapture('sw');
 // for PouchDB operations and message handling in the service worker.
 // Accessible via: chrome.runtime.sendMessage({type:'GET_SW_PERF'})
 const swPerf: Record<string, { calls: number; totalMs: number; maxMs: number }> = {};
+
+// v0.57.62: rough byte estimate for a JS value via JSON serialization length.
+// Used by GET_MEMORY_BREAKDOWN to surface order-of-magnitude offenders. We
+// JSON-stringify and multiply length by 2 (UTF-16 in V8). Inaccurate for
+// non-ASCII or typed arrays, but order-of-magnitude correct for the JSON-
+// shaped caches we hold. A failed serialize (cycles, etc.) returns 0 rather
+// than throwing — we never want diagnostics to crash the SW.
+function estimateJsonBytes(v: unknown): number {
+  if (v == null) return 0;
+  try { return ((JSON.stringify(v) || '').length) * 2; } catch { return 0; }
+}
 const swPerfStart = Date.now();
 function swPerfTrack(name: string): () => void {
   const t0 = performance.now();
@@ -322,19 +333,22 @@ async function runAutoMaintenance(): Promise<void> {
   const reasons: string[] = [];
   const swUptimeMs = now - swPerfStart;
 
-  // Auto-FREE conditions
+  // Auto-FREE conditions. v0.57.62: dropped uptime gate 60→15 min and the
+  // capacity threshold 80%→60% so auto-free fires earlier and more often.
+  // Was: caps had to nearly fill before any sweep — left users with MB-scale
+  // bloat for hours. Now any cache crossing 60% triggers a periodic prune.
   let shouldFree = false;
-  if (swUptimeMs > 60 * 60_000) {
-    if (autoTrainedSet.size > AUTO_TRAIN_SET_CAP * 0.8) {
+  if (swUptimeMs > 15 * 60_000) {
+    if (autoTrainedSet.size > AUTO_TRAIN_SET_CAP * 0.6) {
       shouldFree = true; reasons.push(`autoTrainedSet ${autoTrainedSet.size}/${AUTO_TRAIN_SET_CAP}`);
     }
-    if (queryContactsCache.size > QUERY_CONTACTS_CACHE_MAX * 0.8) {
+    if (queryContactsCache.size > QUERY_CONTACTS_CACHE_MAX * 0.6) {
       shouldFree = true; reasons.push(`queryContactsCache ${queryContactsCache.size}/${QUERY_CONTACTS_CACHE_MAX}`);
     }
-    if (recentContactUpserts.size > RECENT_CONTACT_UPSERTS_CAP * 0.8) {
+    if (recentContactUpserts.size > RECENT_CONTACT_UPSERTS_CAP * 0.6) {
       shouldFree = true; reasons.push(`recentContactUpserts ${recentContactUpserts.size}/${RECENT_CONTACT_UPSERTS_CAP}`);
     }
-    if (getIndexSize() > SEARCH_INDEX_MAX_DOCS * 0.8) {
+    if (getIndexSize() > SEARCH_INDEX_MAX_DOCS * 0.6) {
       shouldFree = true; reasons.push(`searchIndex ${getIndexSize()}/${SEARCH_INDEX_MAX_DOCS}`);
     }
   }
@@ -1277,6 +1291,144 @@ async function handleMessage(msg: any): Promise<any> {
       try { clearLLMCaches(); } catch {}
       console.log(`${LOG} FREE_SW_MEMORY: cleared all in-memory caches`, before);
       return { ok: true, before };
+    }
+
+    // v0.57.62: granular memory monitoring. Returns a per-cache breakdown with
+    // entry counts, caps, and rough byte estimates so the user can identify
+    // which structure is bloating without reaching for the Chrome Task Manager.
+    // Aggregates SW, chrome.storage, IndexedDB, and per-content-script reports
+    // (which content bridges write to chrome.storage.session every 60s).
+    case 'GET_MEMORY_BREAKDOWN': {
+      // 1. SW-side caches with rough byte estimates. The estimates are
+      //    intentionally crude — entries × avg-bytes-per-entry. The goal is
+      //    to spot order-of-magnitude offenders, not exact accounting.
+      const swCaches: Array<{ name: string; entries: number; cap: number | null; bytesEstimate: number; clearable: boolean }> = [
+        { name: 'threadSummaryCache',  entries: threadSummaryCache ? 1 : 0, cap: 1, bytesEstimate: estimateJsonBytes(threadSummaryCache), clearable: true },
+        { name: 'chatActivityCache',   entries: chatActivityCache ? Object.keys(chatActivityCache.data).length : 0, cap: null, bytesEstimate: estimateJsonBytes(chatActivityCache), clearable: true },
+        { name: 'queryContactsCache',  entries: queryContactsCache.size, cap: QUERY_CONTACTS_CACHE_MAX, bytesEstimate: queryContactsCache.size * 2048, clearable: true },
+        { name: 'autoTrainedSet',      entries: autoTrainedSet.size, cap: AUTO_TRAIN_SET_CAP, bytesEstimate: autoTrainedSet.size * 80, clearable: true },
+        { name: 'recentContactUpserts', entries: recentContactUpserts.size, cap: RECENT_CONTACT_UPSERTS_CAP, bytesEstimate: recentContactUpserts.size * 100, clearable: true },
+        { name: 'dossierExtractionQueue', entries: dossierExtractionQueue.size, cap: DOSSIER_QUEUE_CAP, bytesEstimate: dossierExtractionQueue.size * 80, clearable: true },
+        { name: 'searchIndex',         entries: getIndexSize(), cap: SEARCH_INDEX_MAX_DOCS, bytesEstimate: getIndexSize() * 512, clearable: true },
+      ];
+
+      // 2. chrome.storage.local + session — bytes are exact via getBytesInUse.
+      //    Per-key breakdown lets the user see what's hogging persistent storage.
+      const localKeys = await new Promise<Record<string, number>>((resolve) => {
+        try {
+          chrome.storage.local.get(null, (all) => {
+            const out: Record<string, number> = {};
+            for (const k of Object.keys(all || {})) {
+              try { out[k] = (JSON.stringify(all[k]) || '').length * 2; } catch { out[k] = 0; }
+            }
+            resolve(out);
+          });
+        } catch { resolve({}); }
+      });
+      const localTotalBytes = await new Promise<number>((resolve) => {
+        try { chrome.storage.local.getBytesInUse(null, (b) => resolve(b || 0)); } catch { resolve(0); }
+      });
+      const sessionKeys = await new Promise<Record<string, number>>((resolve) => {
+        try {
+          chrome.storage.session.get(null, (all) => {
+            const out: Record<string, number> = {};
+            for (const k of Object.keys(all || {})) {
+              try { out[k] = (JSON.stringify(all[k]) || '').length * 2; } catch { out[k] = 0; }
+            }
+            resolve(out);
+          });
+        } catch { resolve({}); }
+      });
+
+      // 3. IndexedDB / quota estimate via navigator.storage.estimate.
+      //    Accounts for PouchDB rev tree bloat — usually the single biggest
+      //    contributor to "extension memory" in Chrome's task manager.
+      let idbBytes = 0, quotaBytes = 0;
+      try {
+        if ((navigator as any).storage?.estimate) {
+          const est = await (navigator as any).storage.estimate();
+          idbBytes = est?.usage || 0;
+          quotaBytes = est?.quota || 0;
+        }
+      } catch {}
+
+      // 4. Heap via measureUserAgentSpecificMemory if cross-origin-isolated,
+      //    else null. Most pages don't satisfy COI so this returns null in
+      //    practice — the per-cache breakdown above is what the user reads.
+      let heapBytes: number | null = null;
+      try {
+        if ((performance as any).measureUserAgentSpecificMemory) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const m: any = await Promise.race([
+            (performance as any).measureUserAgentSpecificMemory(),
+            new Promise((res) => setTimeout(() => res(null), 1500)),
+          ]);
+          heapBytes = m?.bytes || null;
+        }
+      } catch {}
+
+      // 5. Per-content-script reports. Bridges write `mem:<platform>:<tabId>`
+      //    every 60s with their per-Map cache sizes; we strip stale entries
+      //    (>3 min old) on read so a closed tab doesn't linger.
+      const contentReports: Array<{ key: string; tabId: number | null; platform: string; ageSec: number; data: Record<string, number> }> = [];
+      const STALE_REPORT_MS = 3 * 60_000;
+      const memReportKeys = Object.keys(sessionKeys).filter((k) => k.startsWith('mem:'));
+      for (const k of memReportKeys) {
+        try {
+          const stored = (await chrome.storage.session.get(k))[k];
+          const age = stored?.ts ? Date.now() - stored.ts : Infinity;
+          if (age > STALE_REPORT_MS) {
+            await chrome.storage.session.remove(k); // GC stale tab reports
+            continue;
+          }
+          const parts = k.split(':'); // mem:<platform>:<tabId>
+          contentReports.push({
+            key: k,
+            tabId: parts[2] ? parseInt(parts[2], 10) : null,
+            platform: parts[1] || 'unknown',
+            ageSec: Math.round(age / 1000),
+            data: stored?.caches || {},
+          });
+        } catch {}
+      }
+
+      const uptimeMin = Math.max(1, (Date.now() - swPerfStart) / 60_000);
+      return {
+        ok: true,
+        sw: {
+          uptimeMin: Math.round(uptimeMin * 10) / 10,
+          uptimeHrs: Math.round((uptimeMin / 6)) / 10,
+          heapBytes,
+          caches: swCaches,
+        },
+        storage: {
+          local: { totalBytes: localTotalBytes, byKey: localKeys },
+          session: { byKey: sessionKeys },
+        },
+        indexedDB: { usageBytes: idbBytes, quotaBytes },
+        contentScripts: contentReports,
+      };
+    }
+
+    // v0.57.62: per-cache surgical clear so users can drop the one structure
+    // that's bloating without nuking the entire SW state via FREE_SW_MEMORY
+    // (which would force expensive re-fetches for everything else).
+    case 'FREE_CACHE': {
+      const name = String(msg.name || '');
+      let cleared = 0;
+      switch (name) {
+        case 'threadSummaryCache':       cleared = threadSummaryCache ? 1 : 0; threadSummaryCache = null; break;
+        case 'chatActivityCache':        cleared = chatActivityCache ? Object.keys(chatActivityCache.data).length : 0; chatActivityCache = null; try { await chrome.storage.session.remove(CHAT_ACTIVITY_SESSION_KEY); } catch {} break;
+        case 'queryContactsCache':       cleared = queryContactsCache.size; queryContactsCache.clear(); break;
+        case 'autoTrainedSet':           cleared = autoTrainedSet.size; autoTrainedSet.clear(); break;
+        case 'recentContactUpserts':     cleared = recentContactUpserts.size; recentContactUpserts.clear(); break;
+        case 'dossierExtractionQueue':   cleared = dossierExtractionQueue.size; dossierExtractionQueue.clear(); break;
+        case 'searchIndex':              cleared = getIndexSize(); try { clearIndex(); } catch {} break;
+        case 'llmCaches':                try { clearLLMCaches(); } catch {} cleared = -1; break;
+        default: return { ok: false, error: `unknown cache: ${name}` };
+      }
+      console.log(`${LOG} FREE_CACHE ${name}: cleared ${cleared} entries`);
+      return { ok: true, name, cleared };
     }
 
     // v0.57.33: one-shot recovery for users whose inbox lost threads to
@@ -3602,8 +3754,14 @@ async function updateBadgeCount(): Promise<void> {
 updateBadgeCount().catch(() => {});
 chrome.alarms.create('badge-refresh', { periodInMinutes: 1 });
 chrome.alarms.create('reminder-check', { periodInMinutes: 0.25 });
+// v0.57.62: dropped mem-gc period from 30 → 5 min and free thresholds from
+// 80% → 60% capacity. The user reported the extension idling at 4GB; this
+// shifts auto-free from "almost never fires" to "every 5 min sweeps the
+// caches that actually grew." Each sweep is cheap (a few Map iterations
+// plus chrome.storage.session writes), nothing that would justify the
+// previous half-hour gap.
 // v0.57.36: periodic memory pressure release for long-lived SWs.
-chrome.alarms.create('mem-gc', { periodInMinutes: 30 });
+chrome.alarms.create('mem-gc', { periodInMinutes: 5 });
 // v0.57.54: daily LLM-model auto-discovery. Runs once at startup if the
 // last check was >20h ago, then every 24h. delayInMinutes:1 so the first
 // fire happens after the SW has settled.
