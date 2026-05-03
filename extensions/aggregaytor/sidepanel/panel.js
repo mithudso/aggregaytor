@@ -5,6 +5,60 @@
  * thread (message detail with notes, reminders, suggestions).
  */
 
+// v0.57.44: forward every uncaught error / unhandled promise rejection
+// in the side panel to the SW's rolling error log. Same pattern as the
+// content-script bridges. Lets us diagnose panel-side bugs from the
+// exported JSON file instead of asking the user to copy DevTools output.
+//
+// v0.57.57: filter known browser-emitted noise (CORS, "Failed to fetch")
+// that we handle gracefully in code. The browser logs these synchronously
+// before our try/catch can see the rejection.
+const _PANEL_NOISE_PATTERNS = [
+  /access to fetch at .* has been blocked by cors/i,
+  /preflight (?:request|response)/i,
+  /no 'access-control-allow-origin'/i,
+  /^(?:typeerror: )?failed to fetch$/i,
+];
+function _isPanelNoise(message) {
+  const s = String(message || '');
+  return _PANEL_NOISE_PATTERNS.some(re => re.test(s));
+}
+function _panelForwardError(level, message, stack) {
+  if (_isPanelNoise(message)) return;
+  try {
+    chrome.runtime.sendMessage({
+      type: 'LOG_ERROR',
+      entry: { source: 'panel', level, message, stack, url: location.href },
+    }).catch(() => {});
+  } catch {}
+}
+window.addEventListener('error', (ev) => {
+  _panelForwardError('unhandled', ev.message || String(ev.error || 'unknown error'),
+    (ev.error && ev.error.stack) || undefined);
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  const r = ev.reason;
+  _panelForwardError('rejection',
+    typeof r === 'string' ? r : (r?.message || String(r)),
+    r?.stack);
+});
+// Patch console.error so existing console.error('[Panel] ...') call sites
+// also flow into the log. Cheap.
+{
+  const origError = console.error.bind(console);
+  console.error = function (...args) {
+    try {
+      const [first, ...rest] = args;
+      const msg = typeof first === 'string' ? first : String(first);
+      const err = rest.find(a => a instanceof Error);
+      _panelForwardError('error',
+        [msg, ...rest.filter(a => a !== err).map(a => typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })())].join(' '),
+        err?.stack);
+    } catch {}
+    origError.apply(console, args);
+  };
+}
+
 let currentPlatform = 'all'; // legacy — still used for some checks
 let activePlatforms = new Set(); // multi-select toggle: which platforms are shown
 let currentThread = null;
@@ -38,6 +92,56 @@ setInterval(convertTitlesToTips, 5000);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') convertTitlesToTips();
 });
+
+// ── Toast + safe sendMessage ────────────────────────────────────────────────
+// v0.57.61: Lightweight toast for action feedback. Used by block-rule and
+// other settings actions that previously failed silently inside
+// `try {} catch {}` blocks, leaving the user thinking buttons were dead.
+function showSpToast(message, kind = 'info', durationMs = 2200) {
+  try {
+    let host = document.getElementById('sp-toast-host');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'sp-toast-host';
+      host.style.cssText = 'position:fixed;bottom:12px;left:50%;transform:translateX(-50%);z-index:99999;display:flex;flex-direction:column;gap:4px;pointer-events:none';
+      document.body.appendChild(host);
+    }
+    const colors = {
+      info:    { bg: 'rgba(59,130,246,0.92)',  fg: '#ffffff' },
+      success: { bg: 'rgba(16,185,129,0.92)',  fg: '#ffffff' },
+      error:   { bg: 'rgba(239,68,68,0.92)',   fg: '#ffffff' },
+      warn:    { bg: 'rgba(251,191,36,0.92)',  fg: '#1f2937' },
+    };
+    const c = colors[kind] || colors.info;
+    const el = document.createElement('div');
+    el.textContent = message;
+    el.style.cssText = `padding:6px 12px;border-radius:6px;background:${c.bg};color:${c.fg};font-size:11px;box-shadow:0 2px 8px rgba(0,0,0,0.4);max-width:80vw`;
+    host.appendChild(el);
+    setTimeout(() => { el.style.transition = 'opacity 0.2s'; el.style.opacity = '0'; setTimeout(() => el.remove(), 220); }, durationMs);
+  } catch {}
+}
+// Wrap chrome.runtime.sendMessage so callers always get a defined response
+// shape ({ ok, error? } at minimum) and any sync throw or rejection becomes
+// a structured error rather than crashing the click handler. Surfaces a
+// toast on failure so users see what broke instead of a dead button.
+async function spSend(msg, { silent = false } = {}) {
+  try {
+    const res = await chrome.runtime.sendMessage(msg);
+    if (res === undefined) {
+      if (!silent) showSpToast(`No response from background (${msg?.type})`, 'error', 3000);
+      return { ok: false, error: 'no response' };
+    }
+    if (res && res.ok === false && !silent) {
+      showSpToast(`${msg?.type} failed: ${res.error || 'unknown error'}`, 'error', 3500);
+    }
+    return res;
+  } catch (err) {
+    const message = (err && err.message) || String(err);
+    if (!silent) showSpToast(`${msg?.type} threw: ${message}`, 'error', 3500);
+    console.error('[Panel] spSend failed:', msg?.type, err);
+    return { ok: false, error: message };
+  }
+}
 
 // ── User Preferences (loaded from chrome.storage.local) ─────────────────────
 let prefTimestampAbsolute = false; // true = "11:42 PM", false = "5m" (relative)
@@ -111,6 +215,13 @@ function debouncedLoadDrafts() {
   _draftsTimer = setTimeout(() => loadDrafts(), 2000);
 }
 
+// v0.57.34: ACTIVE_PROFILE_CHANGED debounce state — see the listener
+// at the bottom of the file. Holds the most-recent contactId from a
+// burst of broadcasts and the timer that will eventually fire openThread
+// once the burst quiets down.
+let _apcDebounceTimer = null;
+let _apcDebounceTarget = '';
+
 // ── Inbox ───────────────────────────────────────────────────────────────────
 
 async function loadThreads() {
@@ -124,15 +235,37 @@ async function loadThreads() {
       </div>`).join('');
   }
   try {
+    // v0.57.45: 60s timeout — a real 30k-message corpus with a bloated
+    // PouchDB rev history can legitimately need 30-45s on cold scan
+    // before COMPACT_DB has been run. Was 20s and still failing for
+    // this user. The error UI offers Compact Database now as the
+    // recovery path; once compaction lands the scan drops back to
+    // 1-3s and 60s is hugely generous.
+    const withTimeout = (p, ms, label) => Promise.race([
+      p,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)),
+    ]);
     const [threadRes, metaRes] = await Promise.all([
-      chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} }),
-      chrome.runtime.sendMessage({ type: 'GET_ALL_THREAD_META' }),
+      withTimeout(chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} }), 60000, 'GET_THREAD_SUMMARIES'),
+      withTimeout(chrome.runtime.sendMessage({ type: 'GET_ALL_THREAD_META' }), 60000, 'GET_ALL_THREAD_META'),
     ]);
     if (metaRes?.ok) {
       allThreadMeta.clear();
       for (const m of metaRes.metas || []) allThreadMeta.set(m.contactId, m);
     }
+    if (!threadRes) {
+      // SW didn't respond at all — message channel closed. Show an
+      // actionable error state instead of leaving skeletons up.
+      renderInboxLoadError('No response from service worker. The SW may be suspended or wedged.');
+      return;
+    }
+    if (!threadRes.ok) {
+      renderInboxLoadError(`SW returned an error: ${threadRes.error || 'unknown'}`);
+      return;
+    }
     if (threadRes?.ok) {
+      // v0.57.52: clean load → reset auto-escalation ladder.
+      _inboxFailureCount = 0;
       const all = threadRes.summaries;
       // Filter by active platforms for display, but use ALL for badge counts
       let filtered;
@@ -149,22 +282,239 @@ async function loadThreads() {
       renderThreads(sortThreads(applyFilters(filtered)));
       // #15 Per-platform unread badges — computed from ALL threads, not filtered
       const platformUnread = {};
+      const platformTotal = {};
       for (const s of all) {
+        platformTotal[s.platform] = (platformTotal[s.platform] || 0) + 1;
         if (s.unreadCount) platformUnread[s.platform] = (platformUnread[s.platform] || 0) + s.unreadCount;
       }
       document.querySelectorAll('.platform-chip[data-platform]').forEach(chip => {
         const p = chip.dataset.platform;
         const existing = chip.querySelector('.chip-badge');
         if (existing) existing.remove();
+        const existingCount = chip.querySelector('.chip-count');
+        if (existingCount) existingCount.remove();
         if (p !== 'all' && p !== 'archived' && platformUnread[p]) {
           const badge = document.createElement('span');
           badge.className = 'chip-badge';
           badge.textContent = platformUnread[p];
           chip.appendChild(badge);
         }
+        // v0.57.28: show total thread count on active chips
+        if (p !== 'all' && p !== 'archived' && activePlatforms.has(p) && platformTotal[p]) {
+          const count = document.createElement('span');
+          count.className = 'chip-count';
+          count.textContent = platformTotal[p];
+          chip.appendChild(count);
+        }
       });
     }
-  } catch (err) { console.error('[Panel] Load error:', err); }
+  } catch (err) {
+    console.error('[Panel] Load error:', err);
+    renderInboxLoadError(String(err?.message || err || 'unknown error'));
+  }
+}
+
+// v0.57.52: track consecutive inbox-load failures so we can auto-escalate
+// through the recovery actions without the user clicking each one. Resets
+// to 0 on the first successful loadThreads call.
+let _inboxFailureCount = 0;
+const AUTO_ESCALATION_STEPS = [
+  // Each step has: a label (shown in the status banner), a function that
+  // performs the recovery action, and the user-visible button id it
+  // corresponds to (so we can highlight which action ran).
+  { label: 'Retrying load',                      action: 'retry',   run: () => loadThreads() },
+  { label: 'Freeing SW memory then retrying',    action: 'free',    run: async () => {
+      try { await chrome.runtime.sendMessage({ type: 'FREE_SW_MEMORY' }); } catch {}
+      await new Promise(r => setTimeout(r, 200));
+      loadThreads();
+  } },
+  { label: 'Compacting database (5–30s)',        action: 'compact', run: () => kickOffAndPollCompact('COMPACT_DB') },
+  { label: 'Rebuilding database (30–90s)',       action: 'rebuild', run: () => kickOffAndPollCompact('REBUILD_DB') },
+  { label: 'Reloading extension',                action: 'reload',  run: () => chrome.runtime.reload() },
+];
+
+async function kickOffAndPollCompact(type) {
+  try {
+    const start = await chrome.runtime.sendMessage({ type, trigger: 'auto-escalation' });
+    if (!start?.ok) throw new Error(start?.error || 'SW refused');
+  } catch {
+    return;
+  }
+  // Poll status until done, then trigger loadThreads
+  let ticks = 0;
+  while (true) {
+    let res;
+    try { res = await chrome.runtime.sendMessage({ type: 'GET_COMPACT_STATUS' }); } catch { res = null; }
+    const s = res?.status;
+    if (!s || s.state === 'idle') break;
+    if (s.state === 'done') { setTimeout(() => loadThreads(), 600); return; }
+    if (s.state === 'error') return;
+    ticks++;
+    await new Promise(r => setTimeout(r, ticks < 5 ? 1000 : 2000));
+    if (ticks > 600) return;
+  }
+}
+
+// v0.57.38: surface inbox-load failures in the UI instead of leaving the
+// user staring at frozen skeletons. Replaces the thread-list with an
+// actionable error card: explains what happened, offers Retry + Free SW
+// Memory + Reload Extension actions. Called from any of:
+//   1. Promise.all timeout (8s per request)
+//   2. SW returned undefined (channel closed)
+//   3. SW returned { ok: false, error }
+//   4. catch block on sync throw
+//
+// v0.57.52: auto-escalation. The card now starts a countdown that fires
+// the next recovery step automatically if the user doesn't click a
+// button manually. Each consecutive failure climbs one step up the
+// ladder: Retry → Free Mem → Compact → Rebuild → Reload. The status
+// banner names the action and the countdown so the user can intervene.
+function renderInboxLoadError(reason) {
+  _inboxFailureCount++;
+  const container = document.getElementById('thread-list');
+  if (!container) return;
+  // Pick the auto-escalation step based on consecutive failure count.
+  // 1st fail → Retry, 2nd → Free, 3rd → Compact, 4th → Rebuild, 5th+ → Reload.
+  const stepIdx = Math.min(_inboxFailureCount - 1, AUTO_ESCALATION_STEPS.length - 1);
+  const step = AUTO_ESCALATION_STEPS[stepIdx];
+  // Countdown: 30s before auto-escalating. User can click a button or wait.
+  const COUNTDOWN_SEC = 30;
+  container.innerHTML = `
+    <div class="empty-state">
+      <h2>Inbox load failed (attempt #${_inboxFailureCount})</h2>
+      <p style="color:#fbbf24;font-size:11px;margin:4px 0 8px">${esc(reason)}</p>
+      <div id="inbox-err-banner" style="background:rgba(251,191,36,0.1);border:1px solid rgba(251,191,36,0.4);border-radius:6px;padding:8px;margin:6px 0;font-size:11px;color:#fbbf24">
+        <strong>Auto-recovery:</strong> ${esc(step.label)} in <span id="inbox-err-countdown">${COUNTDOWN_SEC}</span>s.
+        <span style="color:#9ca3af">Click a button below to act now or pick a different recovery.</span>
+      </div>
+      <p style="color:#9ca3af;font-size:11px;margin-bottom:6px">The service worker may be busy on a heavy database scan, suspended by Chrome, or wedged. Recovery options:</p>
+      <div class="empty-actions" style="flex-direction:column;gap:6px;align-items:stretch">
+        <button class="empty-action-btn" id="inbox-err-retry"${stepIdx === 0 ? ' style="border-color:rgba(251,191,36,0.6);box-shadow:0 0 0 1px rgba(251,191,36,0.4)"' : ''}>Retry${stepIdx === 0 ? ' (will auto-fire)' : ''}</button>
+        <button class="empty-action-btn" id="inbox-err-free"${stepIdx === 1 ? ' style="border-color:rgba(251,191,36,0.6);box-shadow:0 0 0 1px rgba(251,191,36,0.4)"' : ''}>Free SW Memory + Retry${stepIdx === 1 ? ' (will auto-fire)' : ''}</button>
+        <button class="empty-action-btn" id="inbox-err-compact" style="border-color:rgba(251,191,36,0.5);color:#fbbf24${stepIdx === 2 ? ';box-shadow:0 0 0 1px rgba(251,191,36,0.6)' : ''}">Compact Database + Retry (5–30s)${stepIdx === 2 ? ' — will auto-fire' : ''}</button>
+        <button class="empty-action-btn" id="inbox-err-rebuild" style="border-color:rgba(239,68,68,0.5);color:#f87171${stepIdx === 3 ? ';box-shadow:0 0 0 1px rgba(239,68,68,0.6)' : ''}">Rebuild Database (when Compact won't finish)${stepIdx === 3 ? ' — will auto-fire' : ''}</button>
+        <button class="empty-action-btn" id="inbox-err-reload" style="border-color:rgba(239,68,68,0.3);color:#f87171${stepIdx === 4 ? ';box-shadow:0 0 0 1px rgba(239,68,68,0.6)' : ''}">Reload Extension${stepIdx === 4 ? ' — will auto-fire' : ''}</button>
+        <button class="empty-action-btn" id="inbox-err-cancel-auto" style="border-color:rgba(255,255,255,0.2);color:#9ca3af;font-size:10px">Cancel auto-recovery</button>
+      </div>
+    </div>
+  `;
+  // Countdown timer — fires the auto-escalation step when it hits 0.
+  let remaining = COUNTDOWN_SEC;
+  const cd = container.querySelector('#inbox-err-countdown');
+  let cancelled = false;
+  const tick = setInterval(() => {
+    remaining--;
+    if (cd) cd.textContent = String(Math.max(0, remaining));
+    if (remaining <= 0) {
+      clearInterval(tick);
+      if (!cancelled) {
+        const banner = container.querySelector('#inbox-err-banner');
+        if (banner) banner.innerHTML = `<strong>Running:</strong> ${esc(step.label)}…`;
+        try { step.run(); } catch (err) { console.error('[Panel] Auto-recovery step threw:', err); }
+      }
+    }
+  }, 1000);
+  container.querySelector('#inbox-err-cancel-auto')?.addEventListener('click', () => {
+    cancelled = true; clearInterval(tick);
+    const banner = container.querySelector('#inbox-err-banner');
+    if (banner) banner.innerHTML = '<strong>Auto-recovery cancelled.</strong> Click a button to recover manually.';
+  });
+  container.querySelector('#inbox-err-retry')?.addEventListener('click', () => {
+    container.innerHTML = '';
+    loadThreads();
+  });
+  container.querySelector('#inbox-err-free')?.addEventListener('click', async () => {
+    try { await chrome.runtime.sendMessage({ type: 'FREE_SW_MEMORY' }); } catch {}
+    container.innerHTML = '';
+    setTimeout(() => loadThreads(), 200);
+  });
+  container.querySelector('#inbox-err-compact')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = 'Starting compaction…';
+    try {
+      const start = await chrome.runtime.sendMessage({ type: 'COMPACT_DB', trigger: 'inbox-error-card' });
+      if (!start?.ok) throw new Error(start?.error || 'SW refused COMPACT_DB');
+    } catch (err) {
+      btn.textContent = `✗ Compact failed to start: ${err?.message || err}`;
+      return;
+    }
+    // Poll for completion using the same SW-death-resilient pattern as
+    // the Settings → Compact button. Loops until done/error/timeout.
+    let ticks = 0;
+    while (true) {
+      let res;
+      try { res = await chrome.runtime.sendMessage({ type: 'GET_COMPACT_STATUS' }); } catch { res = null; }
+      const s = res?.status;
+      if (!s || s.state === 'idle') break;
+      if (s.state === 'running') {
+        const elapsed = Math.round((Date.now() - s.startedAt) / 1000);
+        const min = Math.floor(elapsed / 60);
+        const sec = elapsed % 60;
+        const elapsedStr = min ? `${min}m ${sec}s` : `${sec}s`;
+        btn.textContent = `Compacting… ${elapsedStr}${s.heartbeats ? ` (${s.heartbeats} ♥)` : ''} — safe to wait`;
+      } else if (s.state === 'done') {
+        const sec = Math.round(s.elapsedMs / 1000);
+        btn.textContent = `✓ Compacted in ${sec}s — retrying`;
+        setTimeout(() => { container.innerHTML = ''; loadThreads(); }, 800);
+        return;
+      } else if (s.state === 'error') {
+        btn.textContent = `✗ Compact failed: ${s.error}`;
+        return;
+      }
+      ticks++;
+      await new Promise(r => setTimeout(r, ticks < 5 ? 1000 : 2000));
+      if (ticks > 600) {
+        btn.textContent = '✗ Timed out polling status (20 min)';
+        return;
+      }
+    }
+  });
+  container.querySelector('#inbox-err-rebuild')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    if (!confirm('Rebuild database?\n\nA backup JSON will save to Downloads first, THEN the IDB is destroyed and rebuilt fresh from the backup. Use this when Compact times out. Should finish in 30-60s on heavy installs.')) return;
+    btn.disabled = true;
+    btn.textContent = 'Starting rebuild…';
+    try {
+      const start = await chrome.runtime.sendMessage({ type: 'REBUILD_DB', trigger: 'inbox-error-card' });
+      if (!start?.ok) throw new Error(start?.error || 'SW refused REBUILD_DB');
+    } catch (err) {
+      btn.textContent = `✗ Rebuild failed to start: ${err?.message || err}`;
+      return;
+    }
+    let ticks = 0;
+    while (true) {
+      let res;
+      try { res = await chrome.runtime.sendMessage({ type: 'GET_COMPACT_STATUS' }); } catch { res = null; }
+      const s = res?.status;
+      if (!s || s.state === 'idle') break;
+      if (s.state === 'running') {
+        const elapsed = Math.round((Date.now() - s.startedAt) / 1000);
+        const min = Math.floor(elapsed / 60);
+        const sec = elapsed % 60;
+        const elapsedStr = min ? `${min}m ${sec}s` : `${sec}s`;
+        const phase = s.phase ? ` ${s.phase}` : '';
+        btn.textContent = `Rebuilding…${phase} ${elapsedStr}${s.heartbeats ? ` (${s.heartbeats} ♥)` : ''}`;
+      } else if (s.state === 'done') {
+        const sec = Math.round(s.elapsedMs / 1000);
+        btn.textContent = `✓ Rebuilt in ${sec}s — retrying`;
+        setTimeout(() => { container.innerHTML = ''; loadThreads(); }, 800);
+        return;
+      } else if (s.state === 'error') {
+        btn.textContent = `✗ Rebuild failed: ${s.error}`;
+        return;
+      }
+      ticks++;
+      await new Promise(r => setTimeout(r, ticks < 5 ? 1000 : 2000));
+      if (ticks > 600) {
+        btn.textContent = '✗ Timed out polling status (20 min)';
+        return;
+      }
+    }
+  });
+  container.querySelector('#inbox-err-reload')?.addEventListener('click', () => {
+    chrome.runtime.reload();
+  });
 }
 
 function applyFilters(summaries) {
@@ -262,6 +612,24 @@ function renderThreads(summaries) {
   const container = document.getElementById('thread-list');
   const showingArchive = currentPlatform === 'archived';
   if (!summaries?.length) {
+    // v0.57.33: detect the "all my threads are archived because I bulk-
+    // blocked profiles" failure mode. Up through v0.57.32 every
+    // PROFILE_BLOCKED set archived:true on the thread meta, so a heavy
+    // map-block session would hide every Sniffies conversation from the
+    // inbox. Count blocked-and-archived threads for the active filter
+    // and surface a one-click recovery if any are present.
+    let blockedArchived = 0;
+    for (const m of allThreadMeta.values()) {
+      if (!m.archived || !m.blockedByThem) continue;
+      if (currentPlatform === 'all' || activePlatforms.size === 0) { blockedArchived++; continue; }
+      if (activePlatforms.has(m.platform)) blockedArchived++;
+    }
+    const recoveryHint = (!showingArchive && blockedArchived > 0)
+      ? `<div class="empty-recovery">
+           <p><strong>${blockedArchived}</strong> conversation${blockedArchived === 1 ? '' : 's'} were archived by old map-block behaviour. Restore them to your inbox?</p>
+           <button class="empty-action-btn" id="empty-restore-blocked">Restore ${blockedArchived} archived thread${blockedArchived === 1 ? '' : 's'}</button>
+         </div>`
+      : '';
     // #18 Better empty states with actionable guidance
     container.innerHTML = showingArchive
       ? '<div class="empty-state"><h2>Archive empty</h2><p>Swipe left or tap 📦 on any conversation to archive it.</p></div>'
@@ -270,13 +638,30 @@ function renderThreads(summaries) {
           <div class="empty-actions">
             <button class="empty-action-btn" id="empty-open-sites">Open all sites</button>
             <button class="empty-action-btn" id="empty-clear-filters">Clear filters</button>
-          </div></div>`;
+          </div>
+          ${recoveryHint}</div>`;
     updateTotalUnread(0);
     // Attach empty state action handlers
     const openBtn = container.querySelector('#empty-open-sites');
     if (openBtn) openBtn.addEventListener('click', () => chrome.runtime.sendMessage({ type: 'OPEN_ALL_SITES' }).catch(() => {}));
     const clearBtn = container.querySelector('#empty-clear-filters');
     if (clearBtn) clearBtn.addEventListener('click', () => { document.getElementById('filter-clear').click(); });
+    const restoreBtn = container.querySelector('#empty-restore-blocked');
+    if (restoreBtn) restoreBtn.addEventListener('click', async () => {
+      restoreBtn.disabled = true;
+      restoreBtn.textContent = 'Restoring…';
+      // Limit to active platform if user is viewing a specific one;
+      // otherwise restore across the board.
+      const platform = (activePlatforms.size === 1) ? [...activePlatforms][0] : '';
+      const res = await chrome.runtime.sendMessage({ type: 'UNARCHIVE_BLOCKED_THREADS', platform }).catch(() => null);
+      if (res?.ok) {
+        restoreBtn.textContent = `✓ Restored ${res.count}`;
+        setTimeout(() => loadThreads(), 400);
+      } else {
+        restoreBtn.textContent = 'Failed — try again';
+        restoreBtn.disabled = false;
+      }
+    });
     return;
   }
 
@@ -590,7 +975,14 @@ async function handleAction(action, contactId, platform) {
 
 // ── Thread detail ───────────────────────────────────────────────────────────
 
-async function openThread(contactId, platform, displayName) {
+async function openThread(contactId, platform, displayName, opts = {}) {
+  // v0.57.34: opts.suppressNavigate skips the NAVIGATE_TO_CONVERSATION
+  // message back to the SW. Used by the ACTIVE_PROFILE_CHANGED listener
+  // because the platform tab IS the source of truth for that event —
+  // navigating it back would be a redundant SPA_NAVIGATE → popstate →
+  // checkUrlChange → ACTIVE_PROFILE_CHANGED loop. The user-initiated
+  // path (clicking a thread in the inbox) still navigates so the
+  // platform tab follows.
   // #13 Save scroll position before opening thread
   const threadList = document.getElementById('thread-list');
   savedScrollTop = threadList.scrollTop;
@@ -631,7 +1023,7 @@ async function openThread(contactId, platform, displayName) {
 
   // Navigate parent tab (unless auto-navigate is disabled or contact is deleted/blocked)
   const threadMeta = allThreadMeta.get(contactId) || {};
-  if (prefAutoNavigate && !threadMeta.blockedByThem && contactId !== 'sniffies:global-chat') {
+  if (prefAutoNavigate && !threadMeta.blockedByThem && contactId !== 'sniffies:global-chat' && !opts.suppressNavigate) {
     chrome.runtime.sendMessage({ type: 'NAVIGATE_TO_CONVERSATION', platform, contactId }).catch(() => {});
   }
   chrome.runtime.sendMessage({ type: 'MARK_THREAD_READ', threadId: contactId }).catch(() => {});
@@ -687,11 +1079,11 @@ async function openThread(contactId, platform, displayName) {
 async function loadProfileInfo(contactId) {
   const el = document.getElementById('profile-info');
   try {
-    const res = await chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId });
-    // Direct single-contact lookup — avoids the expensive GET_THREAD_SUMMARIES
-    // query (177ms avg, queries 1000 messages) just to find one contact.
-    // GET_CONTACT is a single PouchDB.get() — essentially instant.
-    const contactRes = await chrome.runtime.sendMessage({ type: 'GET_CONTACT', contactId: `contact:${contactId.replace('contact:', '')}` });
+    // v0.57.28: run both lookups in parallel — they're independent
+    const [res, contactRes] = await Promise.all([
+      chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId }),
+      chrome.runtime.sendMessage({ type: 'GET_CONTACT', contactId: `contact:${contactId.replace('contact:', '')}` }),
+    ]);
     const contact = contactRes?.contact;
     const meta = res?.meta || {};
 
@@ -951,6 +1343,13 @@ function renderMessages(messages) {
       // Persist hidden state
       const set = new Set(JSON.parse(localStorage.getItem('aggregaytor_hidden_msgs') || '[]'));
       if (hidden) set.add(msgId); else set.delete(msgId);
+      // v0.57.28: cap at 1000 entries with FIFO eviction to prevent unbounded growth
+      if (set.size > 1000) {
+        const arr = [...set];
+        const trimmed = arr.slice(arr.length - 1000);
+        set.clear();
+        for (const id of trimmed) set.add(id);
+      }
       localStorage.setItem('aggregaytor_hidden_msgs', JSON.stringify([...set]));
     });
   });
@@ -1495,16 +1894,37 @@ chrome.runtime.onMessage.addListener((message) => {
     if (message.contactId) {
       chrome.runtime.sendMessage({ type: 'MARK_THREAD_READ', threadId: message.contactId }).catch(() => {});
     }
-    // Auto-open the conversation in the side panel when the user opens
-    // a profile or chat on the platform site. This keeps the side panel
-    // in sync with what's on screen.
+    // v0.57.34: debounce + suppressNavigate to break the ping-pong loop.
+    //
+    // Old flow that caused the user-reported "panel keeps switching
+    // between two profiles" bug:
+    //   click profile B on map
+    //     → bridge polls URL → ACTIVE_PROFILE_CHANGED(B) → SW → panel
+    //     → panel openThread(B) → NAVIGATE_TO_CONVERSATION(B)
+    //     → SW SPA_NAVIGATE(B) → bridge pushState + dispatch popstate
+    //     → bridge checkUrlChange runs again, sometimes catching a
+    //       transitional URL state, fires ACTIVE_PROFILE_CHANGED for
+    //       the OLD profile → panel opens OLD → loop
+    //
+    // Two guards:
+    //   (a) suppressNavigate — when the bridge is already on the right
+    //       URL there's no reason to bounce a navigation back at it.
+    //   (b) 250ms debounce per contactId — collapses the burst of polls
+    //       Sniffies' SPA emits during a profile click into a single
+    //       openThread call.
     if (message.contactId && message.contactId !== 'sniffies:global-chat') {
       const platform = message.platform || message.contactId.split(':')[0] || '';
-      const existingThread = currentThread?.contactId;
-      // Only auto-open if we're in inbox view OR viewing a different thread
-      if (!existingThread || existingThread !== message.contactId) {
-        openThread(message.contactId, platform, '');
-      }
+      const target = message.contactId;
+      // Skip same-profile re-broadcasts entirely
+      if (currentThread?.contactId === target) return;
+      // Debounce identical IDs across the 250ms burst window
+      if (_apcDebounceTimer) clearTimeout(_apcDebounceTimer);
+      _apcDebounceTarget = target;
+      _apcDebounceTimer = setTimeout(() => {
+        _apcDebounceTimer = null;
+        if (currentThread?.contactId === _apcDebounceTarget) return;
+        openThread(_apcDebounceTarget, platform, '', { suppressNavigate: true });
+      }, 250);
     } else {
       // No specific profile — go back to inbox if we're in a thread
       if (document.body.classList.contains('view-inbox')) loadThreads();
@@ -1530,6 +1950,11 @@ const nicknameQueue = new Set();
 
 async function generateNickname(contactId, platform, contact, lastMessage) {
   if (nicknameQueue.has(contactId)) return;
+  // v0.57.28: cap at 50 with FIFO eviction to prevent memory leak
+  if (nicknameQueue.size >= 50) {
+    const oldest = nicknameQueue.values().next().value;
+    if (oldest) nicknameQueue.delete(oldest);
+  }
   nicknameQueue.add(contactId);
 
   try {
@@ -1755,9 +2180,9 @@ async function openGallery(contactId, displayName) {
 
   const pics = [];
   try {
-    const summRes = await chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} });
-    const thread = summRes?.summaries?.find(s => s.contactId === contactId);
-    const contact = thread?.contact;
+    // v0.57.28: use O(1) GET_CONTACT instead of fetching ALL thread summaries
+    const contactRes = await chrome.runtime.sendMessage({ type: 'GET_CONTACT', contactId: 'contact:' + contactId.replace('contact:', '') });
+    const contact = contactRes?.contact;
     if (contact?.avatarUrl) pics.push(contact.avatarUrl);
     if (Array.isArray(contact?.metadata?.photos)) {
       for (const p of contact.metadata.photos) {
@@ -1790,6 +2215,13 @@ async function openGallery(contactId, displayName) {
 
 document.getElementById('gallery-close').addEventListener('click', () => {
   document.getElementById('gallery-overlay').style.display = 'none';
+});
+
+// v0.57.28: click on overlay background (not child elements) to close gallery
+document.getElementById('gallery-overlay').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget || e.target.classList.contains('gallery-grid')) {
+    document.getElementById('gallery-overlay').style.display = 'none';
+  }
 });
 
 document.getElementById('btn-gallery').addEventListener('click', () => {
@@ -2015,53 +2447,89 @@ document.getElementById('sp-derive-style')?.addEventListener('click', async () =
 });
 
 // Block rules
+//
+// v0.57.61: rebuilt to use spSend (surfaces failures via toast) and
+// event delegation on the list (one click listener handles every
+// row's Disable/Enable/Delete button so a botched re-render can't
+// orphan listeners). Previously every action used silent try/catch +
+// per-row addEventListener which made dead buttons indistinguishable
+// from "no rules in the DB." Now a failed request shows an error toast
+// and a successful one shows a confirmation toast.
 async function loadBlockRules() {
-  try {
-    const res = await chrome.runtime.sendMessage({ type: 'GET_ALL_BLOCK_RULES' });
-    const list = document.getElementById('sp-rule-list');
-    if (!res?.ok || !res.rules?.length) { list.innerHTML = '<div class="settings-info">No rules yet.</div>'; return; }
-    list.innerHTML = res.rules.map(r => {
-      const statusColor = r.enabled ? '#34d399' : '#6b7280';
-      const statusDot = r.enabled ? '🟢' : '⚪';
-      const statusLabel = r.enabled ? 'Active' : 'Disabled';
-      const toggleLabel = r.enabled ? 'Disable' : 'Enable';
-      return `
-      <div style="display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:11px">
-        <span style="font-size:10px" title="${statusLabel}">${statusDot}</span>
-        <span style="flex:1">${esc(r.name)}</span>
-        <span style="color:#6b7280;font-size:9px" title="Times this rule has triggered">${r.executedCount} triggered</span>
-        <button class="settings-btn" data-toggle-rule="${r._id}" data-enabled="${!r.enabled}" style="font-size:10px;padding:2px 6px">${toggleLabel}</button>
-        <button class="settings-btn" style="border-color:rgba(239,68,68,0.3);color:#f87171;font-size:10px;padding:2px 6px" data-delete-rule="${r._id}">✕</button>
-      </div>`;
-    }).join('');
-    list.querySelectorAll('[data-toggle-rule]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        await chrome.runtime.sendMessage({ type: 'UPDATE_BLOCK_RULE', id: btn.dataset.toggleRule, updates: { enabled: btn.dataset.enabled === 'true' } });
-        loadBlockRules();
-      });
-    });
-    list.querySelectorAll('[data-delete-rule]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        await chrome.runtime.sendMessage({ type: 'DELETE_BLOCK_RULE', id: btn.dataset.deleteRule });
-        loadBlockRules();
-      });
-    });
-  } catch {}
+  const list = document.getElementById('sp-rule-list');
+  if (!list) { console.warn('[Panel] sp-rule-list not in DOM'); return; }
+  const res = await spSend({ type: 'GET_ALL_BLOCK_RULES' });
+  if (!res?.ok) { list.innerHTML = '<div class="settings-info" style="color:#f87171">Failed to load rules — see toast.</div>'; return; }
+  if (!res.rules?.length) { list.innerHTML = '<div class="settings-info">No rules yet.</div>'; return; }
+  list.innerHTML = res.rules.map(r => {
+    const statusDot = r.enabled ? '🟢' : '⚪';
+    const statusLabel = r.enabled ? 'Active' : 'Disabled';
+    const toggleLabel = r.enabled ? 'Disable' : 'Enable';
+    return `
+    <div style="display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:11px">
+      <span style="font-size:10px" title="${statusLabel}">${statusDot}</span>
+      <span style="flex:1">${esc(r.name)}</span>
+      <span style="color:#6b7280;font-size:9px" title="Times this rule has triggered">${r.executedCount} triggered</span>
+      <button type="button" class="settings-btn" data-toggle-rule="${esc(r._id)}" data-enabled="${!r.enabled}" style="font-size:10px;padding:2px 6px;width:auto">${toggleLabel}</button>
+      <button type="button" class="settings-btn" style="border-color:rgba(239,68,68,0.3);color:#f87171;font-size:10px;padding:2px 6px;width:auto" data-delete-rule="${esc(r._id)}">✕</button>
+    </div>`;
+  }).join('');
 }
+// Event delegation — one listener on the list survives every re-render.
+document.getElementById('sp-rule-list')?.addEventListener('click', async (e) => {
+  const btn = e.target?.closest?.('button');
+  if (!btn) return;
+  const toggleId = btn.dataset.toggleRule;
+  const deleteId = btn.dataset.deleteRule;
+  if (toggleId) {
+    btn.disabled = true;
+    const enabled = btn.dataset.enabled === 'true';
+    const res = await spSend({ type: 'UPDATE_BLOCK_RULE', id: toggleId, updates: { enabled } });
+    if (res?.ok) showSpToast(enabled ? 'Rule enabled' : 'Rule disabled', 'success');
+    loadBlockRules();
+  } else if (deleteId) {
+    btn.disabled = true;
+    const res = await spSend({ type: 'DELETE_BLOCK_RULE', id: deleteId });
+    if (res?.ok) showSpToast('Rule deleted', 'success');
+    loadBlockRules();
+  }
+});
 document.getElementById('sp-rule-type')?.addEventListener('change', (e) => {
-  document.getElementById('sp-rule-keywords').style.display = e.target.value === 'keyword' ? '' : 'none';
+  const kw = document.getElementById('sp-rule-keywords');
+  if (kw) kw.style.display = e.target.value === 'keyword' ? '' : 'none';
 });
 document.getElementById('sp-add-rule')?.addEventListener('click', async () => {
-  const type = document.getElementById('sp-rule-type').value;
-  const threshold = parseInt(document.getElementById('sp-rule-threshold').value) || 3;
-  const keywords = (document.getElementById('sp-rule-keywords').value || '').split(',').map(k => k.trim()).filter(Boolean);
-  const action = document.getElementById('sp-rule-action').value;
+  const addBtn = document.getElementById('sp-add-rule');
+  const typeEl = document.getElementById('sp-rule-type');
+  const threshEl = document.getElementById('sp-rule-threshold');
+  const kwEl = document.getElementById('sp-rule-keywords');
+  const actionEl = document.getElementById('sp-rule-action');
+  if (!typeEl || !threshEl || !actionEl) {
+    showSpToast('Rule form is missing inputs — reload the panel', 'error');
+    return;
+  }
+  const type = typeEl.value;
+  const threshold = parseInt(threshEl.value) || 3;
+  const keywords = (kwEl?.value || '').split(',').map(k => k.trim()).filter(Boolean);
+  const action = actionEl.value;
+  if (type === 'keyword' && !keywords.length) {
+    showSpToast('Add at least one keyword for a keyword rule', 'warn');
+    return;
+  }
   const condition = { type };
   if (type === 'keyword') condition.keywords = keywords;
   else if (type === 'no_response_days') condition.days = threshold;
   else condition.threshold = threshold;
-  const names = { ignored_count: `Ignored ${threshold}x`, no_response_days: `No reply ${threshold}d`, deleted_chat: `Deleted ${threshold}x`, keyword: `Keyword: ${keywords.slice(0,2).join(', ')}` };
-  await chrome.runtime.sendMessage({ type: 'CREATE_BLOCK_RULE', input: { name: names[type] || type, condition, action } });
+  const names = {
+    ignored_count: `Ignored ${threshold}x`,
+    no_response_days: `No reply ${threshold}d`,
+    deleted_chat: `Deleted ${threshold}x`,
+    keyword: `Keyword: ${keywords.slice(0, 2).join(', ')}`,
+  };
+  if (addBtn) { addBtn.disabled = true; addBtn.textContent = 'Adding…'; }
+  const res = await spSend({ type: 'CREATE_BLOCK_RULE', input: { name: names[type] || type, condition, action } });
+  if (addBtn) { addBtn.disabled = false; addBtn.textContent = 'Add Rule'; }
+  if (res?.ok) showSpToast(`Added rule: ${names[type] || type}`, 'success');
   loadBlockRules();
 });
 
@@ -3001,6 +3469,340 @@ document.getElementById('sp-map-undo-hide')?.addEventListener('click', () => {
   if (status) { status.textContent = 'Last hide undone!'; status.style.color = '#22c55e'; }
 });
 
+// v0.57.35: panel-driven sanity check for "my Sniffies inbox looks
+// frozen" — pings every open sniffies.com tab via the SW, the bridge
+// relays to MAIN world which hits chat-data, and the patched fetch
+// pipes any new messages back through ADAPTER_MESSAGES. The result
+// count tells the user whether the adapter is actually capturing or
+// whether they genuinely just don't have new server-side activity.
+document.getElementById('sp-refetch-sniffies')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-refetch-sniffies');
+  const status = document.getElementById('sp-map-status');
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Refetching…';
+  if (status) { status.textContent = 'Pinging Sniffies tabs…'; status.style.color = '#93c5fd'; }
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'REFETCH_SNIFFIES_INBOX' });
+    if (!res?.ok) throw new Error('SW refused refetch');
+    if (res.tabs === 0) {
+      btn.textContent = 'No Sniffies tab open';
+      if (status) { status.textContent = 'Open sniffies.com in a tab and try again.'; status.style.color = '#fbbf24'; }
+    } else {
+      btn.textContent = `✓ Pinged ${res.tabs} tab${res.tabs === 1 ? '' : 's'}`;
+      if (status) { status.textContent = `Refetch dispatched. Watching for ADAPTER_MESSAGES (~3s)…`; status.style.color = '#93c5fd'; }
+      // After ~4s, refresh the inbox so any new messages render
+      setTimeout(() => loadThreads(), 4000);
+    }
+  } catch (err) {
+    btn.textContent = 'Failed';
+    if (status) { status.textContent = `Refetch failed: ${err?.message || err}`; status.style.color = '#f87171'; }
+  }
+  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 5000);
+});
+
+// Listen for the MAIN-world result so we can show the actual capture delta
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== 'SNIFFIES_REFETCH_RESULT') return;
+  const status = document.getElementById('sp-map-status');
+  if (!status) return;
+  const captured = Number(message.captured || 0);
+  if (captured > 0) {
+    status.textContent = `✓ Captured ${captured} new message${captured === 1 ? '' : 's'} (lifetime: ${message.totalLifetime}). Inbox refreshing.`;
+    status.style.color = '#22c55e';
+    loadThreads();
+  } else {
+    status.textContent = `Adapter ran (lifetime captures: ${message.totalLifetime}) but no NEW messages came back. The Sniffies API itself returned nothing new — your inbox is genuinely up to date.`;
+    status.style.color = '#fbbf24';
+  }
+});
+
+// v0.57.44: error-log Export / Clear / counter. Pulls the SW's rolling
+// log via GET_ERROR_LOG, triggers a JSON download via EXPORT_ERROR_LOG,
+// and resets via CLEAR_ERROR_LOG. The count refreshes whenever the user
+// opens the Map tab.
+async function refreshErrorCount() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_ERROR_LOG' });
+    const el = document.getElementById('sp-error-count');
+    if (el && res?.ok) el.textContent = String(res.count || 0);
+  } catch {}
+}
+document.getElementById('sp-export-errors')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-export-errors');
+  const status = document.getElementById('sp-error-status');
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Exporting…';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'EXPORT_ERROR_LOG' });
+    if (res?.ok) {
+      btn.textContent = res.id != null ? `✓ Saved (${res.count})` : `✗ Download blocked`;
+      if (status) {
+        status.textContent = res.id != null
+          ? `Saved ${res.count} entries to Downloads/${res.filename}`
+          : `Download API returned no id (chrome.downloads may be unavailable in this build).`;
+        status.style.color = res.id != null ? '#22c55e' : '#fbbf24';
+      }
+    } else {
+      btn.textContent = '✗ Failed';
+    }
+  } catch (err) {
+    btn.textContent = '✗ Failed';
+    if (status) { status.textContent = `Export failed: ${err?.message || err}`; status.style.color = '#f87171'; }
+  }
+  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 4000);
+});
+document.getElementById('sp-clear-errors')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-clear-errors');
+  const status = document.getElementById('sp-error-status');
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Clearing…';
+  try {
+    await chrome.runtime.sendMessage({ type: 'CLEAR_ERROR_LOG' });
+    btn.textContent = '✓ Cleared';
+    if (status) { status.textContent = 'Error log cleared.'; status.style.color = '#22c55e'; }
+    refreshErrorCount();
+  } catch (err) {
+    btn.textContent = '✗ Failed';
+  }
+  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 3000);
+});
+// Refresh the count on initial load + every 30s while the panel is open.
+refreshErrorCount();
+setInterval(refreshErrorCount, 30_000);
+
+// v0.57.36: panel-driven memory pressure release. Sends FREE_SW_MEMORY
+// to the SW which nukes every in-memory cache (thread summaries, chat
+// activity, query cache, autoTrained set, recent contact upserts,
+// dossier queue, search index, all LLM caches). Reports pre-clear sizes
+// so the user can see how much was held.
+// v0.57.46: compact button now polls status from chrome.storage.session
+// instead of awaiting a single sendMessage call. The previous version
+// stuck on "Compacting…" when the SW got killed mid-compaction (the
+// channel closed and our promise never resolved). The SW now writes
+// progress to session storage, so we keep polling until it lands on
+// a terminal state (done | error) regardless of whether the SW dies
+// and respawns. Panel can also be closed and reopened mid-compact —
+// reopening rejoins the existing run.
+async function pollCompactStatus(btn, status, origLabel) {
+  let elapsedTicks = 0;
+  while (true) {
+    let res;
+    try { res = await chrome.runtime.sendMessage({ type: 'GET_COMPACT_STATUS' }); }
+    catch { res = null; }
+    const s = res?.status;
+    if (!s || s.state === 'idle') {
+      // Either the SW lost the status, or compaction was never running.
+      btn.textContent = origLabel; btn.disabled = false;
+      if (status) { status.textContent = ''; status.style.color = ''; }
+      return;
+    }
+    if (s.state === 'running') {
+      const elapsed = Math.round((Date.now() - s.startedAt) / 1000);
+      const min = Math.floor(elapsed / 60);
+      const sec = elapsed % 60;
+      const elapsedStr = min ? `${min}m ${sec}s` : `${sec}s`;
+      const opName = s.phase ? `Rebuilding (${s.phase})` : 'Compacting';
+      btn.textContent = `${opName}… ${elapsedStr}${s.heartbeats ? ` (${s.heartbeats} ♥)` : ''}`;
+      if (status) {
+        const heartbeatNote = s.heartbeats
+          ? ` SW heartbeat #${s.heartbeats} — alive.`
+          : ' Waiting for first heartbeat (~20s).';
+        status.textContent = `${opName} for ${elapsedStr}.${heartbeatNote} Safe to close the panel — it'll keep running.`;
+        status.style.color = '#fbbf24';
+      }
+    } else if (s.state === 'done') {
+      const sec = Math.round(s.elapsedMs / 1000);
+      btn.textContent = `✓ Compacted in ${sec}s`;
+      if (status) {
+        status.textContent = `Compaction (${s.trigger}) finished in ${sec}s. Subsequent inbox loads should be much faster.`;
+        status.style.color = '#22c55e';
+      }
+      setTimeout(() => { btn.textContent = origLabel; btn.disabled = false; }, 5000);
+      return;
+    } else if (s.state === 'error') {
+      btn.textContent = '✗ Failed';
+      if (status) { status.textContent = `Compaction failed: ${s.error}`; status.style.color = '#f87171'; }
+      setTimeout(() => { btn.textContent = origLabel; btn.disabled = false; }, 5000);
+      return;
+    }
+    // Poll faster early, slower later — bounded total wait.
+    elapsedTicks++;
+    await new Promise(r => setTimeout(r, elapsedTicks < 5 ? 1000 : 2000));
+    // v0.57.48: hard-stop bumped 5min → 20min. Compaction on a multi-GB
+    // PouchDB legitimately takes 10-15 minutes for the first run after
+    // years of un-compacted writes. With the v0.57.48 SW heartbeat
+    // keeping the worker alive, the underlying compact() actually
+    // completes on these timescales. The SW also auto-resets stale
+    // 'running' state to 'error' if heartbeats stop, so this poll
+    // terminates either way.
+    // ~5 ticks × 1s + 595 ticks × 2s = ~20 min.
+    if (elapsedTicks > 600) {
+      btn.textContent = '✗ Timed out';
+      if (status) { status.textContent = 'Compaction polling exceeded 20 minutes. Try Reload Extension.'; status.style.color = '#f87171'; }
+      btn.disabled = false;
+      return;
+    }
+  }
+}
+
+// v0.57.49: rebuild button. Same async + heartbeat-poll pattern as
+// compact, but kicks off REBUILD_DB instead. Reuses pollCompactStatus
+// because the SW writes to the same chrome.storage.session key for both
+// operations (state machine is shared — only one can run at a time).
+document.getElementById('sp-rebuild-db')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-rebuild-db');
+  const status = document.getElementById('sp-map-status');
+  if (!btn) return;
+  if (!confirm('Rebuild the database?\n\nThis will:\n  1. Save a backup JSON to Downloads\n  2. Destroy the IndexedDB\n  3. Recreate it fresh\n  4. Re-import all docs\n\nUse this when Compact Database itself times out. Your data is safe — backup downloads BEFORE the destroy step.')) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Starting rebuild…';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'REBUILD_DB', trigger: 'manual' });
+    if (!res?.ok) throw new Error(res?.error || 'SW refused REBUILD_DB');
+    if (res.alreadyRunning) {
+      if (status) { status.textContent = 'Rebuild is already running — joining its progress.'; status.style.color = '#fbbf24'; }
+    }
+  } catch (err) {
+    btn.textContent = '✗ Failed to start';
+    if (status) { status.textContent = `Could not start rebuild: ${err?.message || err}`; status.style.color = '#f87171'; }
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 4000);
+    return;
+  }
+  pollCompactStatus(btn, status, orig);
+});
+
+document.getElementById('sp-compact-db')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-compact-db');
+  const status = document.getElementById('sp-map-status');
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Starting compaction…';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'COMPACT_DB', trigger: 'manual' });
+    if (!res?.ok) throw new Error(res?.error || 'SW refused COMPACT_DB');
+    if (res.alreadyRunning) {
+      if (status) { status.textContent = 'Compaction is already running — joining its progress.'; status.style.color = '#fbbf24'; }
+    }
+  } catch (err) {
+    btn.textContent = '✗ Failed to start';
+    if (status) { status.textContent = `Could not start compaction: ${err?.message || err}`; status.style.color = '#f87171'; }
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 4000);
+    return;
+  }
+  // Now poll until done/error
+  pollCompactStatus(btn, status, orig);
+});
+
+// v0.57.46: Auto-Maintenance status readout. Polls GET_AUTO_MAINTENANCE
+// every 30s and shows lastCompactAt / lastFreeAt / mutations / lastReason.
+// Lets the user see "yes, the extension is taking care of itself" without
+// having to babysit the SW console.
+async function refreshAutoMaintStatus() {
+  const el = document.getElementById('sp-automaint-text');
+  if (!el) return;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_AUTO_MAINTENANCE' });
+    const s = res?.state;
+    if (!s) { el.textContent = '(no data)'; return; }
+    const fmt = (t) => t > 0 ? new Date(t).toLocaleString() : 'never';
+    const ago = (t) => {
+      if (!t) return 'never';
+      const m = Math.round((Date.now() - t) / 60_000);
+      if (m < 1) return 'just now';
+      if (m < 60) return `${m}m ago`;
+      if (m < 1440) return `${Math.round(m/60)}h ago`;
+      return `${Math.round(m/1440)}d ago`;
+    };
+    el.innerHTML = `
+      <div>Last compact: <strong>${ago(s.lastCompactAt)}</strong> <span style="color:#6b7280">(${fmt(s.lastCompactAt)})</span></div>
+      <div>Last free: <strong>${ago(s.lastFreeAt)}</strong> <span style="color:#6b7280">(${fmt(s.lastFreeAt)})</span></div>
+      <div>Mutations since compact: <strong>${s.mutationsSinceCompact || 0}</strong></div>
+      <div>Last decision: <strong>${ago(s.lastDecisionAt)}</strong></div>
+      <div style="color:#6b7280;font-style:italic;margin-top:2px">${esc(s.lastReason || '')}</div>
+    `;
+  } catch {
+    el.textContent = '(unreachable)';
+  }
+}
+refreshAutoMaintStatus();
+setInterval(refreshAutoMaintStatus, 30_000);
+
+// On panel load, check if a compaction is already running (from auto-
+// maintenance or a previous manual click). If so, attach the poller so
+// the user sees live progress instead of a static button.
+(async function rejoinRunningCompaction() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_COMPACT_STATUS' });
+    if (res?.status?.state === 'running') {
+      const btn = document.getElementById('sp-compact-db');
+      const status = document.getElementById('sp-map-status');
+      if (btn) {
+        btn.disabled = true;
+        pollCompactStatus(btn, status, btn.textContent || 'Compact Database (fix slow scans)');
+      }
+    }
+  } catch {}
+})();
+
+document.getElementById('sp-free-memory')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-free-memory');
+  const status = document.getElementById('sp-map-status');
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Freeing…';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'FREE_SW_MEMORY' });
+    if (res?.ok) {
+      const b = res.before || {};
+      const summary = `Cleared: search ${b.searchIndexSize || 0}, query ${b.queryContactsCache || 0}, autoTrain ${b.autoTrainedSet || 0}, contactUpserts ${b.recentContactUpserts || 0}, dossierQ ${b.dossierExtractionQueue || 0}`;
+      btn.textContent = '✓ Freed';
+      if (status) { status.textContent = summary; status.style.color = '#22c55e'; }
+    } else {
+      btn.textContent = 'Failed';
+    }
+  } catch (err) {
+    btn.textContent = 'Failed';
+    if (status) { status.textContent = `Free failed: ${err?.message || err}`; status.style.color = '#f87171'; }
+  }
+  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 4000);
+});
+
+// v0.57.33: bulk-restore inbox threads that the old PROFILE_BLOCKED →
+// archived:true coupling silently nuked. Doesn't touch the block flag,
+// so the profiles stay blocked on the map; only the inbox visibility
+// flips back. Async because we await the SW count for the toast.
+document.getElementById('sp-restore-blocked-archived')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-restore-blocked-archived');
+  const status = document.getElementById('sp-map-status');
+  if (!btn) return;
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = 'Restoring…';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'UNARCHIVE_BLOCKED_THREADS' });
+    if (res?.ok) {
+      btn.textContent = `✓ Restored ${res.count}`;
+      if (status) { status.textContent = `Restored ${res.count} thread(s) to the inbox.`; status.style.color = '#22c55e'; }
+      // Refresh inbox so the user sees the restored threads immediately.
+      setTimeout(() => loadThreads(), 300);
+    } else {
+      btn.textContent = 'Failed — try again';
+    }
+  } catch (err) {
+    btn.textContent = 'Failed — try again';
+  }
+  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 3000);
+});
+
 document.getElementById('sp-map-clear-blocked')?.addEventListener('click', () => {
   chrome.storage.local.set({ aggregaytor_map_blocked: [] });
   chrome.tabs.query({}).then(tabs => {
@@ -3059,8 +3861,28 @@ function addDevLog(msg) {
 }
 
 function renderDevLog() {
-  devLogEl.innerHTML = devLogMessages.slice(-50).map(m => `<div>${esc(m)}</div>`).join('');
+  devLogEl.innerHTML = '<button id="devlog-refresh-stats" style="font-size:10px;margin-bottom:4px;padding:2px 8px;border-radius:4px;border:1px solid rgba(59,130,246,0.4);background:rgba(59,130,246,0.15);color:#93c5fd;cursor:pointer;">Refresh Stats</button>' +
+    devLogMessages.slice(-50).map(m => `<div>${esc(m)}</div>`).join('');
   devLogEl.scrollTop = devLogEl.scrollHeight;
+  // v0.57.28: wire up refresh stats button
+  document.getElementById('devlog-refresh-stats')?.addEventListener('click', async () => {
+    try {
+      const [perfRes, idxRes] = await Promise.all([
+        chrome.runtime.sendMessage({ type: 'GET_SW_PERF' }),
+        chrome.runtime.sendMessage({ type: 'GET_SEARCH_INDEX_INFO' }),
+      ]);
+      if (perfRes?.ok) {
+        const m = perfRes.memory || {};
+        addDevLog(`[PERF] uptime=${perfRes.uptimeHrs}h threads=${m.threadCacheHasData ? 'cached' : 'cold'} contacts=${m.recentContactUpserts}/${m.recentContactUpsertsCap} dossierQ=${m.dossierQueueSize}/${m.dossierQueueCap}`);
+        if (m.dossierFirstQueuedAgoSec) addDevLog(`[PERF] dossier queued ${m.dossierFirstQueuedAgoSec}s ago`);
+      }
+      if (idxRes?.ok) {
+        addDevLog(`[SEARCH] ready=${idxRes.ready} size=${idxRes.size}/${idxRes.cap} (${idxRes.utilization}%) evicted=${idxRes.evictedCount}${idxRes.lifetimeSeeds != null ? ' seeds=' + idxRes.lifetimeSeeds + ' adds=' + idxRes.lifetimeAdds : ''}`);
+      }
+    } catch (err) {
+      addDevLog(`[STATS] Error: ${err.message}`);
+    }
+  });
 }
 
 // Hook into message listener to populate dev log
@@ -3726,18 +4548,35 @@ async function loadAdvisoryBanner() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_DEPRECATION_WARNINGS' });
     if (!res?.ok || !res.warnings?.length) { banner.style.display = 'none'; return; }
-    // Respect user-dismissed banner IDs for the current day.
+    // v0.57.53: dismissal is now PERMANENT, not per-day. The user
+    // explicitly asked for the Gemini 2.5 deprecation notice to "go
+    // away" — daily reminder was annoying after the first acknowledgement.
+    // We store the dismissed banner id with a 'permanent' marker so any
+    // future warning with a NEW id (a different deprecation later) still
+    // shows up — only the specific message the user X'd is silenced.
     const dismissed = JSON.parse(localStorage.getItem('aggregaytor_advisory_dismissed') || '{}');
-    const today = new Date().toISOString().slice(0, 10);
-    const active = res.warnings.find(w => dismissed[w.id] !== today);
+    // One-time migration: every user who upgrades to v0.57.53 has the
+    // current Gemini banner pre-dismissed. They asked for it to go away;
+    // we honor that without forcing them to click X first. Other deprecation
+    // ids that show up in the future are unaffected.
+    const MIGRATION_KEY = 'aggregaytor_advisory_migration_v53_done';
+    if (!localStorage.getItem(MIGRATION_KEY)) {
+      dismissed['gemini-2.5-deprecation'] = 'permanent';
+      dismissed['gemini-2.5-deprecated'] = 'permanent';
+      try {
+        localStorage.setItem('aggregaytor_advisory_dismissed', JSON.stringify(dismissed));
+        localStorage.setItem(MIGRATION_KEY, '1');
+      } catch {}
+    }
+    const active = res.warnings.find(w => dismissed[w.id] !== 'permanent' && !dismissed[w.id]?.startsWith?.('permanent'));
     if (!active) { banner.style.display = 'none'; return; }
     banner.className = 'advisory-banner' + (active.active ? ' active' : '');
     banner.innerHTML = `<span class="advisory-text">⚠ ${esc(active.message)}</span>` +
-      `<button class="advisory-close" data-banner-id="${esc(active.id)}" title="Dismiss for today">✕</button>`;
+      `<button class="advisory-close" data-banner-id="${esc(active.id)}" title="Dismiss permanently">✕</button>`;
     banner.style.display = '';
     banner.querySelector('.advisory-close').addEventListener('click', (e) => {
       const id = e.currentTarget.dataset.bannerId;
-      const next = { ...dismissed, [id]: today };
+      const next = { ...dismissed, [id]: 'permanent' };
       try { localStorage.setItem('aggregaytor_advisory_dismissed', JSON.stringify(next)); } catch {}
       banner.style.display = 'none';
     });
@@ -3747,5 +4586,300 @@ async function loadAdvisoryBanner() {
 }
 loadAdvisoryBanner();
 
+// v0.57.54: Model auto-updater UI. Polls SW state for the suggestion
+// list, renders one row per suggestion with Apply/Dismiss, plus a manual
+// "Check now" button and the auto-apply toggle. Refreshes when the
+// AI tab opens or after any user action.
+async function refreshModelUpdaterUI() {
+  const statusEl = document.getElementById('sp-mu-status');
+  const sugEl = document.getElementById('sp-mu-suggestions');
+  const autoEl = document.getElementById('sp-mu-auto-apply');
+  if (!statusEl || !sugEl || !autoEl) return;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_MODEL_UPDATE_STATE' });
+    if (!res?.ok) { statusEl.textContent = '(unreachable)'; return; }
+    const s = res.state;
+    autoEl.checked = !!s.autoApply;
+    const ago = (t) => {
+      if (!t) return 'never';
+      const m = Math.round((Date.now() - t) / 60_000);
+      if (m < 1) return 'just now';
+      if (m < 60) return `${m}m ago`;
+      if (m < 1440) return `${Math.round(m/60)}h ago`;
+      return `${Math.round(m/1440)}d ago`;
+    };
+    const errLine = s.lastError ? `<div style="color:#f87171;margin-top:2px">⚠ ${esc(s.lastError)}</div>` : '';
+    statusEl.innerHTML = `Last check: <strong>${ago(s.lastCheckAt)}</strong> · Suggestions: <strong>${s.suggestions.length}</strong>${errLine}`;
+    if (!s.suggestions.length) {
+      sugEl.innerHTML = '<div style="color:#6b7280;font-size:10px;padding:6px;text-align:center;font-style:italic">No newer models found. You\'re on the latest.</div>';
+      return;
+    }
+    sugEl.innerHTML = s.suggestions.map(sg => `
+      <div style="border:1px solid rgba(34,197,94,0.3);background:rgba(34,197,94,0.05);border-radius:6px;padding:6px 8px;margin-bottom:4px;font-size:11px">
+        <div style="display:flex;justify-content:space-between;gap:6px;align-items:flex-start">
+          <div style="flex:1;min-width:0">
+            <div><strong style="color:#22c55e;text-transform:capitalize">${esc(sg.provider)}</strong> ${sg.applied ? '<span style="color:#22c55e">✓ applied</span>' : ''}</div>
+            <div style="color:#9ca3af;overflow:hidden;text-overflow:ellipsis">${esc(sg.current)} → <strong style="color:#e7e9ea">${esc(sg.suggested)}</strong></div>
+            <div style="color:#6b7280;font-size:9px;font-style:italic">${esc(sg.reason)}</div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:3px">
+            ${sg.applied ? '' : `<button class="settings-btn sp-mu-apply" data-provider="${esc(sg.provider)}" style="font-size:10px;padding:2px 6px;border-color:rgba(34,197,94,0.5);color:#22c55e">Apply</button>`}
+            <button class="settings-btn sp-mu-dismiss" data-provider="${esc(sg.provider)}" style="font-size:10px;padding:2px 6px;color:#6b7280">Dismiss</button>
+          </div>
+        </div>
+      </div>`).join('');
+    sugEl.querySelectorAll('.sp-mu-apply').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const p = e.currentTarget.dataset.provider;
+        await chrome.runtime.sendMessage({ type: 'APPLY_MODEL_SUGGESTIONS', providers: [p] });
+        refreshModelUpdaterUI();
+      });
+    });
+    sugEl.querySelectorAll('.sp-mu-dismiss').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const p = e.currentTarget.dataset.provider;
+        await chrome.runtime.sendMessage({ type: 'DISMISS_MODEL_SUGGESTION', provider: p });
+        refreshModelUpdaterUI();
+      });
+    });
+  } catch {
+    statusEl.textContent = '(error fetching state)';
+  }
+}
+document.getElementById('sp-mu-check')?.addEventListener('click', async () => {
+  const btn = document.getElementById('sp-mu-check');
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Checking…';
+  try {
+    await chrome.runtime.sendMessage({ type: 'CHECK_MODEL_UPDATES' });
+    refreshModelUpdaterUI();
+  } catch {}
+  btn.disabled = false; btn.textContent = orig;
+});
+document.getElementById('sp-mu-auto-apply')?.addEventListener('change', async (e) => {
+  await chrome.runtime.sendMessage({ type: 'SET_MODEL_AUTO_APPLY', enabled: e.target.checked });
+  refreshModelUpdaterUI();
+});
+refreshModelUpdaterUI();
+setInterval(refreshModelUpdaterUI, 60_000);
+
 loadThreads();
 loadDrafts();
+
+// ── Friend Finder (v0.57.50) ───────────────────────────────────────────────
+// Toggle next to AR opens a modal that walks the user through filters →
+// candidate list (deselectable) → live run with progress bar + Stop button.
+// All persistent state (filters, ignore list, run) lives in the SW.
+const ffOverlay = document.getElementById('ff-overlay');
+const ffCheckbox = document.getElementById('finder-checkbox');
+let ffPollTimer = null;
+let ffCurrentCandidates = [];
+
+function ffShow() { ffOverlay.style.display = 'flex'; }
+function ffHide() { ffOverlay.style.display = 'none'; if (ffPollTimer) { clearInterval(ffPollTimer); ffPollTimer = null; } }
+function ffStep(name) {
+  for (const id of ['ff-step-filters', 'ff-step-approve', 'ff-step-running']) {
+    document.getElementById(id).style.display = (id === `ff-step-${name}`) ? '' : 'none';
+  }
+}
+
+document.getElementById('ff-close')?.addEventListener('click', () => { ffHide(); ffCheckbox.checked = false; });
+
+ffCheckbox?.addEventListener('change', async () => {
+  if (!ffCheckbox.checked) { ffHide(); return; }
+  // Load current state — if a run is in progress, jump to the running step.
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'FF_GET_STATE' });
+    if (res?.ok) {
+      ffPopulateFilters(res.state.filters);
+      if (res.runState?.state === 'running') {
+        ffShow(); ffStep('running'); ffStartPolling();
+        return;
+      }
+    }
+  } catch {}
+  ffShow(); ffStep('filters');
+});
+
+function ffPopulateFilters(f) {
+  document.getElementById('ff-inherit-map').checked = !!f.inheritMapFilters;
+  document.getElementById('ff-never-chatted').checked = !!f.requireNeverChatted;
+  document.getElementById('ff-zero-deletes').checked = !!f.requireZeroDeletes;
+  document.getElementById('ff-currently-active').checked = !!f.requireCurrentlyActive;
+  document.getElementById('ff-respect-prefs').checked = !!f.respectPreferences;
+  const autoApproveEl = document.getElementById('ff-auto-approve');
+  if (autoApproveEl) autoApproveEl.checked = !!f.autoApprove;
+  document.getElementById('ff-active-min').value = f.activeWindowMinutes;
+  document.getElementById('ff-max-distance').value = f.maxDistanceMiles;
+  document.getElementById('ff-max-candidates').value = f.maxCandidates;
+  document.getElementById('ff-pace-sec').value = f.paceSeconds;
+}
+
+function ffReadFilters() {
+  return {
+    inheritMapFilters: document.getElementById('ff-inherit-map').checked,
+    requireNeverChatted: document.getElementById('ff-never-chatted').checked,
+    requireZeroDeletes: document.getElementById('ff-zero-deletes').checked,
+    requireCurrentlyActive: document.getElementById('ff-currently-active').checked,
+    respectPreferences: document.getElementById('ff-respect-prefs').checked,
+    autoApprove: !!document.getElementById('ff-auto-approve')?.checked,
+    activeWindowMinutes: parseInt(document.getElementById('ff-active-min').value) || 30,
+    maxDistanceMiles: parseInt(document.getElementById('ff-max-distance').value) || 0,
+    maxCandidates: parseInt(document.getElementById('ff-max-candidates').value) || 50,
+    paceSeconds: parseInt(document.getElementById('ff-pace-sec').value) || 90,
+    paceJitterPercent: 30,
+  };
+}
+
+document.getElementById('ff-build')?.addEventListener('click', async () => {
+  const btn = document.getElementById('ff-build');
+  const status = document.getElementById('ff-build-status');
+  btn.disabled = true; btn.textContent = 'Searching…';
+  status.textContent = ''; status.style.color = '';
+  try {
+    const filters = ffReadFilters();
+    await chrome.runtime.sendMessage({ type: 'FF_UPDATE_FILTERS', patch: filters });
+    const res = await chrome.runtime.sendMessage({ type: 'FF_BUILD_CANDIDATES' });
+    if (!res?.ok) throw new Error(res?.error || 'build failed');
+    ffCurrentCandidates = res.candidates || [];
+    if (!ffCurrentCandidates.length) {
+      status.textContent = `No candidates found from ${res.totalContacts} contacts. Loosen your filters.`;
+      status.style.color = '#fbbf24';
+      return;
+    }
+    // v0.57.51: auto-approve fast-path. When the toggle is on, skip the
+    // approve step entirely — fire FF_APPROVE_RUN with every candidate
+    // checked, no permanent-ignore additions, jump straight to running.
+    // Confirm prompt still shows so the user sees the count + pace before
+    // intros actually start firing.
+    if (filters.autoApprove) {
+      const ids = ffCurrentCandidates.map(c => c.contactId);
+      const proceed = confirm(`Auto-approve is ON.\n\nSend intros to ${ids.length} matching profiles?\n\nNo deselection step. Pace: ~${filters.paceSeconds}s between sends. Click Stop Now any time to abort.`);
+      if (!proceed) {
+        // User backed out — fall through to manual review.
+        ffRenderCandidates();
+        ffStep('approve');
+        return;
+      }
+      const apprRes = await chrome.runtime.sendMessage({ type: 'FF_APPROVE_RUN', approvedIds: ids, ignoredIds: [] });
+      if (!apprRes?.ok) { alert(`Failed to start: ${apprRes?.error || 'unknown'}`); return; }
+      ffStep('running');
+      ffStartPolling();
+      return;
+    }
+    ffRenderCandidates();
+    ffStep('approve');
+  } catch (err) {
+    status.textContent = `Build failed: ${err?.message || err}`;
+    status.style.color = '#f87171';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Find Candidates →';
+  }
+});
+
+function ffRenderCandidates() {
+  const wrap = document.getElementById('ff-candidates');
+  document.getElementById('ff-total-count').textContent = ffCurrentCandidates.length;
+  wrap.innerHTML = ffCurrentCandidates.map((c, i) => `
+    <label class="ff-row" data-idx="${i}" style="display:flex;align-items:center;gap:8px;padding:6px 4px;border-bottom:1px solid rgba(255,255,255,0.04);cursor:pointer">
+      <input type="checkbox" class="ff-cb" data-cid="${esc(c.contactId)}" checked>
+      ${c.avatarUrl ? `<img src="${esc(c.avatarUrl)}" alt="" style="width:32px;height:32px;border-radius:50%;object-fit:cover;flex-shrink:0">` : `<div style="width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,0.05);flex-shrink:0"></div>`}
+      <div style="flex:1;min-width:0">
+        <div style="font-size:11px;color:#e7e9ea;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+          ${esc(c.displayName || stripPrefix(c.contactId))}
+          ${c.distance && c.distance < 9999 ? `<span style="color:#9ca3af;font-size:10px">— ${c.distance} mi</span>` : ''}
+        </div>
+        <div style="font-size:10px;color:#9ca3af;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.stats || '(no stats)')}</div>
+      </div>
+    </label>`).join('');
+  wrap.querySelectorAll('.ff-cb').forEach(cb => cb.addEventListener('change', ffUpdateSelectedCount));
+  ffUpdateSelectedCount();
+}
+
+function ffUpdateSelectedCount() {
+  const n = document.querySelectorAll('#ff-candidates .ff-cb:checked').length;
+  document.getElementById('ff-selected-count').textContent = n;
+}
+
+document.getElementById('ff-select-all')?.addEventListener('click', () => {
+  document.querySelectorAll('#ff-candidates .ff-cb').forEach(cb => cb.checked = true);
+  ffUpdateSelectedCount();
+});
+document.getElementById('ff-select-none')?.addEventListener('click', () => {
+  document.querySelectorAll('#ff-candidates .ff-cb').forEach(cb => cb.checked = false);
+  ffUpdateSelectedCount();
+});
+document.getElementById('ff-back')?.addEventListener('click', () => ffStep('filters'));
+
+document.getElementById('ff-approve')?.addEventListener('click', async () => {
+  const approvedIds = [...document.querySelectorAll('#ff-candidates .ff-cb:checked')].map(cb => cb.dataset.cid);
+  const ignoredIds = [...document.querySelectorAll('#ff-candidates .ff-cb:not(:checked)')].map(cb => cb.dataset.cid);
+  if (!approvedIds.length) { alert('Approve at least one profile.'); return; }
+  if (!confirm(`Send intros to ${approvedIds.length} profiles?\n\n${ignoredIds.length} unchecked profiles will be PERMANENTLY ignored in future Friend Finder runs.\n\nPaced send: ~${ffReadFilters().paceSeconds}s between sends. Click Stop Now any time to abort.`)) return;
+  const res = await chrome.runtime.sendMessage({ type: 'FF_APPROVE_RUN', approvedIds, ignoredIds });
+  if (!res?.ok) { alert(`Failed: ${res?.error || 'unknown'}`); return; }
+  ffStep('running');
+  ffStartPolling();
+});
+
+document.getElementById('ff-stop')?.addEventListener('click', async () => {
+  if (!confirm('Stop the current run? Already-sent intros remain sent.')) return;
+  await chrome.runtime.sendMessage({ type: 'FF_STOP_RUN' });
+  setTimeout(() => ffPoll(), 200);
+});
+
+function ffStartPolling() {
+  if (ffPollTimer) clearInterval(ffPollTimer);
+  ffPoll();
+  ffPollTimer = setInterval(ffPoll, 5000);
+}
+
+async function ffPoll() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'FF_GET_RUN_STATE' });
+    if (!res?.ok) return;
+    const run = res.runState;
+    const total = run.approved?.length || 0;
+    const sent = run.sentCount || 0;
+    const failed = run.failedCount || 0;
+    const remaining = run.queue?.length || 0;
+    const pct = total ? Math.round((sent / total) * 100) : 0;
+    document.getElementById('ff-progress-fill').style.width = `${pct}%`;
+    document.getElementById('ff-progress-stats').textContent =
+      `${sent} sent · ${failed} failed · ${remaining} remaining · ${pct}%`;
+    const eta = res.etaMs || 0;
+    if (eta > 0) {
+      const m = Math.floor(eta / 60_000);
+      const s = Math.round((eta % 60_000) / 1000);
+      document.getElementById('ff-eta').textContent = `Est. time remaining: ${m}m ${s}s · State: ${run.state}`;
+    } else {
+      document.getElementById('ff-eta').textContent = `State: ${run.state}`;
+    }
+    // Render queue
+    const qWrap = document.getElementById('ff-queue');
+    if (qWrap) {
+      qWrap.innerHTML = (run.queue || []).map(c => `
+        <div style="display:flex;align-items:center;gap:8px;padding:4px;border-bottom:1px solid rgba(255,255,255,0.04)">
+          ${c.avatarUrl ? `<img src="${esc(c.avatarUrl)}" alt="" style="width:24px;height:24px;border-radius:50%;object-fit:cover">` : `<div style="width:24px;height:24px;border-radius:50%;background:rgba(255,255,255,0.05)"></div>`}
+          <div style="flex:1;font-size:10px;color:#9ca3af;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+            ${esc(c.displayName || stripPrefix(c.contactId))} · ${c.distance < 9999 ? c.distance + 'mi · ' : ''}${esc(c.stats || '')}
+          </div>
+        </div>`).join('') || '<div style="color:#6b7280;font-size:11px;padding:8px;text-align:center">Queue empty</div>';
+    }
+    // Stop polling once run finishes
+    if (run.state === 'done' || run.state === 'stopped' || run.state === 'idle') {
+      if (ffPollTimer) { clearInterval(ffPollTimer); ffPollTimer = null; }
+    }
+  } catch {}
+}
+
+// On panel load — if a run is already going, restore the running view
+(async function ffRehydrate() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'FF_GET_RUN_STATE' });
+    if (res?.ok && res.runState?.state === 'running') {
+      // Light-weight resume — toggle the indicator on but DON'T auto-open the modal
+      if (ffCheckbox) ffCheckbox.checked = true;
+    }
+  } catch {}
+})();

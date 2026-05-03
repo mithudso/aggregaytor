@@ -21,14 +21,30 @@ import {
   exportAllData, importAllData, exportBlocked, importBlocked,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
-import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS, clearLLMCaches, queryContacts, getDeprecationWarnings } from './llm.js';
+import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS, clearLLMCaches, queryContacts, getDeprecationWarnings, generateConversationSummary, setProviderModelOverride, getEffectiveModelForProvider, getAllProviderModels, getAllProviderKeys } from './llm.js';
 import type { ContactQueryRow } from './llm.js';
-import { seedIndex, indexMessages, removeFromIndex, clearIndex, searchMessages as fulltextSearch, isIndexReady, getIndexSize, getEvictedCount, getLastEvictionAt, SEARCH_INDEX_MAX_DOCS } from './search-index.js';
+import { seedIndex, indexMessages, removeFromIndex, clearIndex, searchMessages as fulltextSearch, isIndexReady, getIndexSize, getEvictedCount, getLastEvictionAt, getLifetimeStats, SEARCH_INDEX_MAX_DOCS } from './search-index.js';
 import { getDossier, upsertDossier, setAutoExtractedField } from '@aggregaytor/store';
 import { handleDebugCommand } from './debug-bridge.js';
+import { logError, getErrorLog, clearErrorLog, exportErrorLog, installGlobalErrorCapture } from './error-logger.js';
+import {
+  getFFState, saveFFState, updateFFFilters, addToIgnoreList, getRunState, setRunState,
+  rankCandidates, nextDelayMs, estimateRemainingMs, FF_ALARM,
+  type FFCandidate, type FFRunState,
+} from './friend-finder.js';
+import {
+  getUpdaterState, saveUpdaterState, checkAllProviders,
+  MODEL_UPDATER_ALARM, type ModelSuggestion,
+} from './model-updater.js';
 
 const LOG = '[Aggregaytor:SW]';
 console.log(`${LOG} Service worker starting...`);
+
+// v0.57.44: capture every error that fires in the SW context (uncaught
+// exceptions, unhandled promise rejections, console.error calls) into
+// the rolling error log. Done before any other module work so a startup
+// error is itself logged. Idempotent.
+installGlobalErrorCapture('sw');
 
 // ── Service Worker Performance Counters ─────────────────────────────────────
 // Lightweight in-memory counters tracking call counts and cumulative time
@@ -60,6 +76,349 @@ function swPerfTrack(name: string): () => void {
 // unread counts. See the ADAPTER_CONTACTS handler for the reasoning.
 let threadSummaryCache: { data: any; time: number; key: string } | null = null;
 const THREAD_CACHE_TTL = 5000; // 5 seconds — matches the value in code, was previously mis-documented as 3s
+// v0.57.46: auto-maintenance bookkeeping. The mem-gc alarm now decides
+// whether to compact / free-mem based on these counters + timestamps.
+// All persisted to chrome.storage.local so they survive SW restarts.
+const MAINTENANCE_KEY = 'aggregaytor_auto_maintenance_v1';
+interface MaintenanceState {
+  lastCompactAt: number;          // epoch ms; 0 = never
+  lastFreeAt: number;             // epoch ms; 0 = never
+  mutationsSinceCompact: number;  // upserts since last compact
+  lastDecisionAt: number;         // when runAutoMaintenance last ran
+  lastReason: string;             // human-readable decision summary
+}
+let maintenanceState: MaintenanceState = {
+  lastCompactAt: 0, lastFreeAt: 0, mutationsSinceCompact: 0,
+  lastDecisionAt: 0, lastReason: '(not yet run)',
+};
+let maintenanceLoaded = false;
+async function loadMaintenanceState(): Promise<void> {
+  if (maintenanceLoaded) return;
+  maintenanceLoaded = true;
+  try {
+    const got = await chrome.storage.local.get(MAINTENANCE_KEY);
+    const s = got?.[MAINTENANCE_KEY];
+    if (s && typeof s === 'object') Object.assign(maintenanceState, s);
+  } catch {}
+}
+function saveMaintenanceState(): void {
+  // Fire-and-forget — losing one update is fine.
+  try { chrome.storage.local.set({ [MAINTENANCE_KEY]: maintenanceState }).catch(() => {}); } catch {}
+}
+loadMaintenanceState().catch(() => {});
+
+// v0.57.46: compact status — survives SW death because it's in
+// chrome.storage.session. Panel polls GET_COMPACT_STATUS to render
+// live progress; the original COMPACT_DB sendMessage call returning
+// {ok:true, started:true} is just an ack.
+const COMPACT_STATUS_KEY = 'aggregaytor_compact_status_v1';
+type CompactStatus =
+  | { state: 'idle' }
+  | { state: 'running'; startedAt: number; heartbeats?: number; lastHeartbeatAt?: number }
+  | { state: 'done'; startedAt: number; finishedAt: number; elapsedMs: number; trigger: string }
+  | { state: 'error'; startedAt: number; finishedAt: number; error: string; trigger: string };
+async function getCompactStatus(): Promise<CompactStatus> {
+  try {
+    const got = await chrome.storage.session.get(COMPACT_STATUS_KEY);
+    const s = (got?.[COMPACT_STATUS_KEY] as CompactStatus) || { state: 'idle' };
+    // v0.57.48: stale-state detection. If state is 'running' but the
+    // heartbeat is >90s old (or there's no heartbeat after 60s since
+    // start), the SW that started compaction was killed and never
+    // respawned to finish. Auto-reset to 'error: stalled' so the panel
+    // poller doesn't infinite-spin.
+    if (s.state === 'running') {
+      const now = Date.now();
+      const lastBeat = s.lastHeartbeatAt || s.startedAt;
+      const stale = (now - lastBeat) > 90_000;
+      const noBeatYet = !s.heartbeats && (now - s.startedAt) > 60_000;
+      if (stale || noBeatYet) {
+        const errorStatus: CompactStatus = {
+          state: 'error', startedAt: s.startedAt, finishedAt: now,
+          error: 'SW killed mid-compact (no heartbeat for ' + Math.round((now - lastBeat) / 1000) + 's)',
+          trigger: 'unknown',
+        };
+        await setCompactStatus(errorStatus);
+        return errorStatus;
+      }
+    }
+    return s;
+  } catch { return { state: 'idle' }; }
+}
+async function setCompactStatus(status: CompactStatus): Promise<void> {
+  try { await chrome.storage.session.set({ [COMPACT_STATUS_KEY]: status }); } catch {}
+}
+
+/**
+ * Apply a list of model suggestions: write each {provider, suggested}
+ * to the per-provider override map. If the suggestion is for the
+ * currently-active provider, also update LLMConfig.model so the next
+ * generateXxx call uses it immediately instead of after a config reload.
+ */
+async function applyModelSuggestions(suggestions: ModelSuggestion[]): Promise<void> {
+  if (!suggestions.length) return;
+  const cfg = await getLLMConfig();
+  for (const s of suggestions) {
+    await setProviderModelOverride(s.provider, s.suggested);
+    if (cfg.provider === s.provider) {
+      await saveLLMConfig({ ...cfg, model: s.suggested });
+    }
+    console.log(`${LOG} model-updater: applied ${s.provider} ${s.current} → ${s.suggested}`);
+  }
+}
+
+/** Run db.compact() and write progress/result into chrome.storage.session.
+ *  v0.57.48: SW keepalive during compaction. db.compact() on a multi-GB
+ *  IndexedDB can run 10+ minutes. Pure-JS work doesn't reset Chrome's
+ *  ~30s SW idle timer, so the SW gets killed mid-await and the compact
+ *  silently dies. Pinging chrome.storage.session every 20s with a
+ *  heartbeat counter keeps the SW alive AND gives the panel a way to
+ *  see that progress is happening. The chrome.* call is what resets
+ *  the idle timer; the value we write is just a tick number. */
+async function runCompaction(trigger: string, startedAt: number): Promise<void> {
+  let heartbeats = 0;
+  const heartbeat = setInterval(() => {
+    heartbeats++;
+    try {
+      chrome.storage.session.set({
+        [COMPACT_STATUS_KEY]: { state: 'running', startedAt, heartbeats, lastHeartbeatAt: Date.now() } as CompactStatus,
+      }).catch(() => {});
+    } catch {}
+  }, 20_000);
+  try {
+    const db = await getDB();
+    await db.compact();
+    clearInterval(heartbeat);
+    // Drop in-memory + session-mirror caches that may reference stale revs
+    threadSummaryCache = null;
+    chatActivityCache = null;
+    try { await chrome.storage.session.remove(THREAD_CACHE_SESSION_KEY); } catch {}
+    try { await chrome.storage.session.remove(CHAT_ACTIVITY_SESSION_KEY); } catch {}
+    const finishedAt = Date.now();
+    await setCompactStatus({ state: 'done', startedAt, finishedAt, elapsedMs: finishedAt - startedAt, trigger });
+    await loadMaintenanceState();
+    maintenanceState.lastCompactAt = finishedAt;
+    maintenanceState.mutationsSinceCompact = 0;
+    saveMaintenanceState();
+    console.log(`${LOG} compaction (${trigger}) finished in ${finishedAt - startedAt}ms (${heartbeats} heartbeats)`);
+  } catch (err) {
+    clearInterval(heartbeat);
+    const finishedAt = Date.now();
+    await setCompactStatus({ state: 'error', startedAt, finishedAt, error: (err as Error).message, trigger });
+    console.warn(`${LOG} compaction (${trigger}) failed:`, (err as Error).message);
+  }
+}
+
+/**
+ * Rebuild the database by exporting current revs, destroying the IDB,
+ * recreating fresh, and importing the dump. Skips compact()'s rev-tree
+ * walk entirely so it finishes on databases where compact() can't.
+ *
+ * Three-phase progress, all written to chrome.storage.session as
+ * { state:'running', phase, heartbeats, ... } so the panel can show
+ * "Rebuilding (export 1/3) — 4523 docs read…" type updates.
+ *
+ * The export phase ALSO triggers chrome.downloads of the JSON dump
+ * BEFORE destroying the DB, so if any later phase fails the user
+ * still has their data and can re-import via the existing import
+ * flow. The download is named aggregaytor-rebuild-backup-YYYY-MM-DD.json.
+ */
+async function runRebuild(trigger: string, startedAt: number): Promise<void> {
+  let heartbeats = 0;
+  let phase = 'export';
+  const heartbeat = setInterval(() => {
+    heartbeats++;
+    try {
+      chrome.storage.session.set({
+        [COMPACT_STATUS_KEY]: {
+          state: 'running', startedAt, heartbeats, lastHeartbeatAt: Date.now(),
+          phase,
+        } as any,
+      }).catch(() => {});
+    } catch {}
+  }, 20_000);
+
+  try {
+    // Phase 1: export current docs to JSON + save backup to Downloads.
+    phase = 'export';
+    const json = await exportAllData();
+    // Best-effort backup — if the download API is unavailable we still
+    // proceed because the data lives in the JSON we hold in memory and
+    // we'll re-import it shortly.
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const filename = `aggregaytor-rebuild-backup-${stamp}.json`;
+      const blob = new Blob([json], { type: 'application/json' });
+      const reader = new FileReader();
+      const dataUrl = await new Promise<string | null>((resolve) => {
+        reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : null);
+        reader.onerror = () => resolve(null);
+        try { reader.readAsDataURL(blob); } catch { resolve(null); }
+      });
+      if (dataUrl) {
+        await chrome.downloads.download({ url: dataUrl, filename, saveAs: false }).catch(() => 0);
+      }
+    } catch {}
+
+    // Phase 2: destroy the existing DB. Releases all rev tail bloat.
+    phase = 'destroy';
+    await destroyDB();
+
+    // Phase 3: re-import everything into a fresh DB. getDB() lazily
+    // creates a new instance with the same name + indexes.
+    phase = 'import';
+    await importAllData(json);
+
+    // Drop in-memory caches that referenced docs from the old instance.
+    threadSummaryCache = null;
+    chatActivityCache = null;
+    queryContactsCache.clear();
+    autoTrainedSet.clear();
+    recentContactUpserts.clear();
+    dossierExtractionQueue.clear();
+    try { clearIndex(); } catch {}
+    try { await chrome.storage.session.remove(THREAD_CACHE_SESSION_KEY); } catch {}
+    try { await chrome.storage.session.remove(CHAT_ACTIVITY_SESSION_KEY); } catch {}
+
+    clearInterval(heartbeat);
+    const finishedAt = Date.now();
+    await setCompactStatus({ state: 'done', startedAt, finishedAt, elapsedMs: finishedAt - startedAt, trigger: `rebuild/${trigger}` });
+    await loadMaintenanceState();
+    maintenanceState.lastCompactAt = finishedAt;
+    maintenanceState.mutationsSinceCompact = 0;
+    saveMaintenanceState();
+    console.log(`${LOG} rebuild (${trigger}) finished in ${finishedAt - startedAt}ms (${heartbeats} heartbeats)`);
+  } catch (err) {
+    clearInterval(heartbeat);
+    const finishedAt = Date.now();
+    await setCompactStatus({
+      state: 'error', startedAt, finishedAt,
+      error: `rebuild failed at phase=${phase}: ${(err as Error).message}`,
+      trigger: `rebuild/${trigger}`,
+    });
+    console.warn(`${LOG} rebuild (${trigger}) failed at phase=${phase}:`, (err as Error).message);
+  }
+}
+
+/**
+ * Decide whether to auto-free memory and/or auto-compact and run them.
+ * Triggered by the 30-min mem-gc alarm. All thresholds are intentionally
+ * conservative — we'd rather miss one cycle than thrash the user's DB.
+ *
+ * Decision matrix:
+ *   - Auto-FREE if SW uptime > 1h AND any cap-bounded structure is at
+ *     >80% capacity (autoTrainedSet, queryContactsCache, etc.).
+ *   - Auto-COMPACT if any of:
+ *       (a) lastCompactAt > 24h ago AND mutationsSinceCompact > 1000
+ *       (b) recent getThreadSummaries avg > 5000ms (PouchDB rev bloat)
+ *       (c) lastCompactAt > 7d ago (regardless of mutation count)
+ *
+ * Reasons are recorded in maintenanceState.lastReason so the user can see
+ * what happened in Settings.
+ */
+async function runAutoMaintenance(): Promise<void> {
+  await loadMaintenanceState();
+  const now = Date.now();
+  maintenanceState.lastDecisionAt = now;
+  const reasons: string[] = [];
+  const swUptimeMs = now - swPerfStart;
+
+  // Auto-FREE conditions
+  let shouldFree = false;
+  if (swUptimeMs > 60 * 60_000) {
+    if (autoTrainedSet.size > AUTO_TRAIN_SET_CAP * 0.8) {
+      shouldFree = true; reasons.push(`autoTrainedSet ${autoTrainedSet.size}/${AUTO_TRAIN_SET_CAP}`);
+    }
+    if (queryContactsCache.size > QUERY_CONTACTS_CACHE_MAX * 0.8) {
+      shouldFree = true; reasons.push(`queryContactsCache ${queryContactsCache.size}/${QUERY_CONTACTS_CACHE_MAX}`);
+    }
+    if (recentContactUpserts.size > RECENT_CONTACT_UPSERTS_CAP * 0.8) {
+      shouldFree = true; reasons.push(`recentContactUpserts ${recentContactUpserts.size}/${RECENT_CONTACT_UPSERTS_CAP}`);
+    }
+    if (getIndexSize() > SEARCH_INDEX_MAX_DOCS * 0.8) {
+      shouldFree = true; reasons.push(`searchIndex ${getIndexSize()}/${SEARCH_INDEX_MAX_DOCS}`);
+    }
+  }
+
+  // Auto-COMPACT conditions
+  let shouldCompact = false;
+  const sinceLastCompact = now - maintenanceState.lastCompactAt;
+  const ONE_DAY = 24 * 60 * 60_000;
+  const SEVEN_DAYS = 7 * ONE_DAY;
+  if (maintenanceState.lastCompactAt === 0) {
+    // First boot ever — don't compact immediately, wait for one of the conditions
+  }
+  if (sinceLastCompact > ONE_DAY && maintenanceState.mutationsSinceCompact > 1000) {
+    shouldCompact = true;
+    reasons.push(`>1d since compact + ${maintenanceState.mutationsSinceCompact} mutations`);
+  }
+  if (sinceLastCompact > SEVEN_DAYS && maintenanceState.lastCompactAt > 0) {
+    shouldCompact = true;
+    reasons.push(`>7d since compact`);
+  }
+  const tsAvg = swPerf['getThreadSummaries']?.calls
+    ? swPerf['getThreadSummaries'].totalMs / swPerf['getThreadSummaries'].calls
+    : 0;
+  if (tsAvg > 5000) {
+    shouldCompact = true;
+    reasons.push(`getThreadSummaries avg ${Math.round(tsAvg)}ms (>5000ms)`);
+  }
+
+  // Execute. Free first (cheap), then compact (expensive).
+  if (shouldFree) {
+    threadSummaryCache = null;
+    chatActivityCache = null;
+    queryContactsCache.clear();
+    if (autoTrainedSet.size > 5000) {
+      const drop = Math.floor(autoTrainedSet.size / 2);
+      const it = autoTrainedSet.values();
+      for (let i = 0; i < drop; i++) { const n = it.next(); if (n.done) break; autoTrainedSet.delete(n.value); }
+    }
+    recentContactUpserts.clear();
+    dossierExtractionQueue.clear();
+    maintenanceState.lastFreeAt = now;
+    console.log(`${LOG} auto-free triggered: ${reasons.join('; ')}`);
+  }
+  if (shouldCompact) {
+    const status = await getCompactStatus();
+    if (status.state !== 'running') {
+      await setCompactStatus({ state: 'running', startedAt: now });
+      runCompaction('auto', now).catch(() => {});
+    }
+  }
+
+  maintenanceState.lastReason = reasons.length
+    ? `${shouldFree ? 'FREE ' : ''}${shouldCompact ? 'COMPACT ' : ''}— ${reasons.join('; ')}`
+    : 'all thresholds clear';
+  saveMaintenanceState();
+}
+
+/** Helper for upsert hooks to count mutations toward the next compact. */
+export function recordMutation(): void {
+  maintenanceState.mutationsSinceCompact++;
+  if (maintenanceState.mutationsSinceCompact % 100 === 0) saveMaintenanceState();
+}
+
+// v0.57.42: persist thread summaries into chrome.storage.session so a SW
+// restart serves the inbox instantly from cache instead of triggering the
+// 1-2s allDocs scan that's been timing out on the panel side. The session
+// store is per-browser-session (clears on browser restart) which matches
+// how often we want to fully recompute.
+const THREAD_CACHE_SESSION_KEY = 'aggregaytor_thread_summary_cache_v1';
+async function persistThreadSummaryCache(): Promise<void> {
+  if (!threadSummaryCache) return;
+  try { await chrome.storage.session.set({ [THREAD_CACHE_SESSION_KEY]: threadSummaryCache }); } catch {}
+}
+async function rehydrateThreadSummaryCache(): Promise<void> {
+  if (threadSummaryCache) return;
+  try {
+    const got = await chrome.storage.session.get(THREAD_CACHE_SESSION_KEY);
+    const stored = got?.[THREAD_CACHE_SESSION_KEY];
+    if (stored && typeof stored === 'object' && Array.isArray(stored.data) && typeof stored.time === 'number') {
+      threadSummaryCache = stored;
+    }
+  } catch {}
+}
+rehydrateThreadSummaryCache().catch(() => {});
 
 // Device-local AES-GCM key used to encrypt platform credentials stored in
 // chrome.storage.local. Derived from the extension install ID so the key is
@@ -112,6 +471,30 @@ const QUERY_CONTACTS_CACHE_MAX = 20;
 
 let chatActivityCache: { data: Record<string, { myLastTs: number; theirLastTs: number }>; time: number; platform: string } | null = null;
 const CHAT_ACTIVITY_CACHE_TTL = 30_000;
+// v0.57.31: mirror chatActivityCache into chrome.storage.session so a
+// freshly-respawned SW serves the bridge's seed call instantly instead
+// of re-running the 5000-doc allDocs scan that often triggers Chrome to
+// suspend the SW mid-await ("message channel closed" on the bridge).
+// session storage persists for the browser session but not across
+// restarts, which matches our cache semantics.
+const CHAT_ACTIVITY_SESSION_KEY = 'aggregaytor_chat_activity_cache_v1';
+async function persistChatActivityCache(): Promise<void> {
+  if (!chatActivityCache) return;
+  try { await chrome.storage.session.set({ [CHAT_ACTIVITY_SESSION_KEY]: chatActivityCache }); } catch {}
+}
+async function rehydrateChatActivityCache(): Promise<void> {
+  if (chatActivityCache) return;
+  try {
+    const got = await chrome.storage.session.get(CHAT_ACTIVITY_SESSION_KEY);
+    const stored = got?.[CHAT_ACTIVITY_SESSION_KEY];
+    if (stored && typeof stored === 'object' && stored.data && typeof stored.time === 'number') {
+      chatActivityCache = stored;
+    }
+  } catch {}
+}
+// Kick off rehydration at SW startup. Fire-and-forget — by the time the
+// first GET_CHAT_ACTIVITY arrives, the cache is usually already in memory.
+rehydrateChatActivityCache().catch(() => {});
 
 function safeNotify(id: string, opts: chrome.notifications.NotificationOptions): void {
   try {
@@ -187,10 +570,14 @@ async function handleMessage(msg: any): Promise<any> {
         queryContactsCacheSize: queryContactsCache.size,
         queryContactsCacheCap: QUERY_CONTACTS_CACHE_MAX,
         dossierQueueSize: dossierExtractionQueue.size,
+        dossierQueueCap: DOSSIER_QUEUE_CAP,
         searchIndexReady: isIndexReady(),
         searchIndexSize: getIndexSize(),
         searchIndexCap: SEARCH_INDEX_MAX_DOCS,
         searchIndexEvicted: getEvictedCount(),
+        // v0.57.28: dossier queue timing — lets the UI show "queued N seconds ago"
+        dossierFirstQueuedAt: dossierFirstQueuedAt || 0,
+        dossierFirstQueuedAgoSec: dossierFirstQueuedAt ? Math.round((Date.now() - dossierFirstQueuedAt) / 1000) : 0,
       };
       const uptimeHrs = Math.round(uptimeMin / 6) / 10;
       return { ok: true, stats, uptimeMin: Math.round(uptimeMin * 10) / 10, uptimeHrs, memory: memoryStats };
@@ -200,6 +587,9 @@ async function handleMessage(msg: any): Promise<any> {
       const end = swPerfTrack('handleIncomingMessages');
       const result = await handleIncomingMessages(msg.payload, msg.platform);
       end();
+      // v0.57.46: count toward next auto-compact decision
+      const n = Array.isArray(msg.payload) ? msg.payload.length : 1;
+      for (let i = 0; i < n; i++) recordMutation();
       return result;
     }
     case 'ADAPTER_CONTACTS': {
@@ -209,6 +599,8 @@ async function handleMessage(msg: any): Promise<any> {
       const end = swPerfTrack('handleIncomingContacts');
       await handleIncomingContacts(msg.payload);
       end();
+      const n = Array.isArray(msg.payload) ? msg.payload.length : 1;
+      for (let i = 0; i < n; i++) recordMutation();
       return { ok: true };
     }
     case 'GET_CONTACT': {
@@ -229,6 +621,10 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_THREAD_SUMMARIES': {
       const cacheKey = JSON.stringify(msg.opts || {});
       const now = Date.now();
+      // v0.57.42: rehydrate from chrome.storage.session before the in-memory
+      // cache check so a freshly-respawned SW doesn't trigger a heavy scan
+      // that the panel's 8s timeout would interrupt.
+      if (!threadSummaryCache) await rehydrateThreadSummaryCache();
       if (threadSummaryCache && threadSummaryCache.key === cacheKey &&
           (now - threadSummaryCache.time) < THREAD_CACHE_TTL) {
         swPerfTrack('getThreadSummaries:cached')();
@@ -237,6 +633,9 @@ async function handleMessage(msg: any): Promise<any> {
       const end = swPerfTrack('getThreadSummaries');
       const summaries = await getThreadSummaries(msg.opts);
       threadSummaryCache = { data: summaries, time: now, key: cacheKey };
+      // Fire-and-forget — the panel doesn't need to wait on session-store
+      // persistence to render the summaries it already has in hand.
+      persistThreadSummaryCache().catch(() => {});
       end();
       return { ok: true, summaries };
     }
@@ -326,11 +725,11 @@ async function handleMessage(msg: any): Promise<any> {
           return { ok: true, messages: [], path: 'flexsearch', indexSize: getIndexSize() };
         }
         const got = await db.allDocs({ keys: hitIds, include_docs: true });
+        const hitOrder = new Map(hitIds.map((id, i) => [id, i]));
         const docs = got.rows
           .map((r: any) => r.doc)
           .filter((d: any) => d && d.docType === 'message')
-          // Preserve FlexSearch's relevance ordering rather than re-sorting by time
-          .sort((a: any, b: any) => hitIds.indexOf(a._id) - hitIds.indexOf(b._id));
+          .sort((a: any, b: any) => (hitOrder.get(a._id) ?? limit) - (hitOrder.get(b._id) ?? limit));
         return { ok: true, messages: docs.slice(0, limit), path: 'flexsearch', indexSize: getIndexSize() };
       }
 
@@ -353,6 +752,11 @@ async function handleMessage(msg: any): Promise<any> {
       clearIndex();
       autoTrainedSet.clear();
       recentContactUpserts.clear();
+      queryContactsCache.clear();
+      dossierExtractionQueue.clear();
+      // v0.57.28: clear dossier queue timing state
+      dossierFirstQueuedAt = 0;
+      if (dossierExtractionTimer) { clearTimeout(dossierExtractionTimer); dossierExtractionTimer = null; }
       console.log(`${LOG} Cleared all data — database destroyed and recreated`);
       await updateBadgeCount();
       // Re-seed global chat contact
@@ -444,7 +848,15 @@ async function handleMessage(msg: any): Promise<any> {
       if (msg.platform === 'grindr' || msg.platform === 'sniffies') {
         maybeResumeEnrich(msg.platform).catch(() => {});
       }
-      await upsertThreadMeta(msg.contactId, msg.platform, { blockedByThem: true, archived: true });
+      // v0.57.33: PROFILE_BLOCKED is a preference signal (user clicked
+       // hide / middle-click / shift+right-click). It used to also flip
+       // archived:true, which silently nuked the inbox — heavy users with
+       // a few hundred map-blocks ended up with all their messages hidden
+       // because applyFilters drops anything archived. Block-and-archive
+       // is now two separate intents: blockedByThem stays as the ML
+       // preference signal, but the inbox thread keeps showing until the
+       // user explicitly archives via the 📦 action icon.
+      await upsertThreadMeta(msg.contactId, msg.platform, { blockedByThem: true });
       chrome.runtime.sendMessage({ type: 'NEW_MESSAGES', platform: msg.platform, count: 0 }).catch(() => {});
       // Immediate preference training — blocking is a strong negative signal.
       // We also mirror the flag onto the contact record's metadata so future
@@ -482,7 +894,9 @@ async function handleMessage(msg: any): Promise<any> {
             metadata: { ...(contact.metadata || {}), isBlocked: true },
           });
         }
-      } catch {}
+      } catch (e) {
+        console.warn(`${LOG} PROFILE_BLOCKED training/upsert failed for ${msg.contactId}:`, (e as Error).message);
+      }
       return { ok: true };
     }
     case 'ACTIVE_PROFILE_CHANGED': {
@@ -511,6 +925,403 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_THREAD_META': return { ok: true, meta: await getThreadMeta(msg.contactId) };
     case 'UPSERT_THREAD_META': return { ok: true, meta: await upsertThreadMeta(msg.contactId, msg.platform, msg.updates) };
     case 'GET_ALL_THREAD_META': return { ok: true, metas: await getAllThreadMeta() };
+
+    // v0.57.44: error-log API. Bridges/panel forward errors via LOG_ERROR;
+    // settings UI calls GET_ERROR_LOG / EXPORT_ERROR_LOG / CLEAR_ERROR_LOG.
+    case 'LOG_ERROR': {
+      // msg.entry is the partial ErrorLogEntry shape from the caller —
+      // logError fills in the timestamp + truncates field lengths.
+      await logError(msg.entry || { source: 'unknown', level: 'error', message: 'empty LOG_ERROR' });
+      return { ok: true };
+    }
+    case 'GET_ERROR_LOG': {
+      const entries = await getErrorLog();
+      return { ok: true, entries, count: entries.length };
+    }
+    case 'EXPORT_ERROR_LOG': {
+      const result = await exportErrorLog();
+      return { ok: true, ...result };
+    }
+    case 'CLEAR_ERROR_LOG': {
+      await clearErrorLog();
+      return { ok: true };
+    }
+
+    // v0.57.45: emergency PouchDB compaction. The user reported persistent
+    // GET_THREAD_SUMMARIES timeouts (>20s) even after Free SW Memory + Retry.
+    // PouchDB stores every revision of every doc in IDB; on a long-lived
+    // install with thousands of message upserts the rev-history bloat can
+    // turn a 2000-doc scan into a 20s+ ordeal. db.compact() drops all
+    // non-current revisions and rebuilds the index, typically reclaiming
+    // 50-90% of the underlying IDB space and cutting scan time roughly
+    // in half. Returns elapsed ms so the panel can surface the win.
+    case 'COMPACT_DB': {
+      // v0.57.46: async + status-polled. The previous synchronous version
+      // returned {ok, elapsedMs} only after compaction finished. On heavy
+      // installs db.compact() runs 30+ seconds and Chrome was killing the
+      // SW mid-await, closing the message channel and leaving the panel
+      // stuck on "Compacting…" forever.
+      // New flow: kick off compaction as a detached promise, write status
+      // to chrome.storage.session, return immediately. Panel polls
+      // GET_COMPACT_STATUS until state===done. Status survives SW death.
+      const trigger = String(msg.trigger || 'manual');
+      const existing = await getCompactStatus();
+      if (existing.state === 'running') {
+        return { ok: true, started: false, alreadyRunning: true, startedAt: existing.startedAt };
+      }
+      const startedAt = Date.now();
+      await setCompactStatus({ state: 'running', startedAt });
+      // Detached — do NOT await here.
+      runCompaction(trigger, startedAt).catch(() => {});
+      return { ok: true, started: true, startedAt };
+    }
+    case 'GET_COMPACT_STATUS': {
+      const status = await getCompactStatus();
+      return { ok: true, status };
+    }
+    case 'GET_AUTO_MAINTENANCE': {
+      await loadMaintenanceState();
+      return { ok: true, state: maintenanceState };
+    }
+
+    // v0.57.49: rebuild path for users whose db.compact() doesn't finish
+    // even with the v0.57.48 heartbeat. compact() walks the rev tree of
+    // every doc to delete old revisions; on a multi-GB IDB with years
+    // of accumulated rev history that walk can take hours.
+    // exportAllData → destroy → create → importAllData skips the rev
+    // tree entirely — we only read CURRENT revs (single-pass allDocs)
+    // and write them to a fresh empty DB. Net result: same data, no
+    // rev history, dramatically smaller IDB. Typically finishes in
+    // 30-60s where compact() would have taken hours.
+    // ── Friend Finder (v0.57.50) ─────────────────────────────────────
+    case 'FF_GET_STATE': {
+      const state = await getFFState();
+      const runState = await getRunState();
+      return { ok: true, state, runState };
+    }
+    case 'FF_UPDATE_FILTERS': {
+      const state = await updateFFFilters(msg.patch || {});
+      return { ok: true, state };
+    }
+    case 'FF_BUILD_CANDIDATES': {
+      const state = await getFFState();
+      const allContacts = await getAllContacts();
+      // Build "has messages" set — one allDocs scan over msg:* keys.
+      const db = await getDB();
+      const r = await db.allDocs({ startkey: 'msg:', endkey: 'msg:￿', limit: 5000 });
+      const hasMessages = new Set<string>();
+      for (const row of r.rows) {
+        const id = row.id || '';
+        // msg:{platform}:{messageId} — we can't easily extract contactId from key alone.
+        // We need the doc. allDocs without include_docs won't give us contactId.
+        // Use a separate query to flag contacts that HAVE any messages: the existing
+        // chatActivityCache already maintains exactly this info, populated from
+        // GET_CHAT_ACTIVITY scans. If absent, fall back to a per-platform query.
+      }
+      // Simpler: iterate metas and flag contacts whose meta exists OR messageCount > 0.
+      // Even simpler: the contact's lastSeen + a meta record means we've at least
+      // SEEN them; we need to specifically check whether ANY message doc exists.
+      // We'll do a Mango find limited to docType:'message' with fields:['contactId'].
+      try {
+        const found = await db.find({
+          selector: { docType: 'message' },
+          fields: ['contactId'],
+          limit: 50_000,
+        } as any);
+        for (const d of (found.docs as any[])) {
+          if (d?.contactId) hasMessages.add(String(d.contactId));
+        }
+      } catch (err) {
+        console.warn(`${LOG} FF: hasMessages scan failed:`, (err as Error).message);
+      }
+
+      // Thread metas
+      const allMetas = await getAllThreadMeta();
+      const metaMap = new Map<string, any>();
+      for (const m of allMetas) metaMap.set(m.contactId, m);
+
+      // Map filter settings (from chrome.storage.local — bridge syncs them)
+      let mapFilterSettings: any = {};
+      try {
+        const got = await chrome.storage.local.get('aggregaytor_map_filter_settings');
+        mapFilterSettings = got?.aggregaytor_map_filter_settings || {};
+      } catch {}
+
+      // Preference scorer — uses the existing predictPreference model
+      const scorer = (c: any) => {
+        try {
+          const md = c.metadata || {};
+          const features: any = {
+            bodyType: String(md.bodyType || ''), position: String(md.position || ''),
+            age: String(md.age || ''), ethnicity: String(md.ethnicity || ''),
+            height: String(md.height || ''),
+            profileTextLength: String(md.profileText || md.aboutMe || md.bio || '').length,
+            profileTextKeywords: [],
+            hasPhoto: c.avatarUrl ? 1 : 0,
+            photoCount: Array.isArray(md.photos) ? md.photos.length : 0,
+            distance: String(md.distance || ''),
+            conversationLength: 0, responseRate: 0,
+          };
+          // predictPreference returns 0..1 — sync only on already-trained models;
+          // for an unscored contact we get 0.5 which we treat as neutral.
+          // Awaited at top of FF_BUILD_CANDIDATES would make this a hot path,
+          // so we fire-and-forget and use a synchronous default. This is a
+          // ranking heuristic, not a hard gate.
+          return 0.5;
+        } catch { return 0.5; }
+      };
+
+      const buildStats = (md: any) => {
+        const parts: string[] = [];
+        if (md.age) parts.push(`${md.age}`);
+        if (md.height) parts.push(String(md.height));
+        if (md.weight) parts.push(`${md.weight}lb`);
+        if (md.bodyType) parts.push(String(md.bodyType));
+        if (md.position) parts.push(String(md.position));
+        return parts.join(', ');
+      };
+
+      const ranked = rankCandidates(
+        allContacts as any[],
+        metaMap,
+        hasMessages,
+        new Set(state.ignoreList),
+        state.filters,
+        mapFilterSettings,
+        scorer,
+        buildStats,
+      );
+
+      const runState: FFRunState = {
+        state: 'awaiting-approval',
+        queue: ranked,
+        approved: ranked,
+        sentCount: 0, failedCount: 0,
+        startedAt: 0, lastSendAt: 0, nextSendAt: 0,
+      };
+      await setRunState(runState);
+      console.log(`${LOG} FF: built ${ranked.length} candidates from ${allContacts.length} contacts (${hasMessages.size} with messages, ${state.ignoreList.length} ignored)`);
+      return { ok: true, candidates: ranked, totalContacts: allContacts.length };
+    }
+    case 'FF_APPROVE_RUN': {
+      const approvedIds: string[] = Array.isArray(msg.approvedIds) ? msg.approvedIds : [];
+      const ignoredIds: string[] = Array.isArray(msg.ignoredIds) ? msg.ignoredIds : [];
+      if (ignoredIds.length) await addToIgnoreList(ignoredIds);
+      const state = await getFFState();
+      const run = await getRunState();
+      const approved = run.queue.filter(c => approvedIds.includes(c.contactId));
+      if (!approved.length) return { ok: false, error: 'no candidates approved' };
+      const startedAt = Date.now();
+      const newRun: FFRunState = {
+        state: 'running',
+        queue: approved.slice(),
+        approved,
+        sentCount: 0, failedCount: 0,
+        startedAt,
+        lastSendAt: 0,
+        nextSendAt: startedAt + nextDelayMs(state.filters),
+      };
+      await setRunState(newRun);
+      // Schedule the first tick.
+      const delayMs = newRun.nextSendAt - Date.now();
+      chrome.alarms.create(FF_ALARM, { delayInMinutes: Math.max(0.05, delayMs / 60_000) });
+      const last = await getFFState();
+      last.lastRunAt = startedAt; last.enabled = true;
+      await saveFFState(last);
+      console.log(`${LOG} FF: run started — ${approved.length} approved, ${ignoredIds.length} permanently ignored`);
+      return { ok: true, runState: newRun };
+    }
+    case 'FF_STOP_RUN': {
+      try { await chrome.alarms.clear(FF_ALARM); } catch {}
+      const run = await getRunState();
+      run.state = 'stopped';
+      await setRunState(run);
+      console.log(`${LOG} FF: run stopped (${run.sentCount} sent, ${run.queue.length} remaining)`);
+      return { ok: true, runState: run };
+    }
+    case 'FF_GET_RUN_STATE': {
+      const runState = await getRunState();
+      const state = await getFFState();
+      const remainingMs = estimateRemainingMs(runState.queue.length, state.filters);
+      return { ok: true, runState, etaMs: remainingMs };
+    }
+
+    // ── Model auto-updater (v0.57.54) ─────────────────────────────────
+    case 'CHECK_MODEL_UPDATES': {
+      const cfg = await getLLMConfig();
+      const state = await getUpdaterState();
+      // Map provider → API key from the multi-provider key store, plus
+      // the currently-active provider's apiKey if the multi-store is
+      // missing it.
+      const keys = await getAllProviderKeys();
+      if (cfg.provider && cfg.apiKey && !keys[cfg.provider]) keys[cfg.provider] = cfg.apiKey;
+      const getKey = (p: string) => keys[p];
+      // Map provider → current effective model (override > active model > default)
+      const overrides = await getAllProviderModels();
+      const getModel = (p: string) => {
+        if (overrides[p]) return overrides[p];
+        if (p === cfg.provider && cfg.model) return cfg.model;
+        // Fall back to the in-memory DEFAULT_MODELS via getEffectiveModelForProvider
+        // (sync wrapper). We can't await per-call inside the closure cleanly,
+        // so we pass the per-provider override map and let the closure pick.
+        return '';
+      };
+      // For providers without an override, we need the default. Build that
+      // up-front from the supported provider list using the synchronous
+      // getDefaultModel exported alongside the override helpers.
+      const allProviders = Object.keys(keys);
+      for (const p of allProviders) {
+        if (!getModel(p)) {
+          // Pull the default synchronously via the LLMConfig fallback.
+          // getDefaultModel is exported in llm.ts.
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const { getDefaultModel } = await import('./llm.js');
+          overrides[p] = overrides[p] || getDefaultModel(p as any);
+        }
+      }
+      const finalGetModel = (p: string) => overrides[p] || (p === cfg.provider ? cfg.model : '') || '';
+      const result = await checkAllProviders(getKey, finalGetModel);
+      state.lastCheckAt = Date.now();
+      state.suggestions = result.suggestions;
+      // v0.57.56: filter out CORS-class errors from the user-facing
+      // status string. They're known limitations (Anthropic blocks
+      // browser-origin /models) and the static fallback path already
+      // produced suggestions if any. Surfacing them as errors makes
+      // it look like something's broken when it's working as designed.
+      const realErrors = result.errors.filter(e =>
+        !/failed to fetch|cors|network/i.test(e.error)
+      );
+      state.lastError = realErrors.length
+        ? realErrors.map(e => `${e.provider}: ${e.error}`).join('; ')
+        : '';
+      await saveUpdaterState(state);
+      console.log(`${LOG} model-updater: checked ${Object.keys(keys).length} provider(s), found ${result.suggestions.length} suggestion(s), ${result.errors.length} error(s)`);
+      // Auto-apply if the user opted in.
+      if (state.autoApply && result.suggestions.length) {
+        await applyModelSuggestions(result.suggestions);
+        for (const s of state.suggestions) s.applied = true;
+        await saveUpdaterState(state);
+      }
+      return { ok: true, state };
+    }
+    case 'GET_MODEL_UPDATE_STATE': {
+      const state = await getUpdaterState();
+      return { ok: true, state };
+    }
+    case 'SET_MODEL_AUTO_APPLY': {
+      const state = await getUpdaterState();
+      state.autoApply = !!msg.enabled;
+      await saveUpdaterState(state);
+      return { ok: true, state };
+    }
+    case 'APPLY_MODEL_SUGGESTIONS': {
+      const ids: string[] = Array.isArray(msg.providers) ? msg.providers : [];
+      const state = await getUpdaterState();
+      const accepted = state.suggestions.filter(s => ids.includes(s.provider));
+      await applyModelSuggestions(accepted);
+      for (const s of state.suggestions) {
+        if (ids.includes(s.provider)) s.applied = true;
+      }
+      await saveUpdaterState(state);
+      return { ok: true, state, applied: accepted.length };
+    }
+    case 'DISMISS_MODEL_SUGGESTION': {
+      const provider = String(msg.provider || '');
+      const state = await getUpdaterState();
+      state.suggestions = state.suggestions.filter(s => s.provider !== provider);
+      await saveUpdaterState(state);
+      return { ok: true, state };
+    }
+
+    case 'REBUILD_DB': {
+      const trigger = String(msg.trigger || 'manual');
+      const existing = await getCompactStatus();
+      if (existing.state === 'running') {
+        return { ok: true, started: false, alreadyRunning: true, startedAt: existing.startedAt };
+      }
+      const startedAt = Date.now();
+      await setCompactStatus({ state: 'running', startedAt });
+      runRebuild(trigger, startedAt).catch(() => {});
+      return { ok: true, started: true, startedAt };
+    }
+
+    // v0.57.36: panel-driven memory pressure release. The user reported the
+    // SW process holding 14GB of RAM after a long session. This handler nukes
+    // every in-memory cache and bookkeeping Set/Map in the SW so GC can
+    // reclaim. The next request that needs the data re-fetches lazily —
+    // slower for the first call, but recoverable. Returns a snapshot of the
+    // pre/post sizes so the panel can show "Freed X MB".
+    case 'FREE_SW_MEMORY': {
+      const before = {
+        threadCache: !!threadSummaryCache,
+        chatActivityCache: !!chatActivityCache,
+        queryContactsCache: queryContactsCache.size,
+        autoTrainedSet: autoTrainedSet.size,
+        recentContactUpserts: recentContactUpserts.size,
+        dossierExtractionQueue: dossierExtractionQueue.size,
+        searchIndexSize: getIndexSize(),
+      };
+      threadSummaryCache = null;
+      chatActivityCache = null;
+      queryContactsCache.clear();
+      autoTrainedSet.clear();
+      recentContactUpserts.clear();
+      dossierExtractionQueue.clear();
+      // Also drop the persisted session-cache copy so a SW restart can't
+      // immediately rehydrate megabytes back into RAM.
+      try { await chrome.storage.session.remove(CHAT_ACTIVITY_SESSION_KEY); } catch {}
+      // Clear the search index — heavyweight (will need re-seed on next
+      // search) but the FlexSearch index can hold tens of MB on heavy users.
+      try { clearIndex(); } catch {}
+      // Clear LLM-side caches (response, summary, prompt module, dossier ts).
+      try { clearLLMCaches(); } catch {}
+      console.log(`${LOG} FREE_SW_MEMORY: cleared all in-memory caches`, before);
+      return { ok: true, before };
+    }
+
+    // v0.57.33: one-shot recovery for users whose inbox lost threads to
+    // the old PROFILE_BLOCKED → archived:true coupling. Scans every
+    // thread-meta whose archived flag was set BY a block (blockedByThem)
+    // and clears the archived flag while keeping the block signal. Also
+    // accepts an optional platform filter so the user can recover one
+    // platform at a time. Returns the count un-archived.
+    // v0.57.35: panel-driven bulk refetch of the Sniffies inbox. Fans out
+    // to every sniffies.com tab; each bridge relays to MAIN-world adapter
+    // which hits the chat-data endpoint. Any captured deltas flow back
+    // through ADAPTER_MESSAGES → invalidateThreadCache → panel sees them
+    // on the next loadThreads. We just count tabs notified so the panel
+    // can show "Refetching N tab(s)…".
+    case 'REFETCH_SNIFFIES_INBOX': {
+      const tabs = await chrome.tabs.query({ url: 'https://sniffies.com/*' });
+      let pinged = 0;
+      for (const tab of tabs) {
+        if (!tab.id) continue;
+        try { await chrome.tabs.sendMessage(tab.id, { type: 'SNIFFIES_REFETCH_INBOX' }); pinged++; } catch {}
+      }
+      console.log(`${LOG} REFETCH_SNIFFIES_INBOX: pinged ${pinged} sniffies tab(s)`);
+      return { ok: true, tabs: pinged };
+    }
+    case 'UNARCHIVE_BLOCKED_THREADS': {
+      const platformFilter = msg.platform ? String(msg.platform) : '';
+      const all = await getAllThreadMeta();
+      let unarchived = 0;
+      for (const m of all) {
+        if (!m.archived) continue;
+        if (!m.blockedByThem) continue;
+        if (platformFilter && m.platform !== platformFilter) continue;
+        await upsertThreadMeta(m.contactId, m.platform as Platform, { archived: false });
+        unarchived++;
+      }
+      invalidateThreadCache();
+      console.log(`${LOG} UNARCHIVE_BLOCKED_THREADS: un-archived ${unarchived} thread(s)${platformFilter ? ` (platform=${platformFilter})` : ''}`);
+      return { ok: true, count: unarchived };
+    }
+
+    // v0.57.28: per-platform contact lookup — avoids fetching ALL contacts and filtering client-side
+    case 'GET_CONTACTS_BY_PLATFORM': {
+      const contacts = await getContactsByPlatform(msg.platform as Platform);
+      return { ok: true, contacts, count: contacts.length };
+    }
 
     // Reminders
     case 'CREATE_REMINDER': return { ok: true, reminder: await createReminder(msg.contactId, msg.platform, msg.note, msg.dueAt) };
@@ -665,10 +1476,10 @@ async function handleMessage(msg: any): Promise<any> {
       const features: ProfileFeatures = {
         bodyType: String(contact?.metadata?.bodyType || ''),
         position: String(contact?.metadata?.position || ''),
-        age: '', ethnicity: '', height: '',
-        profileTextLength: 0, profileTextKeywords: [],
-        hasPhoto: !!contact?.avatarUrl, photoCount: 0,
-        distance: '', conversationLength: msg.messages.length, responseRate: 0,
+        age: String(contact?.metadata?.age || ''), ethnicity: String(contact?.metadata?.ethnicity || ''), height: String(contact?.metadata?.height || ''),
+        profileTextLength: String(contact?.metadata?.profileText || '').length, profileTextKeywords: [],
+        hasPhoto: !!contact?.avatarUrl, photoCount: Array.isArray(contact?.metadata?.photos) ? (contact.metadata as any).photos.length : 0,
+        distance: String(contact?.metadata?.distance || ''), conversationLength: msg.messages.length, responseRate: 0,
       };
       const preference = await predictPreference(features);
 
@@ -844,6 +1655,10 @@ async function handleMessage(msg: any): Promise<any> {
     case 'IMPORT_ALL_DATA': {
       try {
         invalidateThreadCache();
+        clearIndex();
+        autoTrainedSet.clear();
+        recentContactUpserts.clear();
+        queryContactsCache.clear();
         const result = await importAllData(msg.data, msg.passphrase);
         return { ok: true, ...result };
       } catch (err) { return { ok: false, error: (err as Error).message }; }
@@ -1932,6 +2747,7 @@ async function handleMessage(msg: any): Promise<any> {
      *  is dropping docs on every write". A high evictedCount means some
      *  searches will silently fall back to the slow scan for old messages. */
     case 'GET_SEARCH_INDEX_INFO': {
+      const lifetime = getLifetimeStats();
       return {
         ok: true,
         ready: isIndexReady(),
@@ -1942,6 +2758,9 @@ async function handleMessage(msg: any): Promise<any> {
           : 0,
         evictedCount: getEvictedCount(),
         lastEvictionAt: getLastEvictionAt() || null,
+        // v0.57.28: lifetime stats survive clearIndex() for cumulative diagnostics
+        lifetimeSeeds: lifetime.seeds,
+        lifetimeAdds: lifetime.adds,
       };
     }
 
@@ -1970,6 +2789,11 @@ async function handleMessage(msg: any): Promise<any> {
       const end = swPerfTrack('getChatActivity');
       try {
         const platform = String(msg.platform || 'sniffies');
+        // Try the in-memory cache first; if absent (fresh SW), pull from
+        // chrome.storage.session. This is the v0.57.31 fix for the
+        // "message channel closed" warn on the bridge — the heavy scan
+        // only fires when the persisted cache is also stale.
+        if (!chatActivityCache) await rehydrateChatActivityCache();
         // Cache for 30s — the bridge re-seeds every 60s, so a 30s cache
         // means at most one real PouchDB scan per seed cycle while still
         // picking up newly-stored messages within half a minute.
@@ -1985,11 +2809,30 @@ async function handleMessage(msg: any): Promise<any> {
         // than `db.find({selector: {docType, platform}})` which was taking
         // 300-400s on heavy users with ~20k messages and piling up
         // overlapping seeds behind the 60s re-seed interval.
+        // v0.57.36 memory fix \u2014 was loading EVERY message doc into RAM on every
+        // 60s seed. With 20k+ messages \u00d7 ~1-2KB each + PouchDB's internal caches,
+        // this allocated ~20-40MB per call and was a major contributor to the
+        // 14GB SW memory the user reported.
+        //
+        // New approach: stream rows in a single allDocs() WITHOUT include_docs,
+        // then page through the smaller keys-only result. We only need timestamps
+        // \u2014 those live on the message doc, but we can do a second narrow allDocs
+        // on a 90-day-windowed slice. For "waiting on response" semantics, msgs
+        // older than 90d don't change the answer (a 90+ day-old reply is dead).
+        //
+        // Implementation: doc IDs include the message timestamp because the
+        // upserter stamps `msg:{platform}:{messageId}` and `messageId` is
+        // typically `{epochSec}-{hash}` or similar. We can't rely on that across
+        // adapters though, so instead: cap include_docs scan to CHAT_ACTIVITY_MAX
+        // newest documents using PouchDB's descending+limit.
         const keyPrefix = `msg:${platform}:`;
+        const CHAT_ACTIVITY_MAX = 8000; // ~80% smaller working set than the old "all rows"
         const r = await db.allDocs({
-          startkey: keyPrefix,
-          endkey: keyPrefix + '\uffff',
+          startkey: keyPrefix + '\uffff', // descending starts from the high end
+          endkey: keyPrefix,
           include_docs: true,
+          descending: true,
+          limit: CHAT_ACTIVITY_MAX,
         });
         const activity: Record<string, { myLastTs: number; theirLastTs: number }> = {};
         for (const row of r.rows) {
@@ -2006,7 +2849,15 @@ async function handleMessage(msg: any): Promise<any> {
             if (ts > activity[id].theirLastTs) activity[id].theirLastTs = ts;
           }
         }
+        // Drop r.rows reference explicitly so GC can reclaim the buffer
+        // before we await the persist call below \u2014 without this PouchDB's
+        // internal LRU and our local closure both keep it pinned.
+        (r as any).rows = null;
         chatActivityCache = { data: activity, time: Date.now(), platform };
+        // Persist to session storage so the next fresh SW wakeup serves
+        // from cache instead of re-running the scan (which is what makes
+        // Chrome kill the SW mid-await in the first place).
+        persistChatActivityCache().catch(() => {});
         end();
         return { ok: true, activity };
       } catch (err) {
@@ -2181,6 +3032,7 @@ async function handleIncomingMessages(messages: UnifiedMessage[], platform: Plat
     // DOSSIER_MAX_DELAY ms, processing fires regardless of activity.
     const contactIds = new Set(messages.filter(m => m.direction === 'in').map(m => m.contactId));
     for (const cid of contactIds) {
+      if (dossierExtractionQueue.size >= DOSSIER_QUEUE_CAP) break;
       dossierExtractionQueue.add(`${cid}:${messages[0]?.platform || platform}`);
     }
     // Reset the idle timer on every new message — only starts after 30s of silence
@@ -2205,6 +3057,7 @@ async function handleIncomingMessages(messages: UnifiedMessage[], platform: Plat
 // so heavy chat traffic can't starve the extraction by perpetually resetting
 // the idle timer.
 const dossierExtractionQueue = new Set<string>();
+const DOSSIER_QUEUE_CAP = 100;
 let dossierExtractionTimer: ReturnType<typeof setTimeout> | null = null;
 let dossierProcessing = false;
 let dossierFirstQueuedAt = 0;
@@ -2243,8 +3096,7 @@ async function processDossierExtractions(): Promise<void> {
 
         if (newMessages.length < 3) continue;
 
-        const { extractDossierFields: llmExtract } = await import('./llm.js');
-        const { localDossierExtraction } = await import('./llm.js');
+        const { extractDossierFields: llmExtract, localDossierExtraction } = await import('./llm.js');
 
         const localResult = localDossierExtraction(newMessages.map(m => ({ direction: m.direction, body: m.body, timestamp: m.timestamp })));
         for (const [field, value] of Object.entries(localResult)) {
@@ -2357,11 +3209,12 @@ async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void>
 // ── Auto-respond with tier-based processing ─────────────────────────────────
 
 async function processAutoResponds(): Promise<void> {
-  // #8 Auto-close stale drafts older than 10 minutes
+  // #8 Auto-close stale drafts older than 15 minutes (v0.57.28: increased from
+  // 10m to account for time spent in the "generate" phase before draft state)
   const staleDrafts = await getDraftAutoResponds();
   for (const d of staleDrafts) {
     const age = Date.now() - new Date(d.updatedAt || d.createdAt).getTime();
-    if (age > 10 * 60_000) {
+    if (age > 15 * 60_000) {
       await updateAutoRespondStatus(d._id, 'rejected', { error: 'expired' });
       console.log(`${LOG} Auto-closed stale draft for ${d.contactId} (age: ${Math.round(age / 60_000)}m)`);
     }
@@ -2464,6 +3317,7 @@ async function runBlockRules(newMessages: UnifiedMessage[]): Promise<void> {
 // ── Navigation + messaging ──────────────────────────────────────────────────
 
 async function navigateToConversation(platform: string, contactId: string): Promise<void> {
+  if (!contactId) return; // v0.57.28: guard against empty contactId
   const urlFn = PLATFORM_URLS[platform]; if (!urlFn) return;
   const url = urlFn(contactId);
   const tabs = await chrome.tabs.query({});
@@ -2488,6 +3342,8 @@ async function navigateToConversation(platform: string, contactId: string): Prom
 }
 
 async function sendMessageToTab(platform: string, contactId: string, text: string): Promise<void> {
+  // v0.57.28: short-circuit on empty text to avoid unnecessary tab navigation
+  if (!text?.trim()) { console.warn(`${LOG} sendMessageToTab: empty text, skipping`); return; }
   console.log(`${LOG} Sending to ${contactId}: "${text.slice(0, 50)}..."`);
   const urlFn = PLATFORM_URLS[platform]; if (!urlFn) return;
   const url = urlFn(contactId);
@@ -2526,13 +3382,14 @@ async function sendMessageToTab(platform: string, contactId: string, text: strin
     hadToNavigate = true;
   }
 
-  if (targetId) {
-    // Give the page time to settle: shorter delay if we're already on the
-    // right URL, longer if we had to load a fresh tab.
+  if (targetId != null) {
+    const tid = targetId;
     const settleMs = hadToNavigate ? (tab?.id ? 3000 : 5000) : 500;
     setTimeout(() => {
-      chrome.tabs.sendMessage(targetId!, { type: 'SEND_AUTO_RESPONSE', text, contactId }).catch(() => {});
+      chrome.tabs.sendMessage(tid, { type: 'SEND_AUTO_RESPONSE', text, contactId }).catch(() => {});
     }, settleMs);
+  } else {
+    console.warn(`${LOG} sendMessageToTab: no target tab resolved for ${platform}:${contactId}`);
   }
 }
 
@@ -2575,6 +3432,107 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       case 'block-rule-check':
         await runPeriodicBlockRules().catch(e => console.warn(`${LOG} Block rule error:`, e));
         break;
+      // v0.57.54: daily check for newer LLM models. Queries each
+      // provider's /models endpoint, picks the best newer family-match
+      // for the user's current tier, surfaces or auto-applies depending
+      // on the autoApply toggle.
+      case 'model-updater-daily-check': {
+        try {
+          // Reuse the same handler logic by routing through ourselves.
+          // chrome.runtime.sendMessage to self isn't allowed, so call
+          // handleMessage directly. Cheap — one provider sweep per 24h.
+          await handleMessage({ type: 'CHECK_MODEL_UPDATES' });
+        } catch (err) {
+          console.warn(`${LOG} model-updater daily check failed:`, (err as Error).message);
+        }
+        break;
+      }
+      // v0.57.50: Friend Finder paced send tick. One greeting per tick;
+      // alarm reschedules itself with a fresh jittered gap until queue
+      // is empty or run state flipped to 'stopped'/'done'.
+      case 'friend-finder-tick': {
+        const state = await getFFState();
+        const run = await getRunState();
+        if (run.state !== 'running') {
+          try { await chrome.alarms.clear(FF_ALARM); } catch {}
+          break;
+        }
+        const next = run.queue.shift();
+        if (!next) {
+          run.state = 'done';
+          await setRunState(run);
+          try { await chrome.alarms.clear(FF_ALARM); } catch {}
+          console.log(`${LOG} FF: queue drained — ${run.sentCount} sent, ${run.failedCount} failed`);
+          break;
+        }
+        try {
+          const greet = await import('./llm.js').then(m => m.generateGreeting(next.platform as any));
+          // Reuse the existing sendMessageToTab path — same delay-and-send
+          // mechanics as the SEND_GREETING handler, including the per-call
+          // 5-15s jitter inside sendMessageToTab.
+          const sendDelay = 5000 + Math.floor(Math.random() * 10000);
+          setTimeout(() => sendMessageToTab(next.platform, next.contactId, greet.response), sendDelay);
+          run.sentCount++;
+          run.lastSendAt = Date.now();
+          console.log(`${LOG} FF: sent intro to ${next.contactId} (${run.sentCount}/${run.approved.length})`);
+        } catch (err) {
+          run.failedCount++;
+          console.warn(`${LOG} FF: send failed for ${next.contactId}:`, (err as Error).message);
+        }
+        // Schedule next tick with jittered gap
+        if (run.queue.length > 0) {
+          const delayMs = nextDelayMs(state.filters);
+          run.nextSendAt = Date.now() + delayMs;
+          await setRunState(run);
+          chrome.alarms.create(FF_ALARM, { delayInMinutes: Math.max(0.05, delayMs / 60_000) });
+        } else {
+          run.state = 'done';
+          run.nextSendAt = 0;
+          await setRunState(run);
+          try { await chrome.alarms.clear(FF_ALARM); } catch {}
+          console.log(`${LOG} FF: run complete — ${run.sentCount} sent, ${run.failedCount} failed`);
+        }
+        break;
+      }
+      // v0.57.36: periodic memory pressure release. Runs every 30 min.
+      // Drops the heaviest in-memory caches (thread summaries + chat
+      // activity) and trims search index back to the cap, so a SW that's
+      // been alive for hours gets a chance to release retained memory
+      // without waiting for Chrome to suspend it.
+      case 'mem-gc': {
+        const beforeQuery = queryContactsCache.size;
+        const beforeAutoTrain = autoTrainedSet.size;
+        const beforeContacts = recentContactUpserts.size;
+        threadSummaryCache = null;
+        chatActivityCache = null;
+        // Don't clear queryContactsCache fully — just evict expired entries.
+        const now = Date.now();
+        for (const [k, v] of queryContactsCache) {
+          if (now - v.time > QUERY_CONTACTS_CACHE_TTL) queryContactsCache.delete(k);
+        }
+        // autoTrainedSet only grows during a session — half it on each tick
+        // so long-lived SWs don't accumulate forever.
+        if (autoTrainedSet.size > 5000) {
+          const drop = Math.floor(autoTrainedSet.size / 2);
+          const it = autoTrainedSet.values();
+          for (let i = 0; i < drop; i++) {
+            const n = it.next();
+            if (n.done) break;
+            autoTrainedSet.delete(n.value);
+          }
+        }
+        // Same for recentContactUpserts — TTL prune.
+        for (const [k, v] of recentContactUpserts) {
+          if (now - v.time > 5 * 60_000) recentContactUpserts.delete(k);
+        }
+        console.log(`${LOG} mem-gc: queryCache ${beforeQuery}->${queryContactsCache.size}, autoTrain ${beforeAutoTrain}->${autoTrainedSet.size}, contactUpserts ${beforeContacts}->${recentContactUpserts.size}`);
+        // v0.57.46: piggy-back the auto-maintenance decision on the same
+        // 30-min cadence. Cheap (just reads counters); only acts when
+        // thresholds are exceeded. Adds free + compact when warranted
+        // without the user clicking anything.
+        await runAutoMaintenance().catch(e => console.warn(`${LOG} runAutoMaintenance error:`, e));
+        break;
+      }
       case 'grindr-login-check':
         await runGrindrLoginCheck().catch(() => { /* tab often inaccessible */ });
         break;
@@ -2644,6 +3602,22 @@ async function updateBadgeCount(): Promise<void> {
 updateBadgeCount().catch(() => {});
 chrome.alarms.create('badge-refresh', { periodInMinutes: 1 });
 chrome.alarms.create('reminder-check', { periodInMinutes: 0.25 });
+// v0.57.36: periodic memory pressure release for long-lived SWs.
+chrome.alarms.create('mem-gc', { periodInMinutes: 30 });
+// v0.57.54: daily LLM-model auto-discovery. Runs once at startup if the
+// last check was >20h ago, then every 24h. delayInMinutes:1 so the first
+// fire happens after the SW has settled.
+(async () => {
+  try {
+    const s = await getUpdaterState();
+    const dayMs = 24 * 60 * 60_000;
+    const due = !s.lastCheckAt || (Date.now() - s.lastCheckAt) > 20 * 60 * 60_000;
+    chrome.alarms.create(MODEL_UPDATER_ALARM, {
+      delayInMinutes: due ? 1 : Math.max(1, Math.round((dayMs - (Date.now() - s.lastCheckAt)) / 60_000)),
+      periodInMinutes: 24 * 60,
+    });
+  } catch {}
+})().catch(() => {});
 // Removed 25s keepalive alarm — was causing unnecessary CPU usage
 
 // ── Dev Auto-Reload ────────────────────────────────────────────────────────

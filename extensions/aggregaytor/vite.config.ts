@@ -48,6 +48,38 @@ function copyExtensionAssets(): Plugin {
           cpSync(srcDir, destDir, { recursive: true });
         }
       }
+
+      // v0.57.36: vite's parallel build pipeline (main build + 6 IIFE
+      // content-script builds, each running closeBundle hooks) intermittently
+      // truncated dist/icons/icon-128.png to 0 bytes — causing
+      // "Could not load icon 'icons/icon-128.png'" on extension load.
+      // Verify each icon's size matches the source after the recursive
+      // cpSync; if it doesn't, copyFileSync the single file directly.
+      // Cheap: ~4 stat calls + 0-1 copies per build.
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { statSync } = require('fs');
+        const iconSrc = resolve(src, 'icons');
+        const iconDist = resolve(dist, 'icons');
+        if (existsSync(iconSrc) && existsSync(iconDist)) {
+          for (const f of ['icon-16.png', 'icon-48.png', 'icon-128.png']) {
+            const sPath = resolve(iconSrc, f);
+            const dPath = resolve(iconDist, f);
+            if (!existsSync(sPath)) continue;
+            const sSize = statSync(sPath).size;
+            const dSize = existsSync(dPath) ? statSync(dPath).size : -1;
+            if (sSize !== dSize) {
+              copyFileSync(sPath, dPath);
+              const after = statSync(dPath).size;
+              if (after !== sSize) {
+                console.warn(`[vite-plugin] Icon copy verification failed for ${f}: src=${sSize} dst=${after}`);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[vite-plugin] Icon size verification failed:', (e as Error).message);
+      }
     },
   };
 }

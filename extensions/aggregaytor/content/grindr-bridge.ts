@@ -5,6 +5,26 @@
 import { showFloatingPanel, hideFloatingPanel } from './floating-actions.js';
 
 const LOG = '[Aggregaytor:Bridge:Grindr]';
+
+// v0.57.44: forward bridge errors to the SW's rolling error log.
+function _forwardError(level: 'unhandled' | 'rejection' | 'error', message: string, stack?: string): void {
+  try {
+    chrome.runtime.sendMessage({
+      type: 'LOG_ERROR',
+      entry: { source: 'bridge:grindr', level, message, stack, url: location.href },
+    }).catch(() => {});
+  } catch {}
+}
+window.addEventListener('error', (ev) => {
+  _forwardError('unhandled', ev.message || String(ev.error || 'unknown error'),
+    (ev.error && (ev.error as Error).stack) || undefined);
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  const r: any = ev.reason;
+  _forwardError('rejection',
+    typeof r === 'string' ? r : (r?.message || String(r)),
+    r?.stack);
+});
 let contextValid = true;
 
 function checkContext(): boolean {
@@ -104,12 +124,18 @@ try {
   });
 } catch { contextValid = false; }
 
-// ── Middle-click to block ─────────────────────────────────────────────────
+// ── Middle-click / Shift+right-click to block ────────────────────────────
 // Middle-click (button 2 = auxclick, button 1 = mousedown) on a profile
 // element extracts the profile ID and dispatches a block request to the
 // MAIN world, which has the captured Grindr JWT for API calls.
-document.addEventListener('auxclick', (e) => {
-  if (e.button !== 1) return; // middle-click only
+//
+// Shift+right-click is the trackpad-friendly equivalent: trackpads can't
+// produce a middle-click, so users with no mouse get the same gesture by
+// holding Shift while right-clicking. Both events fire `attemptBlock`,
+// which calls e.preventDefault() inside any strategy that succeeds —
+// strategies that bail out leave the default (new-tab / context menu)
+// alone so unrelated clicks aren't hijacked.
+function attemptBlock(e: MouseEvent): void {
   if (!contextValid || !checkContext()) return;
 
   const target = e.target as HTMLElement;
@@ -135,13 +161,40 @@ document.addEventListener('auxclick', (e) => {
   }
 
   // Find the nearest profile container — Grindr's cascade grid uses
-  // data-testid="cascadeCellContainer" on each profile card
-  const profileEl = target.closest(
+  // data-testid="cascadeCellContainer" on each profile card.
+  // v0.57.47: broaden the selector list because Grindr's DOM keeps
+  // drifting (we'd silently hit `return` whenever none of these matched).
+  let profileEl = target.closest(
     '[data-testid="cascadeCellContainer"], [data-profile-id], [data-conversation-id], ' +
     'a[href*="/chat/"], [class*="profile-card"], [class*="cascade-item"], ' +
-    '[class*="profile-detail"], [class*="ProfileView"], [data-testid*="profile"]'
-  );
-  if (!profileEl) return;
+    '[class*="profile-detail"], [class*="ProfileView"], [data-testid*="profile"], ' +
+    '[class*="cascade-cell" i], [class*="cascade-grid" i] > div, ' +
+    '[class*="cascade" i] [class*="cell" i], [class*="profile-tile" i], ' +
+    '[role="article"][class*="profile" i], [data-testid*="cascade" i], ' +
+    '[data-testid*="cell" i], [data-testid*="profileTile" i]'
+  ) as HTMLElement | null;
+
+  // Walk-up fallback — any clicked element that contains a Grindr CDN
+  // photo URL is almost certainly inside a profile card. Walk up until
+  // we find a container with reasonable dimensions (>=80x80) so we
+  // don't pick the bare img tag.
+  if (!profileEl) {
+    let node: HTMLElement | null = target;
+    for (let i = 0; node && i < 8; i++, node = node.parentElement) {
+      const html = node.outerHTML || '';
+      if (/cdns?\.grindr\.com\/images\/profile/i.test(html) || /\.cloudfront\.net\/profile/i.test(html)) {
+        const r = node.getBoundingClientRect();
+        if (r.width >= 80 && r.height >= 80) { profileEl = node; break; }
+      }
+    }
+  }
+
+  if (!profileEl) {
+    // Diagnostic — surfaces in the v0.57.44 error log so we can see when
+    // every selector misses on a fresh Grindr DOM revision.
+    console.warn(`${LOG} Middle-click: no profile container matched. target=${target.tagName}.${target.className?.toString().slice(0, 60)} url=${location.href}`);
+    return;
+  }
 
   // Extract profile ID — Grindr's DOM doesn't expose IDs directly, but
   // profile card images use CDN URLs with the photo hash:
@@ -249,6 +302,39 @@ document.addEventListener('auxclick', (e) => {
     contactId: `grindr:${profileId}`,
     platform: 'grindr',
   }).catch(() => {});
+}
+
+document.addEventListener('auxclick', (e) => {
+  if (e.button !== 1) return; // middle-click only
+  attemptBlock(e);
+}, true);
+
+// v0.57.47: redundant `mousedown` capture for middle-click. Some Chrome
+// builds + trackpad gesture configs DO fire mousedown (button:1) but
+// suppress the matching auxclick — the user's "doesn't work anymore"
+// report. Capturing both events with a 150ms dedupe window means we
+// catch whichever fires; if both fire we run the handler exactly once.
+let _grindrLastMiddleAt = 0;
+document.addEventListener('mousedown', (e) => {
+  if (e.button !== 1) return;
+  if (Date.now() - _grindrLastMiddleAt < 150) return;
+  _grindrLastMiddleAt = Date.now();
+  attemptBlock(e);
+}, true);
+// Re-stamp the dedupe window from auxclick too so a normal mouse click
+// chain (mousedown + auxclick) doesn't double-fire attemptBlock.
+document.addEventListener('auxclick', (e) => {
+  if (e.button !== 1) return;
+  _grindrLastMiddleAt = Date.now();
+}, true);
+
+// Shift+right-click — trackpad-friendly equivalent of middle-click. Only
+// suppresses the native context menu when a strategy actually fired
+// e.preventDefault() inside attemptBlock; plain right-clicks (no Shift)
+// behave normally.
+document.addEventListener('contextmenu', (e) => {
+  if (!e.shiftKey) return;
+  attemptBlock(e);
 }, true);
 
 // ── Session Keepalive ─────────────────────────────────────────────────────

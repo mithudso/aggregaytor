@@ -54,39 +54,17 @@ function profileUrl(id: string): string {
  * Request localStorage data from the MAIN world via CustomEvent.
  */
 function requestLocalStorageKey(key: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const responseEvent = `__aggregaytor_ls_response_${key}_${Date.now()}`;
-
-    const handler = ((event: CustomEvent) => {
-      window.removeEventListener(responseEvent, handler as EventListener);
-      resolve(event.detail?.value ?? null);
-    }) as EventListener;
-
-    window.addEventListener(responseEvent, handler);
-
-    // Inject a tiny script to read localStorage and dispatch the response
-    const script = document.createElement('script');
-    script.textContent = `
-      try {
-        const val = localStorage.getItem(${JSON.stringify(key)});
-        window.dispatchEvent(new CustomEvent(${JSON.stringify(responseEvent)}, {
-          detail: { value: val }
-        }));
-      } catch(e) {
-        window.dispatchEvent(new CustomEvent(${JSON.stringify(responseEvent)}, {
-          detail: { value: null }
-        }));
-      }
-    `;
-    (document.head || document.documentElement).appendChild(script);
-    script.remove();
-
-    // Timeout after 2s
-    setTimeout(() => {
-      window.removeEventListener(responseEvent, handler as EventListener);
-      resolve(null);
-    }, 2000);
-  });
+  // v0.57.39: this used to inject an inline <script>{textContent: ...}</script>
+  // to bridge MAIN-world localStorage back to ISOLATED world. That was wrong
+  // on two counts: (1) localStorage is per-origin not per-world, so ISOLATED
+  // can read it directly, and (2) sites with a strict CSP (no 'unsafe-inline')
+  // would block the inline tag entirely. Direct localStorage access works
+  // everywhere and skips the round-trip.
+  try {
+    return Promise.resolve(localStorage.getItem(key));
+  } catch {
+    return Promise.resolve(null);
+  }
 }
 
 async function runMigration(): Promise<void> {

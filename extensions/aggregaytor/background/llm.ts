@@ -194,14 +194,18 @@ function getProviderRPMUsed(provider: string): number {
 }
 
 function recordProviderRequest(provider: string): void {
-  const timestamps = providerRequestCounts.get(provider) || [];
-  timestamps.push(Date.now());
-  // Defensive ceiling: if we somehow record thousands of requests within 60s
-  // (bug or very high-RPM paid tier) the array could balloon. Trim to keep
-  // memory bounded; the RPM calculation still uses the 60s filter below.
-  if (timestamps.length > PROVIDER_TS_HARD_CAP) {
-    timestamps.splice(0, timestamps.length - PROVIDER_TS_HARD_CAP);
+  const now = Date.now();
+  let timestamps = providerRequestCounts.get(provider) || [];
+  // v0.57.36: prune-on-write so the array is always exactly the 60s window.
+  // Old code only pruned on read AND only after the 2000-entry hard cap was
+  // reached. On a chronically-misbehaving SW this could pin ~16KB per provider
+  // before the splice fired — small per provider but multiplied by lifetime
+  // accumulation across SW restarts the steady-state grew. Pruning on every
+  // write keeps the array at <= the actual RPM (typically <60).
+  if (timestamps.length > 0 && now - timestamps[0] > 60_000) {
+    timestamps = timestamps.filter(t => now - t < 60_000);
   }
+  timestamps.push(now);
   providerRequestCounts.set(provider, timestamps);
 }
 
@@ -488,7 +492,7 @@ export async function getLLMConfig(): Promise<LLMConfig> {
 /**
  * Get all configured API keys for failover.
  */
-async function getAllProviderKeys(): Promise<Record<string, string>> {
+export async function getAllProviderKeys(): Promise<Record<string, string>> {
   const keys = await getCachedStorage<Record<string, string>>(PROVIDER_KEYS_KEY);
   return keys || {};
 }
@@ -498,6 +502,37 @@ export async function saveProviderKey(provider: string, apiKey: string): Promise
   const next = { ...keys, [provider]: apiKey };
   await chrome.storage.local.set({ [PROVIDER_KEYS_KEY]: next });
   invalidateStorageCache(PROVIDER_KEYS_KEY);
+}
+
+// v0.57.54: per-provider model overrides. The model auto-updater writes
+// here when it discovers a newer model for any provider — even ones
+// that aren't currently active. getEffectiveModelForProvider() reads
+// this first, then falls back to the active LLMConfig.model (if same
+// provider), then to DEFAULT_MODELS.
+const PROVIDER_MODELS_KEY = 'aggregaytor_provider_models_v1';
+export async function getProviderModelOverride(provider: string): Promise<string | undefined> {
+  try {
+    const got = await getCachedStorage<Record<string, string>>(PROVIDER_MODELS_KEY);
+    return got?.[provider];
+  } catch { return undefined; }
+}
+export async function setProviderModelOverride(provider: string, model: string): Promise<void> {
+  const got = await getCachedStorage<Record<string, string>>(PROVIDER_MODELS_KEY);
+  const next = { ...(got || {}), [provider]: model };
+  await chrome.storage.local.set({ [PROVIDER_MODELS_KEY]: next });
+  invalidateStorageCache(PROVIDER_MODELS_KEY);
+}
+export async function getAllProviderModels(): Promise<Record<string, string>> {
+  const got = await getCachedStorage<Record<string, string>>(PROVIDER_MODELS_KEY);
+  return got || {};
+}
+export function getDefaultModel(provider: LLMProvider): string {
+  return DEFAULT_MODELS[provider];
+}
+export async function getEffectiveModelForProvider(provider: LLMProvider): Promise<string> {
+  const override = await getProviderModelOverride(provider);
+  if (override) return override;
+  return DEFAULT_MODELS[provider];
 }
 
 /**

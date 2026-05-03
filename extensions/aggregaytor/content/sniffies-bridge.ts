@@ -25,6 +25,36 @@
 
 const LOG = '[Aggregaytor:Bridge:Sniffies]';
 
+// v0.57.44: forward every uncaught error / unhandled promise rejection
+// from this ISOLATED-world bridge to the SW's error-log buffer. Cheap
+// (one chrome.runtime.sendMessage per error). The SW persists to
+// chrome.storage.local with a rolling 500-entry cap so a runaway error
+// can't fill the disk. Wrapped in a top-level try/catch — if the
+// extension is reloaded mid-session, `chrome.runtime` throws and we
+// just lose the report.
+function _forwardError(level: 'unhandled' | 'rejection' | 'error', message: string, stack?: string): void {
+  try {
+    chrome.runtime.sendMessage({
+      type: 'LOG_ERROR',
+      entry: {
+        source: 'bridge:sniffies',
+        level, message, stack,
+        url: location.href,
+      },
+    }).catch(() => {});
+  } catch {}
+}
+window.addEventListener('error', (ev) => {
+  _forwardError('unhandled', ev.message || String(ev.error || 'unknown error'),
+    (ev.error && (ev.error as Error).stack) || undefined);
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  const r: any = ev.reason;
+  _forwardError('rejection',
+    typeof r === 'string' ? r : (r?.message || String(r)),
+    r?.stack);
+});
+
 /**
  * Parse a relative time string ("2 hours ago", "3 months ago", "an hour ago")
  * into an approximate ISO 8601 timestamp. Returns current time if unparseable.
@@ -97,8 +127,58 @@ function checkContext(): boolean {
     if (contextValid) {
       console.warn(`${LOG} Extension context invalidated — bridge disabled until page reload`);
       contextValid = false;
+      shutdownBackgroundTimers();
     }
     return false;
+  }
+}
+
+// v0.57.32: chrome.runtime.sendMessage can THROW SYNCHRONOUSLY when the
+// extension is reloaded mid-session — that throw bypasses any .catch()
+// chained onto the returned promise and surfaces as
+// "Uncaught Error: Extension context invalidated".
+//
+// safeSendMessage wraps the call so:
+//   1. Pre-flight: if context is already known dead, reject immediately
+//      (no attempt → no throw → no Sentry-style noise).
+//   2. Sync throw: caught and turned into a rejected promise, plus we
+//      flip contextValid so subsequent calls short-circuit.
+//   3. Async rejections (channel-closed, no-receiver, context-lost) flow
+//      through normally; callers decide whether to retry or give up.
+//
+// "Receiving end does not exist" / "Could not establish connection" —
+// these fire when the SW is asleep AND has no other tab keeping it warm,
+// or when the extension was reloaded but the SW handler hasn't bound yet.
+// They're transient by definition; treat them as cache-miss equivalents.
+function safeSendMessage(message: any): Promise<any> {
+  if (!contextValid) {
+    return Promise.reject(new Error('Context invalidated'));
+  }
+  try {
+    const p = chrome.runtime.sendMessage(message);
+    // Some old polyfills returned undefined; normalise to a Promise.
+    return p && typeof (p as any).then === 'function' ? p as Promise<any> : Promise.resolve(p);
+  } catch (err) {
+    // Sync throw — almost always context invalidation. Flip the flag so
+    // subsequent calls short-circuit without re-throwing.
+    contextValid = false;
+    shutdownBackgroundTimers();
+    return Promise.reject(err as Error);
+  }
+}
+
+// Background timers (intervals) keep firing even after the extension is
+// reloaded. Once contextValid flips to false they all become dead-letter
+// CPU, and any sendMessage they retry will throw again. Track them in a
+// registry so checkContext() / safeSendMessage() can clear them once.
+const _backgroundTimers: ReturnType<typeof setInterval>[] = [];
+function registerBackgroundTimer(id: ReturnType<typeof setInterval>): void {
+  _backgroundTimers.push(id);
+}
+function shutdownBackgroundTimers(): void {
+  while (_backgroundTimers.length) {
+    const id = _backgroundTimers.pop();
+    if (id != null) clearInterval(id);
   }
 }
 
@@ -223,7 +303,8 @@ try {
           // System messages about deleted conversations
           if (lower.includes('deleted previous messages in this conversation')) return;
           if (lower.includes('deleted the conversation') || lower.includes('conversation deleted')) return;
-          if (lower.startsWith('this conversation') || lower.startsWith('you blocked')) return;
+          if (lower.startsWith('this conversation') || lower.startsWith('you blocked') || lower.startsWith('you unblocked')) return;
+          if (lower.startsWith('you reported') || lower.startsWith('message unsent') || lower.startsWith('this message was deleted')) return;
 
           // Determine message direction by checking CSS classes for common
           // "sent" indicators. Sniffies typically styles outgoing messages with
@@ -247,7 +328,7 @@ try {
           if (!contactId) return;
 
           messages.push({
-            id: `sniffies:conv-${profileId || 'unknown'}-${Date.now()}-${i}`,
+            id: `sniffies:conv-${profileId || 'unknown'}-${direction}-${text.slice(0, 40).replace(/[^a-zA-Z0-9]/g, '')}-${i}`,
             platform: 'sniffies',
             threadId: contactId, // thread = contact for 1:1 conversations
             contactId,
@@ -310,6 +391,17 @@ try {
     }
     if (message.type === 'SHOW_FLOATING_PANEL') {
       showFloatingPanel(message.contactId, message.platform || 'sniffies');
+      sendResponse({ ok: true });
+      return true;
+    }
+    // v0.57.35: side-panel-triggered bulk inbox refetch. Side panel sends
+    // SNIFFIES_REFETCH_INBOX → SW broadcasts to every sniffies.com tab →
+    // bridge here postMessages to MAIN world → adapter hits chat-data and
+    // emits any newly-seen DMs through ADAPTER_MESSAGES. Result count
+    // (SNIFFIES_REFETCH_RESULT) bubbles back to the panel via the existing
+    // __aggregaytor_message relay below.
+    if (message.type === 'SNIFFIES_REFETCH_INBOX') {
+      window.postMessage({ type: '__aggregaytor_refetch_inbox' }, '*');
       sendResponse({ ok: true });
       return true;
     }
@@ -666,7 +758,8 @@ function showFloatingPanel(contactId: string, platform: string): void {
     // The MAIN world listens for these via window.addEventListener('message').
     window.postMessage({ type: '__aggregaytor_block', profileId: pid }, '*');
     // Mark as blocked in the aggregator service worker
-    chrome.runtime.sendMessage({
+    // v0.57.51: safeSendMessage swallows the sync throw on context loss.
+    safeSendMessage({
       type: 'PROFILE_BLOCKED',
       contactId: fpContactId,
       platform: fpPlatform,
@@ -692,7 +785,7 @@ function showFloatingPanel(contactId: string, platform: string): void {
   // Reminder — quick 1-hour reminder
   panel.querySelector('.fp-reminder-btn')!.addEventListener('click', () => {
     const dueAt = new Date(Date.now() + 3600_000).toISOString(); // 1 hour from now
-    chrome.runtime.sendMessage({
+    safeSendMessage({
       type: 'CREATE_REMINDER',
       contactId: fpContactId,
       platform: fpPlatform,
@@ -715,25 +808,35 @@ function showFloatingPanel(contactId: string, platform: string): void {
   panel.querySelector('#fp-notes-input')!.addEventListener('input', (e) => {
     if (nt) clearTimeout(nt);
     nt = setTimeout(() => {
-      chrome.runtime.sendMessage({ type: 'UPSERT_THREAD_META', contactId: fpContactId, platform: fpPlatform, updates: { notes: (e.target as HTMLTextAreaElement).value } }).catch(() => {});
+      safeSendMessage({ type: 'UPSERT_THREAD_META', contactId: fpContactId, platform: fpPlatform, updates: { notes: (e.target as HTMLTextAreaElement).value } }).catch(() => {});
       const st = panel.querySelector('#fp-status') as HTMLElement;
       if (st) { st.textContent = 'Saved'; setTimeout(() => { st.textContent = ''; }, 1500); }
     }, 800);
   });
 
-  // Stars
+  // Stars — v0.57.51: routed through safeSendMessage. Direct
+  // chrome.runtime.sendMessage was throwing synchronously when the
+  // extension was reloaded mid-session; the throw escaped the .catch()
+  // chain because .catch only catches async rejections. Same fix
+  // class as v0.57.32's seedChatTimestamps and scrapeChatPanel.
   panel.querySelectorAll('.fp-star').forEach(star => {
     star.addEventListener('click', () => {
-      const r = parseInt((star as HTMLElement).dataset.star || '0');
-      const cur = panel.querySelectorAll('.fp-star.active').length;
-      const nr = r === cur ? 0 : r;
-      panel.querySelectorAll('.fp-star').forEach((s, i) => s.classList.toggle('active', i < nr));
-      chrome.runtime.sendMessage({ type: 'SET_RATING', contactId: fpContactId, platform: fpPlatform, rating: nr }).catch(() => {});
+      try {
+        const r = parseInt((star as HTMLElement).dataset.star || '0');
+        const cur = panel.querySelectorAll('.fp-star.active').length;
+        const nr = r === cur ? 0 : r;
+        panel.querySelectorAll('.fp-star').forEach((s, i) => s.classList.toggle('active', i < nr));
+        safeSendMessage({ type: 'SET_RATING', contactId: fpContactId, platform: fpPlatform, rating: nr }).catch(() => {});
+      } catch (err) {
+        // Defensive — if the panel was orphaned by a reload mid-click, we
+        // don't want the error to bubble up as Uncaught and fill the log.
+        console.warn(`${LOG} fp star click error:`, (err as Error).message);
+      }
     });
   });
 
   // Populate data
-  chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId }).then((res: any) => {
+  safeSendMessage({ type: 'GET_THREAD_META', contactId }).then((res: any) => {
     const m = res?.meta || {};
     (panel.querySelector('#fp-notes-input') as HTMLTextAreaElement).value = m.notes || '';
     const rating = m.rating || 0;
@@ -785,9 +888,27 @@ function injectProfileActionsCSS(): void {
     #${PROFILE_ACTIONS_ID} {
       display:flex; flex-wrap:wrap; gap:6px; align-items:center;
       padding:8px 12px; margin:6px 0;
-      background:rgba(15,20,25,0.85); border:1px solid rgba(59,130,246,0.25);
+      background:rgba(15,20,25,0.92); border:1px solid rgba(59,130,246,0.35);
       border-radius:8px; font-family:system-ui,sans-serif; font-size:12px; color:#e7e9ea;
+      backdrop-filter:blur(6px);
     }
+    /* Fallback: when no profile container is found, anchor the bar to the
+       top of the viewport so it's always visible while a Sniffies chat or
+       profile is open. The user can drag it via the grip dot.
+       v0.57.40: z-index bumped to ~max-int because Sniffies' chat/profile
+       overlay renders at a higher index than our previous 99997 and was
+       visually covering the bar. The new value is well above any plausible
+       overlay stack. */
+    #${PROFILE_ACTIONS_ID}.pa-floating {
+      position:fixed; top:50px; left:50%; transform:translateX(-50%);
+      z-index:2147483646; max-width:calc(100vw - 24px); margin:0;
+      box-shadow:0 4px 16px rgba(0,0,0,0.5);
+    }
+    #${PROFILE_ACTIONS_ID} .pa-grip {
+      cursor:move; color:#6b7280; font-size:14px; user-select:none;
+      padding:0 4px; display:none;
+    }
+    #${PROFILE_ACTIONS_ID}.pa-floating .pa-grip { display:inline; }
     #${PROFILE_ACTIONS_ID} .pa-btn {
       background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12);
       border-radius:6px; padding:4px 10px; color:#e7e9ea; cursor:pointer;
@@ -836,6 +957,42 @@ function findProfileContainer(): HTMLElement | null {
     const cs = window.getComputedStyle(iw);
     if (cs.visibility !== 'hidden' && cs.display !== 'none') return iw;
   }
+  // v0.57.37: Sniffies' chat overlay uses different markup than the
+  // profile overlay (.his-profile / #sniffies-infowindow). Try a broad
+  // set of plausible selectors for the chat-window container so the
+  // action bar shows up there too. We sanity-check that the container
+  // is actually visible and big enough to be the chat panel (not a
+  // tiny tooltip). First match wins.
+  const candidates = [
+    'app-chat-overlay', 'app-chat-window', 'app-chat-container',
+    'chat-overlay', 'chat-window', 'chat-container',
+    '[class*="chat-overlay" i]', '[class*="chat-window" i]',
+    '[class*="conversation-overlay" i]', '[class*="conversation-window" i]',
+    '[class*="ChatOverlay"]', '[class*="ChatWindow"]',
+    '[role="dialog"][class*="chat" i]',
+  ];
+  for (const sel of candidates) {
+    const el = document.querySelector(sel) as HTMLElement | null;
+    if (!el) continue;
+    try {
+      const cs = window.getComputedStyle(el);
+      if (cs.visibility === 'hidden' || cs.display === 'none') continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.height < 200 || rect.width < 200) continue; // too small to be the chat
+      return el;
+    } catch { /* getComputedStyle on detached node */ }
+  }
+  // Last-resort heuristic: the element that contains the "Say something..."
+  // composer textarea is almost certainly the chat panel root. Walk up
+  // from the textarea to the nearest sized container.
+  const composer = document.querySelector('textarea[placeholder*="Say something" i]') as HTMLElement | null;
+  if (composer) {
+    let node: HTMLElement | null = composer;
+    for (let i = 0; node && i < 8; i++, node = node.parentElement) {
+      const r = node.getBoundingClientRect();
+      if (r.height > 300 && r.width > 250) return node;
+    }
+  }
   return null;
 }
 
@@ -853,12 +1010,21 @@ function injectProfileActions(contactId: string, platform: string): void {
   removeProfileActions();
   injectProfileActionsCSS();
 
-  const container = findProfileContainer();
-  if (!container) return;
+  // v0.57.43: ALWAYS float. Earlier versions tried to anchor the bar
+  // inside Sniffies' .his-profile / chat overlay container when one was
+  // found, but Sniffies' Angular tree re-renders parts of the chat
+  // overlay frequently — wiping the anchored bar AND leaving _lastDomInjectId
+  // pointing at a stale dead element so the next tick refused to re-inject.
+  // The floating fallback (fixed-position strip with a drag grip) is more
+  // robust: lives in document.body which Angular doesn't manage, has a
+  // ~max-int z-index that nothing can occlude, and the user can drag it
+  // out of the way once.
+  const useFloating = true;
 
   const profileId = contactId.replace(/^[a-z]+:/, '');
   const el = document.createElement('div');
   el.id = PROFILE_ACTIONS_ID;
+  if (useFloating) el.className = 'pa-floating';
 
   // Check if already blocked in the local map-filter blocklist
   let blockedIds: string[] = [];
@@ -866,14 +1032,29 @@ function injectProfileActions(contactId: string, platform: string): void {
   const isBlocked = blockedIds.includes(profileId);
 
   el.innerHTML = `
+    <span class="pa-grip" title="Drag to reposition">⋮⋮</span>
     <button class="pa-btn danger pa-hide-btn" ${isBlocked ? 'disabled' : ''}>${isBlocked ? '🚫 Hidden' : '🚫 Hide'}</button>
-    <button class="pa-btn pa-notes-btn">📝 Notes</button>
+    <button class="pa-btn pa-notes-btn" title="Toggle notes editor">📝 Notes</button>
+    <button class="pa-btn pa-reminder-btn" title="Set a reminder to follow up with this person">⏰ Remind</button>
+    <button class="pa-btn pa-intro-btn" title="Send a random AI-generated intro after a 5-15s human-like delay">🎲 Intro</button>
     <div class="pa-stars">
       <button class="pa-star" data-star="1">★</button>
       <button class="pa-star" data-star="2">★</button>
       <button class="pa-star" data-star="3">★</button>
       <button class="pa-star" data-star="4">★</button>
       <button class="pa-star" data-star="5">★</button>
+    </div>
+    <div class="pa-reminder-wrap" style="display:none;width:100%;margin-top:4px">
+      <input type="text" class="pa-notes-input pa-reminder-note" placeholder="Reminder note..." maxlength="200">
+      <select class="pa-notes-input pa-reminder-when" style="margin-top:4px">
+        <option value="3600000">In 1 hour</option>
+        <option value="14400000">In 4 hours</option>
+        <option value="86400000" selected>Tomorrow</option>
+        <option value="259200000">In 3 days</option>
+        <option value="604800000">In 1 week</option>
+      </select>
+      <button class="pa-btn pa-reminder-save" style="margin-top:4px">Save reminder</button>
+      <div class="pa-status pa-reminder-status"></div>
     </div>
     <div class="pa-notes-wrap" style="display:none">
       <textarea class="pa-notes-input" placeholder="Notes about this person..." maxlength="10000"></textarea>
@@ -882,8 +1063,57 @@ function injectProfileActions(contactId: string, platform: string): void {
   `;
 
   // Insert at the top of the profile container
-  if (container.firstChild) container.insertBefore(el, container.firstChild);
-  else container.appendChild(el);
+  if (useFloating) {
+    // No DOM anchor — append to body as a fixed-position strip and wire
+    // up dragging via the grip handle so the user can move it out of
+    // the way of Sniffies' own UI.
+    document.body.appendChild(el);
+    // Restore last-saved floating position (if any)
+    try {
+      const raw = localStorage.getItem('aggregaytor_pa_floating_pos');
+      if (raw) {
+        const pos = JSON.parse(raw);
+        if (typeof pos.x === 'number' && typeof pos.y === 'number') {
+          el.style.left = `${Math.max(0, Math.min(pos.x, window.innerWidth - 100))}px`;
+          el.style.top = `${Math.max(0, Math.min(pos.y, window.innerHeight - 40))}px`;
+          el.style.transform = 'none';
+        }
+      }
+    } catch {}
+    // Drag handler scoped to the grip dot
+    const grip = el.querySelector('.pa-grip') as HTMLElement | null;
+    if (grip) {
+      let dragging = false; let dx = 0; let dy = 0;
+      grip.addEventListener('mousedown', (ev) => {
+        const r = el.getBoundingClientRect();
+        dragging = true; dx = (ev as MouseEvent).clientX - r.left; dy = (ev as MouseEvent).clientY - r.top;
+        ev.preventDefault();
+      });
+      const move = (ev: MouseEvent) => {
+        if (!dragging) return;
+        const x = Math.max(0, Math.min(ev.clientX - dx, window.innerWidth - 100));
+        const y = Math.max(0, Math.min(ev.clientY - dy, window.innerHeight - 40));
+        el.style.left = `${x}px`;
+        el.style.top = `${y}px`;
+        el.style.transform = 'none';
+      };
+      const end = () => {
+        if (!dragging) return;
+        dragging = false;
+        try {
+          localStorage.setItem('aggregaytor_pa_floating_pos', JSON.stringify({
+            x: parseInt(el.style.left), y: parseInt(el.style.top),
+          }));
+        } catch {}
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', end);
+    }
+  } else if (container.firstChild) {
+    container.insertBefore(el, container.firstChild);
+  } else {
+    container.appendChild(el);
+  }
 
   // ── Hide button ──
   const hideBtn = el.querySelector('.pa-hide-btn') as HTMLButtonElement;
@@ -929,6 +1159,48 @@ function injectProfileActions(contactId: string, platform: string): void {
     });
   });
 
+  // ── Reminder toggle + saver ──
+  const remWrap = el.querySelector('.pa-reminder-wrap') as HTMLElement;
+  const remInput = el.querySelector('.pa-reminder-note') as HTMLInputElement;
+  const remWhen = el.querySelector('.pa-reminder-when') as HTMLSelectElement;
+  const remStatus = el.querySelector('.pa-reminder-status') as HTMLElement;
+  el.querySelector('.pa-reminder-btn')!.addEventListener('click', () => {
+    remWrap.style.display = remWrap.style.display === 'none' ? '' : 'none';
+    if (remWrap.style.display !== 'none') remInput.focus();
+  });
+  el.querySelector('.pa-reminder-save')!.addEventListener('click', () => {
+    const offsetMs = parseInt(remWhen.value || '86400000', 10);
+    const dueAt = new Date(Date.now() + offsetMs).toISOString();
+    const note = remInput.value.trim() || `Follow up with profile`;
+    chrome.runtime.sendMessage({
+      type: 'CREATE_REMINDER', contactId, platform, note, dueAt,
+    }).then(() => {
+      remStatus.textContent = `Reminder set for ${new Date(dueAt).toLocaleString()}`;
+      setTimeout(() => { remStatus.textContent = ''; remWrap.style.display = 'none'; }, 2000);
+    }).catch(() => {
+      remStatus.textContent = 'Failed to save reminder';
+    });
+  });
+
+  // ── Random Intro button ──
+  // Fires SEND_GREETING which generates an LLM intro and queues it with a
+  // randomised 5-15s delay (human-like timing). The SW handles the actual
+  // platform send via sendMessageToTab → SEND_AUTO_RESPONSE relay.
+  const introBtn = el.querySelector('.pa-intro-btn') as HTMLButtonElement;
+  introBtn.addEventListener('click', () => {
+    const orig = introBtn.textContent || '';
+    introBtn.disabled = true;
+    introBtn.textContent = '🎲 Sending…';
+    chrome.runtime.sendMessage({ type: 'SEND_GREETING', contactId, platform }).then((res: any) => {
+      const delaySec = Math.round(((res?.delay) || 0) / 1000);
+      introBtn.textContent = `✓ Queued (${delaySec}s)`;
+      setTimeout(() => { introBtn.textContent = orig; introBtn.disabled = false; }, 3000);
+    }).catch(() => {
+      introBtn.textContent = '✗ Failed';
+      setTimeout(() => { introBtn.textContent = orig; introBtn.disabled = false; }, 2000);
+    });
+  });
+
   // ── Load existing data ──
   chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId }).then((res: any) => {
     const m = res?.meta || {};
@@ -952,8 +1224,11 @@ function injectFilterBarCSS(): void {
   const s = document.createElement('style');
   s.id = FILTER_BAR_CSS_ID;
   s.textContent = `
+    /* v0.57.40: z-index bumped to ~max-int so Sniffies' chat/profile
+       overlay (which renders above our previous 99998) stops covering
+       the bar when the user opens a profile or chat. */
     #${FILTER_BAR_ID} {
-      position:fixed; top:0; left:0; right:0; z-index:99998;
+      position:fixed; top:0; left:0; right:0; z-index:2147483645;
       display:flex; align-items:center; gap:4px; padding:4px 10px;
       background:rgba(15,20,25,0.92); border-bottom:1px solid rgba(59,130,246,0.2);
       font-family:system-ui,sans-serif; font-size:10px; color:#9ca3af;
@@ -1015,9 +1290,13 @@ function showTopFilterBar(): void {
   ];
   // "Waiting on response" filters — hide profiles whose most recent message
   // is mine (outbound). The marker reappears the moment they reply.
+  // Plus the v0.57.29 "platform inactivity" filter: hide markers whose last-
+  // active timestamp is older than 2h. Profiles with no last-active signal
+  // are LEFT VISIBLE so unknowns aren't penalised.
   const chatHistory = [
     { key: 'hideRecentChats', label: '⏳ <24h' },
     { key: 'hideAnyChats', label: '⏳ Ghosted' },
+    { key: 'hideInactiveOver2h', label: '🟢 ≤2h' },
   ];
 
   const bar = document.createElement('div');
@@ -1028,11 +1307,19 @@ function showTopFilterBar(): void {
     <span class="fb-label">Filter${activeCount ? ` (${activeCount})` : ''}:</span>
     ${positions.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}>${p.label}</label>`).join('')}
     <span class="fb-sep"></span>
-    ${chatHistory.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}" title="${p.key === 'hideRecentChats' ? 'Hide profiles you\'ve chatted with in the last 24h, in either direction. Use this to declutter the map of people you\'re already talking to.' : 'Hide profiles where your last message went unanswered (waiting on their reply), any age. They reappear the moment they respond.'}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}><span class="fb-chip-label" data-chip="${p.key}">${p.label}</span></label>`).join('')}
+    ${chatHistory.map(p => {
+      const tip = p.key === 'hideRecentChats'
+        ? 'Hide profiles you\'ve chatted with in the last 24h, in either direction. Use this to declutter the map of people you\'re already talking to.'
+        : p.key === 'hideAnyChats'
+          ? 'Hide profiles where your last message went unanswered (waiting on their reply), any age. They reappear the moment they respond.'
+          : 'Hide markers whose last platform activity is more than 2 hours ago. Profiles with no last-active signal are left visible — the partials API backfills timestamps as the map loads.';
+      return `<label class="fb-chip ${settings[p.key] ? 'on' : ''}" title="${tip}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}><span class="fb-chip-label" data-chip="${p.key}">${p.label}</span></label>`;
+    }).join('')}
     <span class="fb-sep"></span>
     ${extras.map(p => `<label class="fb-chip ${settings[p.key] ? 'on' : ''}"><input type="checkbox" data-key="${p.key}" ${settings[p.key] ? 'checked' : ''}>${p.label}</label>`).join('')}
     <span class="fb-sep"></span>
     <button class="fb-undo" title="Undo last hide">Undo</button>
+    <button class="fb-undo fb-settings" title="Open full filter settings (text terms, position highlights, save/restore)">⚙ Settings</button>
     <span class="fb-hide-count">${blockedCount} hidden</span>
     <button class="fb-close" title="Close filter bar">✕</button>
   `;
@@ -1052,7 +1339,7 @@ function showTopFilterBar(): void {
     bar.querySelectorAll('input[data-key]').forEach((cb) => {
       const el = cb as HTMLInputElement;
       update[el.dataset.key as string] = el.checked;
-      el.closest('.fb-chip')!.classList.toggle('on', el.checked);
+      el.closest('.fb-chip')?.classList.toggle('on', el.checked);
       if (el.checked) onCount++;
     });
     const label = bar.querySelector('.fb-label');
@@ -1063,12 +1350,37 @@ function showTopFilterBar(): void {
     const merged = { ...prev, ...update };
     delete (merged as any).blockedIds;
     localStorage.setItem('aggregaytor_map_filter_settings', JSON.stringify(merged));
-    window.postMessage({ type: '__aggregaytor_map_filter_settings', update: merged }, '*');
+    // v0.57.57: tag with source so the floating Map Filters window
+    // (also listening on this message) can ignore its own echoes and
+    // re-render only when the OTHER UI changed settings.
+    window.postMessage({ type: '__aggregaytor_map_filter_settings', update: merged, _source: 'topbar' }, '*');
   }
 
   bar.querySelectorAll('input[data-key]').forEach(cb => {
     cb.addEventListener('change', applyFromBar);
   });
+
+  // v0.57.57: receive settings updates from the floating Map Filters
+  // window and re-sync our chips. We ignore our own broadcasts via
+  // the _source check so we don't loop. localStorage is the source of
+  // truth; we just re-read and update checkbox + chip-on states.
+  const topbarSyncListener = (event: MessageEvent) => {
+    if (!event.data || event.data.type !== '__aggregaytor_map_filter_settings') return;
+    if (event.data._source === 'topbar') return; // own post, skip
+    const settings = event.data.update || {};
+    let onCount = 0;
+    bar.querySelectorAll('input[data-key]').forEach((cb) => {
+      const el = cb as HTMLInputElement;
+      const key = el.dataset.key as string;
+      const v = !!settings[key];
+      el.checked = v;
+      el.closest('.fb-chip')!.classList.toggle('on', v);
+      if (v) onCount++;
+    });
+    const label = bar.querySelector('.fb-label');
+    if (label) label.textContent = `Filter${onCount ? ` (${onCount})` : ''}:`;
+  };
+  window.addEventListener('message', topbarSyncListener);
 
   // Undo last hide
   bar.querySelector('.fb-undo')!.addEventListener('click', () => {
@@ -1081,6 +1393,21 @@ function showTopFilterBar(): void {
         if (countEl) countEl.textContent = `${count} hidden`;
       } catch {}
     }, 200);
+  });
+
+  // Settings — bring the full floating filter panel to the foreground.
+  // The panel has all the controls the top bar doesn't: position highlights,
+  // text term editors, save/restore, undo. We re-show it (idempotent) and
+  // un-collapse it so it lands open even if the user had minimised it.
+  bar.querySelector('.fb-settings')!.addEventListener('click', () => {
+    showMapFilterPanel();
+    const fp = document.getElementById(FP_ID);
+    if (fp) {
+      fp.classList.remove('collapsed');
+      try { localStorage.setItem('aggregaytor_fp_collapsed', 'false'); } catch {}
+      // Pop above other UI
+      fp.style.zIndex = '99999';
+    }
   });
 
   // Close bar
@@ -1111,10 +1438,15 @@ function showTopFilterBar(): void {
     if (chipEver) {
       chipEver.textContent = s.hiddenByWaitingEver > 0 ? `⏳ Ghosted (${s.hiddenByWaitingEver})` : '⏳ Ghosted';
     }
+    const chipInactive = bar.querySelector('[data-chip="hideInactiveOver2h"]');
+    if (chipInactive) {
+      chipInactive.textContent = s.hiddenByInactive > 0 ? `🟢 ≤2h (${s.hiddenByInactive})` : '🟢 ≤2h';
+    }
     // Also update the right-side "N hidden" counter to show the total
-    // across all filter types (block + text + attitude + waiting).
+    // across all filter types (block + text + attitude + waiting + inactive).
     const total = (s.hiddenByBlock || 0) + (s.hiddenByText || 0) + (s.hiddenByAttitude || 0)
-                + (s.hiddenByWaiting24h || 0) + (s.hiddenByWaitingEver || 0);
+                + (s.hiddenByWaiting24h || 0) + (s.hiddenByWaitingEver || 0)
+                + (s.hiddenByInactive || 0);
     const countEl = bar.querySelector('.fb-hide-count');
     if (countEl) countEl.textContent = `${total} hidden${s.waiting ? ` · ${s.waiting} waiting` : ''}`;
   };
@@ -1331,7 +1663,9 @@ function showMapFilterPanel(): void {
 
     // Cross the ISOLATED→MAIN world boundary via postMessage.
     // sniffies.ts relays this to the map-filters CustomEvent listener.
-    window.postMessage({ type: '__aggregaytor_map_filter_settings', update: merged }, '*');
+    // v0.57.57: tag _source so the top filter bar can re-sync its
+    // chips without echoing our own broadcasts back at us.
+    window.postMessage({ type: '__aggregaytor_map_filter_settings', update: merged, _source: 'mapfilters' }, '*');
 
     const state = panel.querySelector('#fp-save-state') as HTMLElement;
     if (state) {
@@ -1383,6 +1717,41 @@ function showMapFilterPanel(): void {
 
   // Sync on first render in case settings drifted between panel opens
   collectAndApply('Synced');
+
+  // v0.57.57: receive settings updates from the top filter bar (or any
+  // other source) and re-render our checkboxes / textareas without
+  // echoing back. The _source check prevents the loop. localStorage is
+  // the source of truth — we just re-read it and refresh the controls.
+  const mapfiltersSyncListener = (event: MessageEvent) => {
+    if (!event.data || event.data.type !== '__aggregaytor_map_filter_settings') return;
+    if (event.data._source === 'mapfilters') return;
+    const settings = event.data.update || {};
+    panel.querySelectorAll('.fp-filter-cb').forEach((cb) => {
+      const el = cb as HTMLInputElement;
+      const key = el.dataset.key as string;
+      el.checked = !!settings[key];
+    });
+    const exTerms = panel.querySelector('#fp-exclude-terms') as HTMLTextAreaElement;
+    if (exTerms) exTerms.value = (settings.excludeTerms || []).join('\n');
+    const inTerms = panel.querySelector('#fp-include-terms') as HTMLTextAreaElement;
+    if (inTerms) inTerms.value = (settings.includeTerms || []).join('\n');
+    // Refresh visual switch / chip states without re-broadcasting
+    panel.querySelectorAll('.fp-switch').forEach((sw) => {
+      const key = (sw as HTMLElement).dataset.switch;
+      const cb = sw.querySelector('input') as HTMLInputElement | null;
+      if (!cb) return;
+      sw.classList.toggle('on', cb.checked);
+      const label = sw.querySelector('span');
+      if (label) label.textContent = cb.checked ? 'ON' : 'off';
+      const wrap = panel.querySelector(`[data-wrap-for="${key}"]`);
+      if (wrap) wrap.classList.toggle('fp-disabled', !cb.checked);
+    });
+    panel.querySelectorAll('.fp-chip').forEach((chip) => {
+      const cb = chip.querySelector('input') as HTMLInputElement | null;
+      if (cb) chip.classList.toggle('checked', cb.checked);
+    });
+  };
+  window.addEventListener('message', mapfiltersSyncListener);
 }
 
 // ── URL Change Detection ────────────────────────────────────────────────────
@@ -1430,14 +1799,27 @@ function checkUrlChange() {
   // Check if the new URL is a profile page: /profile/{hexId} or /profile/{hexId}/chat
   const match = url.match(/\/profile\/([0-9a-f]{6,})(?:\/chat)?/i);
   if (match) {
-    const contactId = `sniffies:${match[1].toLowerCase()}`;
+    const profileId = match[1].toLowerCase();
+    const contactId = `sniffies:${profileId}`;
     try {
       chrome.runtime.sendMessage({ type: 'ACTIVE_PROFILE_CHANGED', contactId, platform: 'sniffies' }).catch(() => {});
     } catch {}
-    // Show floating quick-action panel on the page
-    showFloatingPanel(contactId, 'sniffies');
-    // Also inject actions directly into the profile DOM (more reliable than
-    // the floating panel). Delay to allow Angular to render the profile view.
+    // Force a conversation-history refresh: Sniffies' own UI sometimes leaves
+    // the chat panel blank until the user sends a message, which can lead to
+    // messaging over prior context the user can't see. The adapter (MAIN
+    // world) hits the chat-data endpoint itself and relies on the existing
+    // fetch interceptor to extract messages from the response. Debounced
+    // per-profile inside the adapter, so rapid SPA navigation is safe.
+    // postMessage crosses the ISOLATED→MAIN world boundary.
+    window.postMessage({ type: '__aggregaytor_refresh_conversation', profileId }, '*');
+    // v0.57.30: dropped the showFloatingPanel(contactId, 'sniffies') call —
+    // the inline profile-action bar (injectProfileActions below) now carries
+    // hide/notes/stars/reminder/intro in a row anchored to the profile DOM
+    // rather than a draggable overlay. Floating panel is still defined and
+    // used by other platforms (Grindr SHOW_FLOATING_PANEL relay) but no
+    // longer auto-shown on Sniffies profile navigation.
+    // Inject actions directly into the profile DOM. Delay to allow Angular
+    // to render the profile view.
     // Cancel any pending retries from a previous profile — otherwise we'd
     // paint actions for stale contacts over the current profile container.
     clearProfileActionTimers();
@@ -1451,15 +1833,17 @@ function checkUrlChange() {
     hideFloatingPanel();
     clearProfileActionTimers();
     removeProfileActions();
-    // Show map filter controls on the map view
+    // v0.57.40: keep the top filter bar visible on EVERY sniffies.com URL
+    // (not just /map) so it doesn't blink out when the user clicks a
+    // profile, opens a chat, or navigates to /messages. Previously the
+    // bar was only re-shown on /map matches and removed everywhere else.
+    // showMapFilterPanel still gates on the map view because the floating
+    // filter editor only makes sense there.
     if (url.match(/sniffies\.com\/?(\?|$|#)/i) || url.match(/sniffies\.com\/map/i)) {
       showMapFilterPanel();
-      // Show top filter bar unless the user explicitly closed it
-      const barHidden = localStorage.getItem('aggregaytor_top_filter_bar_hidden') === 'true';
-      if (!barHidden) showTopFilterBar();
-    } else {
-      removeTopFilterBar();
     }
+    const barHidden = localStorage.getItem('aggregaytor_top_filter_bar_hidden') === 'true';
+    if (!barHidden) showTopFilterBar();
     try {
       chrome.runtime.sendMessage({ type: 'PROFILE_CLOSED', platform: 'sniffies' }).catch(() => {});
     } catch {}
@@ -1491,56 +1875,132 @@ function checkUrlChange() {
  *     .fa-thumbtack                    — Font Awesome icon, present = conversation is pinned
  *     .unread-count                    — badge with unread message count
  */
+// v0.57.41: scraper went stale. Sniffies renamed/restructured the Recents
+// drawer at some point and `chat-list-vertical-item` no longer matches —
+// scrapeChatPanel returned 0 rows for ~13 days while the user's own UI
+// kept showing fresh DMs. The new scraper:
+//   1. Tries the original selector first, then falls back to anything that
+//      looks like a chat row (custom-element pattern, role=listitem, .row-
+//      class with an avatar image, etc.)
+//   2. Pulls the avatar URL from EITHER background-image OR <img src> OR
+//      child of the row matching the sniffiesassets pattern
+//   3. Pulls the preview from any descendant span/div with non-trivial
+//      text that's not the timestamp
+//   4. Always logs result counts so we can see in the console whether the
+//      scrape is finding rows even when 0 messages are emitted
 function scrapeChatPanel() {
   if (!contextValid || !checkContext()) return;
 
   const contacts: any[] = [];
   const messages: any[] = [];
+  let selectorUsed = '';
 
-  // Each conversation row is a custom Angular element
-  const rows = document.querySelectorAll('chat-list-vertical-item');
+  // Selector cascade — first hit wins.
+  let rows: NodeListOf<Element> = document.querySelectorAll('chat-list-vertical-item');
+  if (rows.length) selectorUsed = 'chat-list-vertical-item';
+  if (!rows.length) {
+    rows = document.querySelectorAll('[class*="chat-list-vertical-item" i]');
+    if (rows.length) selectorUsed = '[class*="chat-list-vertical-item"]';
+  }
+  if (!rows.length) {
+    rows = document.querySelectorAll('app-chat-list-item, app-conversation-row, app-recent-conversation');
+    if (rows.length) selectorUsed = 'app-chat-list-item|app-conversation-row|app-recent-conversation';
+  }
+  if (!rows.length) {
+    // Custom elements with "chat" or "conversation" in their tag name
+    const all = document.querySelectorAll('*');
+    const matches: Element[] = [];
+    for (const el of all) {
+      const tag = el.tagName.toLowerCase();
+      if (tag.includes('-') && (/chat-list|chat-row|conversation-row|conversation-item|recent-conversation/.test(tag))) {
+        matches.push(el);
+      }
+    }
+    if (matches.length) {
+      // Build a NodeList-like wrapper so the rest of the function works
+      rows = (matches as unknown) as NodeListOf<Element>;
+      selectorUsed = `tag-name-heuristic (${matches.length} elements: ${matches[0].tagName.toLowerCase()})`;
+    }
+  }
+  if (!rows.length) {
+    // Last resort: any element that contains a sniffiesassets profile avatar
+    // AND has at least one descendant text node — that's probably a chat row.
+    const avatarParents = new Set<Element>();
+    document.querySelectorAll('[style*="profile.sniffiesassets" i], img[src*="profile.sniffiesassets" i]').forEach(el => {
+      // Walk up to a reasonable container ancestor
+      let node: Element | null = el;
+      for (let i = 0; node && i < 6; i++, node = node.parentElement) {
+        if (!node.parentElement) break;
+        // Stop at a container that has at least 2 siblings sharing a tag
+        const parent = node.parentElement;
+        if (parent.children.length >= 2) {
+          avatarParents.add(node);
+          break;
+        }
+      }
+    });
+    if (avatarParents.size) {
+      rows = (Array.from(avatarParents) as unknown) as NodeListOf<Element>;
+      selectorUsed = `avatar-walk-up (${avatarParents.size} parents)`;
+    }
+  }
 
   rows.forEach(row => {
     try {
       // -- Profile ID from avatar URL --
-      // The avatar is rendered as a CSS background-image on a .avatar-img div.
-      // Real user avatars come from profile.sniffiesassets.com/{hexId}/...,
-      // while default avatars come from site.sniffiesassets.com (no hex ID).
-      // We skip default avatars since they don't give us a usable profile ID.
-      const avatarEl = row.querySelector('.avatar-img') as HTMLElement;
-      if (!avatarEl) return;
-      const bgStyle = avatarEl.style?.backgroundImage || '';
-      const idMatch = bgStyle.match(/profile\.sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+      // Try background-image on .avatar-img first (legacy), then any element
+      // with a sniffiesassets profile URL in its style or src.
+      let bgStyle = '';
+      let avatarUrl = '';
+      const avatarEl = (row.querySelector('.avatar-img') || row.querySelector('[class*="avatar" i]')) as HTMLElement | null;
+      if (avatarEl) {
+        bgStyle = avatarEl.style?.backgroundImage || '';
+        if (!bgStyle) {
+          try { bgStyle = getComputedStyle(avatarEl).backgroundImage || ''; } catch {}
+        }
+      }
+      // Fallback: search the entire row for a profile.sniffiesassets URL in any attribute
+      let idMatch = bgStyle.match(/profile\.sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+      if (!idMatch) {
+        const rowHtml = (row as HTMLElement).outerHTML || '';
+        idMatch = rowHtml.match(/profile\.sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+        if (idMatch) {
+          // Pull avatar URL out of the full HTML too
+          const urlMatch = rowHtml.match(/(https?:\/\/profile\.sniffiesassets\.com\/[^\s"'<>]+)/i);
+          if (urlMatch) avatarUrl = urlMatch[1];
+        }
+      } else {
+        avatarUrl = bgStyle.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/)?.[1] || '';
+      }
       if (!idMatch) return; // default avatar — no profile ID extractable
       const profileId = idMatch[1].toLowerCase();
-      const avatarUrl = bgStyle.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/)?.[1] || '';
 
       // -- Message preview text --
-      // The last message preview is inside a data-testid="msgConversationPreview"
-      // element (Angular test attribute), with the text in a child <span>.
+      // Original selectors first, then any text container.
       const previewEl = row.querySelector('[data-testid="msgConversationPreview"] span')
-        || row.querySelector('.content-preview span');
+        || row.querySelector('.content-preview span')
+        || row.querySelector('[class*="preview" i] span')
+        || row.querySelector('[class*="preview" i]')
+        || row.querySelector('[class*="snippet" i]');
       let preview = previewEl?.textContent?.trim() || '';
-      // Angular template bindings sometimes leave extra whitespace
       preview = preview.replace(/\s+/g, ' ').trim();
 
       // -- Direction detection --
-      // A .fa-reply icon (Font Awesome reply arrow) is present when the last
-      // message in the conversation was sent by the current user.
-      const sentByYou = !!row.querySelector('.fa-reply');
+      const sentByYou = !!row.querySelector('.fa-reply, [class*="reply" i] i, [aria-label*="sent" i]');
       const direction = sentByYou ? 'out' : 'in';
 
       // -- Timestamp --
-      const timeEl = row.querySelector('.message-date');
+      const timeEl = row.querySelector('.message-date')
+        || row.querySelector('[class*="message-date" i]')
+        || row.querySelector('[class*="timestamp" i]')
+        || row.querySelector('time');
       const timeText = timeEl?.textContent?.trim() || '';
 
       // -- Pinned status --
-      // A .fa-thumbtack icon indicates the user has pinned this conversation
-      const isPinned = !!row.querySelector('.fa-thumbtack');
+      const isPinned = !!row.querySelector('.fa-thumbtack, [class*="pin" i]');
 
       // -- Unread count --
-      // The .unread-count element contains a number badge (e.g., "3")
-      const unreadEl = row.querySelector('.unread-count');
+      const unreadEl = row.querySelector('.unread-count, [class*="unread-count" i], [class*="badge-unread" i]');
       const unreadCount = parseInt(unreadEl?.textContent?.trim() || '0') || 0;
 
       // Create a contact record for this conversation partner
@@ -1583,19 +2043,25 @@ function scrapeChatPanel() {
     } catch { /* skip individual row parse errors */ }
   });
 
-  // Only log non-empty scrapes — the scraper runs on every URL change
-  // and the Sniffies /chat panel is often empty, producing
-  // "0 contacts, 0 messages from 0 rows" many times per session.
-  if (contacts.length || messages.length || rows.length) {
-    console.log(`[Aggregaytor:Bridge:Sniffies] Chat panel scraped: ${contacts.length} contacts, ${messages.length} messages from ${rows.length} rows`);
-  }
+  // v0.57.41: log EVERY scrape, even when 0 rows found. The Apr 15 → Apr 28
+  // freeze went undetected for 13 days because the previous code suppressed
+  // empty-result logs — the scraper had silently stopped finding rows after
+  // a Sniffies DOM rename and we had no signal in the console. Per-scrape
+  // logging is cheap (~1 line / 15s) and is the only way to notice the
+  // selector going stale next time.
+  console.log(`[Aggregaytor:Bridge:Sniffies] scrape: ${rows.length} rows, ${contacts.length} contacts, ${messages.length} messages${selectorUsed ? ` (selector: ${selectorUsed})` : ''}`);
 
-  // Send scraped contacts and messages to the service worker
+  // Send scraped contacts and messages to the service worker. safeSendMessage
+  // catches the sync throw that fires when the extension is reloaded mid-
+  // session (the bridge interval keeps running in the orphaned page until
+  // the user refreshes — without the wrap, the throw escapes here as the
+  // top-level "Uncaught Error: Extension context invalidated" we saw on
+  // sniffies chat pages).
   if (contacts.length) {
-    chrome.runtime.sendMessage({ type: 'ADAPTER_CONTACTS', platform: 'sniffies', payload: contacts }).catch(() => {});
+    safeSendMessage({ type: 'ADAPTER_CONTACTS', platform: 'sniffies', payload: contacts }).catch(() => {});
   }
   if (messages.length) {
-    chrome.runtime.sendMessage({ type: 'ADAPTER_MESSAGES', platform: 'sniffies', payload: messages }).catch(() => {});
+    safeSendMessage({ type: 'ADAPTER_MESSAGES', platform: 'sniffies', payload: messages }).catch(() => {});
   }
 }
 
@@ -1609,7 +2075,7 @@ setTimeout(() => scrapeChatPanel(), 3000);
 // any route change. Periodic scraping is the only way to catch them promptly.
 // 15s is a balance between freshness and CPU — the scrape itself is ~1-3ms
 // per row and a typical Recents panel has <30 rows.
-setInterval(() => scrapeChatPanel(), 15_000);
+registerBackgroundTimer(setInterval(() => scrapeChatPanel(), 15_000));
 
 // Additionally, watch for new chat-list-vertical-item elements appearing in
 // the DOM and re-scrape immediately. This covers the case where a new
@@ -1643,14 +2109,131 @@ try {
 // navigation) does NOT fire any native DOM event. popstate only fires for
 // browser Back/Forward buttons. Polling is the only reliable way to detect
 // when the user clicks a profile or opens a conversation within the SPA.
-setInterval(checkUrlChange, 3000);
+registerBackgroundTimer(setInterval(checkUrlChange, 3000));
 window.addEventListener('popstate', checkUrlChange);
 
-// Show top filter bar on initial load if we're on the map view
-if (location.href.match(/sniffies\.com\/?(\?|$|#)/i) || location.href.match(/sniffies\.com\/map/i)) {
+// v0.57.40: top filter bar on ALL sniffies.com URLs at initial load,
+// not just the map. The user wants the chips visible while they click
+// through profiles and chats too. Honors the "explicitly closed" flag.
+{
   const barHidden = localStorage.getItem('aggregaytor_top_filter_bar_hidden') === 'true';
   if (!barHidden) setTimeout(() => showTopFilterBar(), 1000);
 }
+
+// v0.57.40: DOM-driven profile-actions injector. The URL-based path in
+// checkUrlChange only fires on /profile/{hex}(/chat)? matches, which
+// silently misses anonymous-cruiser overlays and any URL-shape drift
+// from Sniffies' SPA router. This poller runs every 1.5s and asks
+// "is a Sniffies profile/chat container open right now?" via the same
+// findProfileContainer() heuristics injectProfileActions uses. If yes
+// AND the bar isn't already painted, inject. If the container goes
+// away, remove the bar. Independent of the URL path entirely — works
+// on every overlay variant.
+function activeProfileFromDom(): { contactId: string; container: HTMLElement | null } | null {
+  // v0.57.43: composer-first detection. The previous URL+container path
+  // missed the case the user keeps hitting — Sniffies' /chat route renders
+  // a chat overlay WITHOUT a /profile/{hex} URL, AND the chat overlay
+  // markup keeps drifting so findProfileContainer() returns null. The one
+  // signal that has stayed stable across every Sniffies UI revision is
+  // the "Say something..." composer textarea — it's on every chat view.
+  // If we see it, a chat is open.
+
+  // 1. Hex URL — authoritative when present.
+  const m = location.pathname.match(/\/profile\/([0-9a-f]{6,})/i);
+  if (m) {
+    return { contactId: `sniffies:${m[1].toLowerCase()}`, container: findProfileContainer() };
+  }
+
+  // 2. Composer textarea on screen → a chat is being viewed even without
+  //    a /profile URL. Try to extract the profile id from any avatar hex
+  //    in the same chat container; fall back to a stable synthetic id.
+  const composer = document.querySelector('textarea[placeholder*="Say something" i]') as HTMLElement | null;
+  if (composer) {
+    let root: HTMLElement | null = composer;
+    for (let i = 0; root && i < 10; i++) {
+      const r = root.getBoundingClientRect();
+      if (r.height > 300 && r.width > 250) break;
+      root = root.parentElement;
+    }
+    const html = (root || document.body).outerHTML || '';
+    const avatarHex = html.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+    return {
+      contactId: avatarHex ? `sniffies:${avatarHex[1].toLowerCase()}` : 'sniffies:active-chat',
+      container: root,
+    };
+  }
+
+  // 3. Standalone profile container (no chat composer, just a profile card).
+  const container = findProfileContainer();
+  if (!container) return null;
+  const avatarHex = container.outerHTML.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+  return {
+    contactId: avatarHex ? `sniffies:${avatarHex[1].toLowerCase()}` : 'sniffies:anonymous-overlay',
+    container,
+  };
+}
+
+let _lastDomInjectId = '';
+function tickDomDrivenProfileActions(): void {
+  if (!contextValid) return;
+  const found = activeProfileFromDom();
+  if (!found) {
+    // Container went away — clean up so we don't leak a stale bar over the map.
+    if (document.getElementById(PROFILE_ACTIONS_ID)) {
+      removeProfileActions();
+      _lastDomInjectId = '';
+    }
+    return;
+  }
+  // Already painted for this contact? leave it alone.
+  if (_lastDomInjectId === found.contactId && document.getElementById(PROFILE_ACTIONS_ID)) return;
+  _lastDomInjectId = found.contactId;
+  injectProfileActions(found.contactId, 'sniffies');
+}
+registerBackgroundTimer(setInterval(tickDomDrivenProfileActions, 1500));
+setTimeout(tickDomDrivenProfileActions, 1200);
+
+// v0.57.41: console-callable diagnostic. Run __aggregaytor_diagnose() in
+// the Sniffies tab DevTools to print:
+//   - which scraper selector matches the current DOM (or "no rows found")
+//   - whether the MAIN-world adapter is loaded and how many API responses
+//     it has parsed (window.__aggregaytor_perf.stats() shape)
+//   - the latest scrape numbers, captured into a {sample} object so the
+//     user can paste the result into a bug report
+// Lives on ISOLATED window — the user runs it from the page console after
+// switching the execution-context dropdown to the Aggregaytor bridge.
+(window as any).__aggregaytor_diagnose = function (): unknown {
+  const out: Record<string, unknown> = { ts: new Date().toISOString(), url: location.href };
+  // 1. Probe each scrape selector and record the row count.
+  const selectors = [
+    'chat-list-vertical-item',
+    '[class*="chat-list-vertical-item" i]',
+    'app-chat-list-item',
+    'app-conversation-row',
+    'app-recent-conversation',
+    '[class*="conversation" i]',
+  ];
+  out.selectors = selectors.reduce((acc: Record<string, number>, s) => {
+    try { acc[s] = document.querySelectorAll(s).length; } catch { acc[s] = -1; }
+    return acc;
+  }, {});
+  // 2. Custom elements with chat/conversation in tag name
+  const customTags = new Set<string>();
+  document.querySelectorAll('*').forEach(el => {
+    const t = el.tagName.toLowerCase();
+    if (t.includes('-') && /chat|conv|message|recent/.test(t)) customTags.add(t);
+  });
+  out.relevantCustomTags = [...customTags].sort();
+  // 3. Avatar element count
+  out.avatarsOnPage = document.querySelectorAll('[style*="profile.sniffiesassets" i], img[src*="profile.sniffiesassets" i]').length;
+  // 4. Composer presence
+  out.hasComposer = !!document.querySelector('textarea[placeholder*="Say something" i]');
+  // 5. Adapter health from MAIN world (if available)
+  const w = window as any;
+  out.adapterPerf = w.__aggregaytor_perf?.stats?.() || 'unavailable (MAIN world script not loaded?)';
+  console.log('[Aggregaytor:Diagnose]', out);
+  return out;
+};
 
 // ── Seed Chat Activity for Map Filters ─────────────────────────────────────
 // map-filters.ts (MAIN world) uses a per-profile {myLastTs, theirLastTs}
@@ -1680,7 +2263,7 @@ function seedChatTimestamps(): void {
   }
   seedInFlight = true;
   const t0 = performance.now();
-  chrome.runtime.sendMessage({ type: 'GET_CHAT_ACTIVITY', platform: 'sniffies' }).then((res: any) => {
+  safeSendMessage({ type: 'GET_CHAT_ACTIVITY', platform: 'sniffies' }).then((res: any) => {
     if (!res?.ok) {
       console.warn(`${LOG} GET_CHAT_ACTIVITY failed:`, res?.error || 'no response');
       return;
@@ -1715,13 +2298,108 @@ function seedChatTimestamps(): void {
       _lastSeedProfileCount = profileCount;
     }
   }).catch((err: Error) => {
-    console.warn(`${LOG} seedChatTimestamps error:`, err?.message || err);
+    // Three transient patterns — all benign, all self-heal on the next tick:
+    //   1. "message channel closed"        — SW suspended mid-allDocs scan.
+    //   2. "Receiving end does not exist"  — SW asleep with no other warm tab.
+    //   3. "Could not establish connection" — same family as #2 on Chromium.
+    // For these we silent-retry once after 2s (faster than the 60s interval).
+    //
+    // One PERMANENT pattern: "Extension context invalidated". The page-side
+    // bridge is now orphaned and no chrome.runtime call will work until the
+    // user refreshes the page. shutdownBackgroundTimers() stops the seed
+    // interval so we don't keep firing dead-letter calls.
+    const msg = String(err?.message || err || '');
+    const transient = /(message channel closed|Receiving end does not exist|Could not establish connection)/i.test(msg);
+    const permanent = /Extension context invalidated|Context invalidated/i.test(msg);
+    if (permanent) {
+      contextValid = false;
+      shutdownBackgroundTimers();
+      return; // silent — checkContext already logged the one-time warning
+    }
+    if (transient) {
+      setTimeout(() => { if (contextValid && !seedInFlight) seedChatTimestamps(); }, 2000);
+      return;
+    }
+    console.warn(`${LOG} seedChatTimestamps error:`, msg);
   }).finally(() => {
     seedInFlight = false;
   });
 }
 setTimeout(seedChatTimestamps, 1500);      // initial seed after 1.5s
-setInterval(seedChatTimestamps, 60_000);    // refresh every 60s
+registerBackgroundTimer(setInterval(seedChatTimestamps, 60_000));    // refresh every 60s
+
+// ── Random Intro Gestures (middle-click / Shift+right-click) ─────────────
+// On a Sniffies chat window, middle-click or Shift+right-click anywhere
+// inside the chat composer area sends a random AI-generated intro after
+// the same 5–15s human-like delay the 🎲 Intro button uses. The gesture
+// only fires when:
+//   1. We're on a /profile/{id}/chat URL (so we have a target contact)
+//   2. The click target is inside a chat-input region — placeholder text
+//      "Say something…" or a textarea/contenteditable in the composer.
+// Outside that region the events fall through and any existing handlers
+// (Alt+Shift+right-click for phrase capture, native context menu) keep
+// working. This is the trackpad-friendly equivalent of middle-click.
+function isChatComposerTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  // Direct match: Sniffies' chat input has placeholder "Say something…"
+  if (target.matches?.('textarea, [contenteditable="true"], input[type="text"]')) {
+    const ph = target.getAttribute('placeholder') || '';
+    if (/say something/i.test(ph)) return true;
+  }
+  // Ancestor match: any chat-composer wrapper
+  const composer = target.closest?.(
+    '[class*="chat-composer" i], [class*="composer" i], [class*="message-input" i], ' +
+    '[class*="chat-input" i], [class*="say-something" i]'
+  );
+  if (composer) return true;
+  // Fallback: text "Say something" anywhere in an ancestor's placeholder
+  let node: HTMLElement | null = target;
+  for (let i = 0; node && i < 6; i++, node = node.parentElement) {
+    const ph = node.getAttribute?.('placeholder') || '';
+    if (/say something/i.test(ph)) return true;
+  }
+  return false;
+}
+
+function dispatchRandomIntroFromGesture(): boolean {
+  const match = location.pathname.match(/\/profile\/([0-9a-f]{6,})/i);
+  if (!match) return false;
+  const contactId = `sniffies:${match[1].toLowerCase()}`;
+  try {
+    chrome.runtime.sendMessage({ type: 'SEND_GREETING', contactId, platform: 'sniffies' }).then((res: any) => {
+      const delaySec = Math.round(((res?.delay) || 0) / 1000);
+      const toast = document.createElement('div');
+      toast.textContent = `🎲 Intro queued${delaySec ? ` (~${delaySec}s)` : ''}`;
+      toast.style.cssText = 'position:fixed;bottom:80px;right:20px;z-index:999999;background:rgba(34,197,94,0.95);color:#fff;padding:8px 14px;border-radius:8px;font-family:system-ui,sans-serif;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,0.4);transition:opacity 0.3s;';
+      toast.setAttribute('role', 'status');
+      document.body.appendChild(toast);
+      setTimeout(() => { toast.style.opacity = '0'; }, 1800);
+      setTimeout(() => toast.remove(), 2200);
+    }).catch(() => {});
+  } catch {}
+  return true;
+}
+
+document.addEventListener('auxclick', (e) => {
+  if (e.button !== 1) return; // middle-click only
+  if (!contextValid || !checkContext()) return;
+  if (!isChatComposerTarget(e.target)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  dispatchRandomIntroFromGesture();
+}, true);
+
+document.addEventListener('contextmenu', (e) => {
+  // Shift+right-click — but NOT Alt+Shift (which is the phrase-capture
+  // gesture handled by the listener below). The Alt check keeps the two
+  // gestures from colliding.
+  if (!e.shiftKey || e.altKey) return;
+  if (!contextValid || !checkContext()) return;
+  if (!isChatComposerTarget(e.target)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  dispatchRandomIntroFromGesture();
+}, true);
 
 // ── Quick Phrase Capture (Alt+Shift+Right-Click) ──────────────────────────
 // When the user Alt+Shift+right-clicks in a chat, capture selected text

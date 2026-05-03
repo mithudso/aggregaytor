@@ -36,6 +36,7 @@ import {
   walkPayload,
   createLogger,
   perf,
+  getCapturedAuth,
 } from '@aggregaytor/adapter-core';
 import type { Platform, UnifiedMessage, UnifiedContact } from '@aggregaytor/adapter-core';
 import { parseSocketIOFrame, isGlobalChatEvent, isPresenceEvent } from './ws-parser.js';
@@ -262,6 +263,7 @@ function isMetadataText(body: string): boolean {
   if (lower.includes('conversation deleted')) return true;
   // System/notification messages
   if (lower.startsWith('this conversation') || lower.startsWith('you blocked') || lower.startsWith('you unblocked')) return true;
+  if (lower.startsWith('you reported') || lower.startsWith('message unsent') || lower.startsWith('this message was deleted')) return true;
   return false;
 }
 
@@ -337,6 +339,14 @@ export class SniffiesAdapter extends BaseAdapter {
   private userJoinedContactBuffer: UnifiedContact[] = [];
   private userJoinedFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * Per-profile debounce map for forceRefreshConversation().
+   * Prevents hammering the chat-data endpoint when the user flicks
+   * rapidly between profiles on the map.
+   */
+  private lastRefreshAt = new Map<string, number>();
+  private static readonly REFRESH_COOLDOWN_MS = 3000;
+
   /** Set up network interception and periodic background tasks. */
   async init(): Promise<void> {
     log.info('Initializing adapter...');
@@ -362,6 +372,11 @@ export class SniffiesAdapter extends BaseAdapter {
       clearInterval(this.storageTimer);
       this.storageTimer = null;
     }
+    if (this.userJoinedFlushTimer) {
+      clearTimeout(this.userJoinedFlushTimer);
+      this.userJoinedFlushTimer = null;
+    }
+    this.userJoinedContactBuffer = [];
     await super.destroy();
   }
 
@@ -497,6 +512,14 @@ export class SniffiesAdapter extends BaseAdapter {
               if (/^height$/.test(k)) md.height = value;
               if (/^(distance|miles|km|approximatedistance)$/.test(k)) md.distance = value;
               if (/^(hosting|host|hostingstatus)$/.test(k)) md.hosting = value;
+            }
+            // Capture last-active timestamps regardless of value type — Sniffies
+            // emits these as numbers (epoch s/ms), ISO strings, and occasionally
+            // relative strings like "5m ago". parseTimestamp coerces the first
+            // two; relative strings fall through with 0 and are ignored.
+            if (/^(lastactive|lastactiveat|lastseen|lastseenat|onlineat|lastonline)$/.test(k)) {
+              const ts = parseTimestamp(value);
+              if (ts > 0) md.lastActive = ts;
             }
             if (Array.isArray(value) && /photo|image|pic/.test(k)) {
               md.photos = value.filter(v => typeof v === 'string').slice(0, 10);
@@ -673,8 +696,13 @@ export class SniffiesAdapter extends BaseAdapter {
     // recent 3000) so that very old duplicates can technically re-appear
     // but current traffic stays deduped.
     if (this.seenMessageIds.size > 5000) {
-      const arr = [...this.seenMessageIds];
-      this.seenMessageIds = new Set(arr.slice(-3000));
+      const toDrop = this.seenMessageIds.size - 3000;
+      const iter = this.seenMessageIds.values();
+      for (let i = 0; i < toDrop; i++) {
+        const next = iter.next();
+        if (next.done) break;
+        this.seenMessageIds.delete(next.value);
+      }
     }
 
     if (newMessages.length) {
@@ -744,15 +772,24 @@ export class SniffiesAdapter extends BaseAdapter {
             this.userJoinedThrottle.set(profileId, now);
             // Cap throttle map at 500 entries to prevent unbounded growth
             if (this.userJoinedThrottle.size > 500) {
-              const oldest = [...this.userJoinedThrottle.entries()].sort((a, b) => a[1] - b[1]).slice(0, 200);
-              for (const [k] of oldest) this.userJoinedThrottle.delete(k);
+              const iter = this.userJoinedThrottle.keys();
+              for (let i = 0; i < 200; i++) {
+                const next = iter.next();
+                if (next.done) break;
+                this.userJoinedThrottle.delete(next.value);
+              }
             }
             const profileData = obj.data as Record<string, unknown> | undefined;
             if (profileData && typeof profileData === 'object') {
               this.selfIds.detectFromPayload(profileData);
               const avatarUrl = this.resolveAvatarUrl(profileData, profileId);
               // Buffer contacts and flush every 5s to avoid flooding
-              // with 25+ chrome.runtime.sendMessage calls per second
+              // with 25+ chrome.runtime.sendMessage calls per second.
+              // v0.57.36: hard-cap the buffer at 1000 entries. The 5s flush
+              // SHOULD keep this small, but if the bridge or SW is slow to
+              // drain, the buffer could balloon on a busy map (hundreds of
+              // userJoined events per second). Drop oldest when over cap —
+              // newer presence data is more useful than ancient.
               this.userJoinedContactBuffer.push({
                 id: `sniffies:${profileId}`,
                 platform: 'sniffies' as const,
@@ -763,6 +800,9 @@ export class SniffiesAdapter extends BaseAdapter {
                 lastSeen: new Date().toISOString(),
                 metadata: {},
               });
+              if (this.userJoinedContactBuffer.length > 1000) {
+                this.userJoinedContactBuffer.splice(0, this.userJoinedContactBuffer.length - 1000);
+              }
               if (!this.userJoinedFlushTimer) {
                 this.userJoinedFlushTimer = setTimeout(() => {
                   if (this.userJoinedContactBuffer.length) {
@@ -797,6 +837,65 @@ export class SniffiesAdapter extends BaseAdapter {
     // ── Default: assume DM traffic ──────────────────────────────────────
     const result = this.parseApiResponse('[ws-dm]', frame.data);
     endWsFrame(); return result;
+  }
+
+  // ── Force Conversation Refresh ───────────────────────────────────────────
+
+  /**
+   * Force Sniffies to refresh conversation history for a profile.
+   *
+   * Why: Sniffies' own UI sometimes shows a blank chat panel when the user
+   * clicks a profile on the map — the history doesn't populate until after
+   * the first message is sent. That makes it easy to send a message that
+   * duplicates or ignores prior context. This method proactively hits the
+   * chat-data DM endpoint (same one Sniffies uses on initial page load).
+   *
+   * How it works: the fetch call runs through our own monkey-patched
+   * `window.fetch`, so the response flows through the existing
+   * `parseApiResponse()` pipeline and messages are extracted / emitted
+   * exactly as if Sniffies itself had made the request. The side panel
+   * then shows the history even when Sniffies' native UI is still blank.
+   *
+   * Debounced per-profile to REFRESH_COOLDOWN_MS (3s) to avoid hammering
+   * the endpoint during rapid SPA navigation.
+   *
+   * Same-origin fetch from MAIN world sends cookies automatically; we
+   * also layer on any auth headers captured from prior Sniffies traffic
+   * so bearer-token auth schemes work too.
+   */
+  async forceRefreshConversation(profileId: string): Promise<void> {
+    const id = normalizeProfileId(profileId);
+    if (!id) return;
+
+    const now = Date.now();
+    const last = this.lastRefreshAt.get(id) || 0;
+    if (now - last < SniffiesAdapter.REFRESH_COOLDOWN_MS) return;
+    this.lastRefreshAt.set(id, now);
+
+    // Cap debounce map to prevent unbounded growth if the user browses
+    // hundreds of profiles in a session.
+    if (this.lastRefreshAt.size > 200) {
+      const iter = this.lastRefreshAt.keys();
+      for (let i = 0; i < 100; i++) {
+        const next = iter.next();
+        if (next.done) break;
+        this.lastRefreshAt.delete(next.value);
+      }
+    }
+
+    const auth = getCapturedAuth('sniffies.com') || {};
+    try {
+      // Response is intercepted by our patched fetch → parseApiResponse()
+      // → messages/contacts emitted → bridge → service worker → PouchDB.
+      await fetch('https://sniffies.com/api/v2/post-authentication/chat-data', {
+        method: 'GET',
+        headers: { Accept: 'application/json', ...auth },
+        credentials: 'include',
+      });
+      log.info(`Force-refreshed conversation history for ${id}`);
+    } catch (err) {
+      log.warn(`Force refresh failed for ${id}:`, err);
+    }
   }
 
   // ── Self-ID Detection ────────────────────────────────────────────────────
@@ -965,7 +1064,8 @@ export class SniffiesAdapter extends BaseAdapter {
     try {
       const markers = document.querySelectorAll('.maplibregl-marker, .marker-avatar-image, [style*="sniffiesassets"]');
       for (const el of markers) {
-        const bg = (el as HTMLElement).style?.backgroundImage || getComputedStyle(el).backgroundImage || '';
+        let bg = (el as HTMLElement).style?.backgroundImage || '';
+        if (!bg || bg === 'none') { try { bg = getComputedStyle(el).backgroundImage || ''; } catch { continue; } }
         // Parse the URL out of `background-image: url("...")`
         const match = bg.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/i);
         if (!match) continue;

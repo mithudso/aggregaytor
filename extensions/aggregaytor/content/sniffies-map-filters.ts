@@ -49,6 +49,10 @@ interface MapFilterSettings {
   // Chat-history hiding
   hideRecentChats: boolean;   // hide profiles chatted within last 24h
   hideAnyChats: boolean;      // hide profiles ever chatted
+  // Activity hiding — hide markers whose last-active time on the platform
+  // is older than 2 hours. Profiles with no last-active signal are LEFT
+  // VISIBLE (we don't penalise unknowns).
+  hideInactiveOver2h: boolean;
   // Manual blocks
   blockedIds: Set<string>;
 }
@@ -57,6 +61,9 @@ interface MapFilterSettings {
 
 const SCAN_INTERVAL_MS = 5000;
 const HIDE_CLASS = 'aggregaytor-hide';
+const SHOW_CLASS = 'aggregaytor-show';   // v0.57.55 → kept as a no-op alias for back-compat with anything that read it
+const FRESH_CLASS = 'aggregaytor-fresh'; // v0.57.57: brief invisible-on-arrival for new markers, stripped after first applyFilters tick
+const FILTERING_BODY_CLASS = 'aggregaytor-filtering';
 const HIGHLIGHT_CLASS = 'aggregaytor-highlight';
 const HIGHLIGHT_ATTITUDE_CLASS = 'aggregaytor-highlight-attitude';
 const BADGE_CLASS = 'aggregaytor-chat-badge';
@@ -73,6 +80,13 @@ const manualAttitudes = new Map<string, string>();
 const MANUAL_ATTITUDES_MAX = 1000;
 const markerProfileText = new Map<string, string>();
 const MARKER_PROFILE_TEXT_MAX = 5000;
+// Last-active timestamp per profile (epoch ms). Populated from adapter
+// contact metadata and from the partials API response. Used by the
+// hideInactiveOver2h filter; capped so a long-lived map page doesn't
+// accumulate unbounded entries.
+const markerLastActive = new Map<string, number>();
+const MARKER_LAST_ACTIVE_MAX = 5000;
+const INACTIVE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 function cappedMapSet<V>(map: Map<string, V>, key: string, value: V, cap: number): void {
   map.set(key, value);
@@ -135,6 +149,7 @@ let settings: MapFilterSettings = {
   showChatAgeBadges: false,
   hideRecentChats: false,
   hideAnyChats: false,
+  hideInactiveOver2h: false,
   blockedIds: new Set(),
 };
 
@@ -144,16 +159,50 @@ let _lastSettingsSig = '';
 
 // ── CSS Injection ──────────────────────────────────────────────────────────
 
+// v0.57.58: bumped CSS version-tag so hot-reloads always replace stale
+// CSS. The previous code did `if (existing) return` which kept the
+// v0.57.55 default-hide rule alive on tabs that didn't get refreshed
+// after the extension hot-reload. That caused "all profile photos
+// still hidden" reports even after v0.57.57. Now we use a unique id
+// per CSS revision and remove any prior aggregaytor-map-filter-css*
+// element on each install.
+const FILTER_CSS_ID = 'aggregaytor-map-filter-css-v58';
+
 function injectStyles(): void {
-  if (document.getElementById('aggregaytor-map-filter-css')) return;
+  // Strip any prior CSS revisions (including the stale v0.57.55
+  // default-hide rule). The id prefix scopes the cleanup so we don't
+  // touch unrelated stylesheets.
+  document.querySelectorAll('style[id^="aggregaytor-map-filter-css"]').forEach((el) => {
+    if (el.id !== FILTER_CSS_ID) el.remove();
+  });
+  if (document.getElementById(FILTER_CSS_ID)) return;
   const style = document.createElement('style');
-  style.id = 'aggregaytor-map-filter-css';
+  style.id = FILTER_CSS_ID;
   style.textContent = `
+    /* v0.57.57: per-marker anti-FOUC. The previous v0.57.55 used a
+       body-class default-hide that hid EVERY marker until applyFilters
+       had explicitly tagged it with .aggregaytor-show. That over-fired
+       on markers without extractable IDs (which never made it into
+       idToMarker, so they never got .aggregaytor-show, so they stayed
+       invisible forever). The user reported "all profiles hidden, even
+       after disabling filters."
+       New approach: the MutationObserver tags only BRAND-NEW markers
+       with .aggregaytor-fresh which gives a short opacity:0 grace
+       window. applyFilters then either keeps them hidden via
+       .aggregaytor-hide or strips .aggregaytor-fresh so they fade in.
+       Existing markers stay completely native unless a filter explicitly
+       hides them. Filter-disabled state is now a no-op visually. */
+    .${FRESH_CLASS} {
+      opacity: 0 !important;
+      pointer-events: none !important;
+      transition: opacity 0.18s;
+    }
     .${HIDE_CLASS} {
       display: none !important;
       visibility: hidden !important;
       opacity: 0 !important;
       pointer-events: none !important;
+      transition: opacity 0.18s;
     }
     .${HIGHLIGHT_CLASS} {
       outline: 3px solid #fbbf24 !important;
@@ -605,18 +654,46 @@ function applyFilters(): void {
     (settings.includeEnabled && settings.includeTerms.length > 0) ||
     settings.highlightBottom || settings.highlightVersBottom || settings.highlightVers ||
     settings.highlightVersTop || settings.highlightTop ||
-    settings.showChatAgeBadges;
-  if (!anyFilterOn) return;
+    settings.showChatAgeBadges ||
+    settings.hideInactiveOver2h;
+  // v0.57.57: ALWAYS strip our body class — kept as a defensive guard
+  // in case v0.57.55 left it on someone's page. Per-marker FRESH_CLASS
+  // is the new approach. When no filter is active, also strip every
+  // class we own so markers go back to fully native rendering.
+  // v0.57.60: optional chain — applyFilters can race with very early
+  // page load before <body> exists; document.body is null then.
+  document.body?.classList.remove(FILTERING_BODY_CLASS);
+  if (!anyFilterOn) {
+    for (const marker of idToMarker.values()) {
+      marker.classList.remove(HIDE_CLASS, SHOW_CLASS, FRESH_CLASS, HIGHLIGHT_CLASS, HIGHLIGHT_ATTITUDE_CLASS);
+    }
+    // Also strip FRESH_CLASS from anything in the DOM that the observer
+    // tagged before this scan ran — even markers we couldn't ID need
+    // to come back out of the brief invisible state.
+    document.querySelectorAll(`.${FRESH_CLASS}`).forEach((el) => el.classList.remove(FRESH_CLASS));
+    return;
+  }
   let nMarkers = 0;
   let nHiddenByBlock = 0, nHiddenByText = 0, nHiddenByAttitude = 0;
   let nHiddenByWaiting24h = 0, nHiddenByWaitingEver = 0;
+  let nHiddenByInactive = 0;
   let nWaiting = 0, nActivityEntries = 0;
   nActivityEntries = chatActivity.size;
 
+  // v0.57.59: belt-and-suspenders — strip FRESH_CLASS from EVERY marker
+  // in the DOM, not just the ones that made it into idToMarker. The
+  // previous loop only revealed markers with extractable IDs; markers
+  // whose ID couldn't be parsed (avatarless, mid-render, partial-load)
+  // got tagged FRESH by the MutationObserver but never had FRESH stripped,
+  // so they stayed invisible forever. This sweep happens before the
+  // per-id filter loop so any marker that ends up filtered still gets
+  // HIDE_CLASS afterward.
+  document.querySelectorAll(`.${FRESH_CLASS}`).forEach((el) => el.classList.remove(FRESH_CLASS));
+
   for (const [id, marker] of idToMarker) {
     nMarkers++;
-    // Remove all classes first
-    marker.classList.remove(HIDE_CLASS, HIGHLIGHT_CLASS, HIGHLIGHT_ATTITUDE_CLASS);
+    // Remove all classes first.
+    marker.classList.remove(HIDE_CLASS, SHOW_CLASS, FRESH_CLASS, HIGHLIGHT_CLASS, HIGHLIGHT_ATTITUDE_CLASS);
 
     // Priority 1: manually blocked
     if (settings.blockedIds.has(id)) {
@@ -672,6 +749,22 @@ function applyFilters(): void {
       }
     }
 
+    // Priority 2.75: hide markers whose last platform activity is over the
+    // inactivity threshold. Profiles for which we have no last-active
+    // signal are LEFT VISIBLE — better to under-hide than to hide a
+    // marker that might actually be online but which we just haven't
+    // observed a timestamp for yet (the partials prefetch backfills this
+    // asynchronously, so unknowns become known on the next pass).
+    if (settings.hideInactiveOver2h) {
+      const lastActiveTs = markerLastActive.get(id) || 0;
+      if (lastActiveTs > 0 && (Date.now() - lastActiveTs) > INACTIVE_THRESHOLD_MS) {
+        marker.classList.add(HIDE_CLASS);
+        const b = badgeElements.get(id); if (b) b.style.display = 'none';
+        nHiddenByInactive++;
+        continue;
+      }
+    }
+
     // Priority 3: attitude hiding (uses manual override if set)
     const att = getEffectiveAttitude(id);
     if (shouldHideAttitude(att)) {
@@ -680,6 +773,9 @@ function applyFilters(): void {
       nHiddenByAttitude++;
       continue;
     }
+
+    // v0.57.57: passing marker — no class needed. Native rendering applies.
+    // (FRESH_CLASS, if present, was already stripped above.)
 
     // Not hidden — check highlights
     if (settings.includeEnabled && settings.includeTerms.length) {
@@ -711,17 +807,20 @@ function applyFilters(): void {
     hiddenByAttitude: nHiddenByAttitude,
     hiddenByWaiting24h: nHiddenByWaiting24h,
     hiddenByWaitingEver: nHiddenByWaitingEver,
+    hiddenByInactive: nHiddenByInactive,
+    lastActiveKnown: markerLastActive.size,
     chips: {
       hideRecentChats: settings.hideRecentChats,
       hideAnyChats: settings.hideAnyChats,
+      hideInactiveOver2h: settings.hideInactiveOver2h,
     },
   };
   // Throttle applyFilters logs: only fire when something interesting is
   // happening AND the stats changed since last log. Previously logging on
   // every 6th scan regardless of state → one line of noise every 30s even
   // when nothing changed.
-  if (settings.hideAnyChats || settings.hideRecentChats || nHiddenByBlock || nHiddenByText || nHiddenByAttitude) {
-    const sig = `${nMarkers}/${nActivityEntries}/${nWaiting}/${nHiddenByBlock}/${nHiddenByText}/${nHiddenByAttitude}/${nHiddenByWaiting24h}/${nHiddenByWaitingEver}`;
+  if (settings.hideAnyChats || settings.hideRecentChats || settings.hideInactiveOver2h || nHiddenByBlock || nHiddenByText || nHiddenByAttitude) {
+    const sig = `${nMarkers}/${nActivityEntries}/${nWaiting}/${nHiddenByBlock}/${nHiddenByText}/${nHiddenByAttitude}/${nHiddenByWaiting24h}/${nHiddenByWaitingEver}/${nHiddenByInactive}`;
     if (sig !== _lastAppliedSig) {
       _lastAppliedSig = sig;
       console.log('[Aggregaytor:MapFilters] applyFilters:', stats);
@@ -1005,6 +1104,7 @@ window.addEventListener('__aggregaytor_map_filter_settings', ((event: CustomEven
     hvb: !!update.hideVersBottom, hvt: !!update.hideVersTop,
     hs: !!update.hideSide, hu: !!update.hideUnspecified,
     b: !!update.showChatAgeBadges,
+    in2h: !!update.hideInactiveOver2h,
   });
   if (sig !== _lastSettingsSig) {
     _lastSettingsSig = sig;
@@ -1048,6 +1148,11 @@ window.addEventListener('__aggregaytor_contact_data', ((event: CustomEvent) => {
     if (!id) continue;
     if (c.metadata?.position || c.metadata?.attitude) {
       cappedMapSet(markerAttitudes, id, String(c.metadata.position || c.metadata.attitude), MARKER_ATTITUDES_MAX);
+    }
+    if (typeof c.metadata?.lastActive === 'number' && c.metadata.lastActive > 0) {
+      // Adapter normalises any of {lastactive, last_active, lastSeenAt, …}
+      // into epoch ms via parseTimestamp, so we just cache the number.
+      cappedMapSet(markerLastActive, id, c.metadata.lastActive, MARKER_LAST_ACTIVE_MAX);
     }
     if (c.metadata?.profileText) {
       cappedMapSet(markerProfileText, id, String(c.metadata.profileText), MARKER_PROFILE_TEXT_MAX);
@@ -1184,6 +1289,37 @@ function extractTextFromPartial(p: any): string {
   return bits.join(' ').toLowerCase();
 }
 
+/**
+ * Pull a last-active timestamp out of a partials response object. Tries
+ * each path Sniffies has used historically, plus legacy snake/camelCase
+ * spellings. Returns epoch ms, or 0 when no usable signal was found.
+ *
+ * Number values below 1e12 are interpreted as seconds and upgraded to
+ * milliseconds (matches parseTimestamp() in the adapter).
+ */
+function extractLastActiveFromPartial(p: any): number {
+  const prof = p?.data?.profile || p?.data || p || {};
+  const candidates: unknown[] = [
+    prof.lastActiveAt, prof.lastActive, prof.lastSeenAt, prof.lastSeen,
+    prof.lastOnlineAt, prof.lastOnline, prof.onlineAt,
+    prof.activity?.lastSeenAt, prof.activity?.lastActiveAt,
+    prof.extended?.lastActiveAt, prof.extended?.lastActive,
+    p?.lastActiveAt, p?.lastActive,
+  ];
+  for (const v of candidates) {
+    if (v == null) continue;
+    if (typeof v === 'number') {
+      if (!isFinite(v) || v <= 0) continue;
+      return v < 1e12 ? v * 1000 : v;
+    }
+    if (typeof v === 'string') {
+      const parsed = Date.parse(v);
+      if (!isNaN(parsed)) return parsed;
+    }
+  }
+  return 0;
+}
+
 async function fetchPartialsForIds(ids: string[]): Promise<void> {
   if (!ids.length) return;
   const now = Date.now();
@@ -1228,6 +1364,8 @@ async function fetchPartialsForIds(ids: string[]): Promise<void> {
         }
         const text = extractTextFromPartial(p);
         if (text) cappedMapSet(markerProfileText, id, text, MARKER_PROFILE_TEXT_MAX);
+        const lastActive = extractLastActiveFromPartial(p);
+        if (lastActive > 0) cappedMapSet(markerLastActive, id, lastActive, MARKER_LAST_ACTIVE_MAX);
       }
       if (attitudeCount > 0) {
         console.log(`[Aggregaytor:MapFilters] Partials: fetched ${attitudeCount} attitudes (of ${ids.length} requested)`);
@@ -1357,11 +1495,89 @@ export function initMapFilters(): void {
   // Initial scan after DOM settles
   setTimeout(() => requestAnimationFrame(applyFilters), 3000);
 
+  // v0.57.57: per-marker anti-FOUC. As soon as a marker enters the DOM,
+  // the observer tags it with FRESH_CLASS (opacity:0). The applyFilters
+  // tick that follows ~50ms later strips FRESH_CLASS — either replacing
+  // it with HIDE_CLASS (filtered out, stays invisible) or letting the
+  // marker fade back to native opacity (filtered in). No body-class,
+  // no global default-hide — only the specific marker about to be
+  // evaluated is briefly invisible.
+  // Skipped entirely when no filter is active so the map looks 100%
+  // native in that state.
+  let _moDebounce: ReturnType<typeof setTimeout> | null = null;
+  function anyFilterCurrentlyOn(): boolean {
+    return settings.blockedIds.size > 0 ||
+      (settings.excludeEnabled && settings.excludeTerms.length > 0) ||
+      settings.hideRecentChats || settings.hideAnyChats ||
+      settings.hideBottom || settings.hideVersBottom || settings.hideVers ||
+      settings.hideVersTop || settings.hideTop || settings.hideSide || settings.hideUnspecified ||
+      settings.hideInactiveOver2h;
+  }
+  function tagFresh(el: Element): void {
+    if (!el.classList.contains(HIDE_CLASS) && !el.classList.contains(FRESH_CLASS)) {
+      el.classList.add(FRESH_CLASS);
+    }
+  }
+  try {
+    const mo = new MutationObserver((mutations) => {
+      // If no filter is active, do nothing — the map looks native.
+      if (!anyFilterCurrentlyOn()) return;
+      let saw = false;
+      for (const m of mutations) {
+        for (const node of m.addedNodes) {
+          if (node.nodeType !== Node.ELEMENT_NODE) continue;
+          const el = node as Element;
+          // Tag the new marker (or each marker descendant of an added
+          // wrapper) with FRESH_CLASS synchronously so it's invisible
+          // before the browser's next paint. applyFilters runs ~50ms
+          // later and decides hide-vs-fade-in.
+          if (el.classList?.contains('maplibregl-marker') ||
+              el.classList?.contains('marker-container')) {
+            tagFresh(el); saw = true;
+          }
+          el.querySelectorAll?.('.maplibregl-marker, .marker-container').forEach(tagFresh);
+          if (el.querySelector?.('.maplibregl-marker') || el.querySelector?.('.marker-container')) saw = true;
+        }
+      }
+      if (!saw) return;
+      if (_moDebounce) return;
+      _moDebounce = setTimeout(() => {
+        _moDebounce = null;
+        requestAnimationFrame(applyFilters);
+      }, 50); // bursts of fresh markers collapse into one scan
+    });
+    mo.observe(document.body || document.documentElement, {
+      childList: true, subtree: true,
+    });
+  } catch (err) {
+    console.warn('[Aggregaytor:MapFilters] MutationObserver setup failed:', (err as Error).message);
+  }
+
   // Partials prefetcher — keeps markerAttitudes populated so position
   // filters work for profiles the user hasn't manually opened yet.
   // Rate-limited internally; runs only when a position chip is on.
   setInterval(tickPartialsPrefetch, 4000);
   setTimeout(tickPartialsPrefetch, 5000);
 
-  console.log('[Aggregaytor:MapFilters] Initialized — scanning every 5s');
+  // v0.57.58 one-shot recovery: aggressively strip every aggregaytor-
+  // injected class from every element in the DOM so a stale extension
+  // build (v0.57.55/56 default-hide leftovers, etc) can't keep markers
+  // invisible. Done up-front, before the first applyFilters tick.
+  // v0.57.60: optional chain — sniffies.js is injected at
+  // document_start before <body> exists, so document.body can be null
+  // here. The recovery is harmless to skip in that case (a freshly
+  // loaded page has no aggregaytor classes to recover from yet).
+  document.body?.classList.remove(FILTERING_BODY_CLASS);
+  document.querySelectorAll(
+    `.${SHOW_CLASS}, .${FRESH_CLASS}, .${HIDE_CLASS}, .${HIGHLIGHT_CLASS}, .${HIGHLIGHT_ATTITUDE_CLASS}`
+  ).forEach((el) => {
+    el.classList.remove(SHOW_CLASS, FRESH_CLASS, HIDE_CLASS, HIGHLIGHT_CLASS, HIGHLIGHT_ATTITUDE_CLASS);
+    // Belt-and-suspenders: clear any lingering inline opacity:0 from
+    // older builds that wrote it directly.
+    if ((el as HTMLElement).style?.opacity === '0') {
+      (el as HTMLElement).style.opacity = '';
+    }
+  });
+
+  console.log('[Aggregaytor:MapFilters] Initialized — scanning every 5s + DOM observer for new markers');
 }
