@@ -885,29 +885,33 @@ function injectProfileActionsCSS(): void {
   const s = document.createElement('style');
   s.id = PROFILE_ACTIONS_CSS_ID;
   s.textContent = `
+    /* v0.57.69: vertical column layout. Bar is a narrow column placed to
+       the LEFT of the chat window. Buttons stack vertically and stretch to
+       full column width; stars stay horizontal as a single row inside the
+       column. Width is fixed (140px) so the anchor follower can compute
+       left = chat.left - barWidth - 4 deterministically. The notes and
+       reminder collapse panels fit naturally inside the column since they
+       were already width:100%. */
     #${PROFILE_ACTIONS_ID} {
-      display:flex; flex-wrap:wrap; gap:6px; align-items:center;
-      padding:8px 12px; margin:6px 0;
+      display:flex; flex-direction:column; gap:5px; align-items:stretch;
+      padding:8px 7px; margin:0;
+      width:140px; box-sizing:border-box;
       background:rgba(15,20,25,0.92); border:1px solid rgba(59,130,246,0.35);
       border-radius:8px; font-family:system-ui,sans-serif; font-size:12px; color:#e7e9ea;
       backdrop-filter:blur(6px);
+      max-height:calc(100vh - 16px); overflow-y:auto;
     }
-    /* v0.57.67: floating fallback now defaults to BOTTOM-center so that
-       when no chat container is detected the bar still sits below most
-       Sniffies UI rather than at the top of the viewport. User-driven
-       drag still wins via the saved-position restore below. */
+    /* Floating fallback when no chat container is detected. Pinned to the
+       LEFT side of the viewport, vertically centered, since the bar is a
+       column now. Saved-drag positions still win via the restore code. */
     #${PROFILE_ACTIONS_ID}.pa-floating {
-      position:fixed; bottom:8px; left:50%; transform:translateX(-50%);
-      z-index:2147483646; max-width:calc(100vw - 24px); margin:0;
+      position:fixed; top:50%; left:8px; transform:translateY(-50%);
+      z-index:2147483646; margin:0;
       box-shadow:0 4px 16px rgba(0,0,0,0.5);
     }
-    /* v0.57.67: anchored mode — pinned IMMEDIATELY BELOW the active
-       chat/profile window so it doesn't overlap the message composer.
-       Full border-radius + downward shadow because the bar reads as a
-       detached strip below the chat (was rounded-top-only and upward-
-       shadowed when it sat directly on the container's bottom edge).
-       left/top/width are set inline by the follower; the grip is hidden
-       since the position is computed each frame from the container rect. */
+    /* Anchored mode — pinned to the left of the active chat/profile
+       window. left/top set inline by the follower; height is bounded by
+       the chat's own height (set inline) so the column never overflows. */
     #${PROFILE_ACTIONS_ID}.pa-anchored {
       position:fixed; z-index:2147483646; margin:0;
       box-shadow:0 4px 16px rgba(0,0,0,0.5);
@@ -915,25 +919,40 @@ function injectProfileActionsCSS(): void {
     }
     #${PROFILE_ACTIONS_ID} .pa-grip {
       cursor:move; color:#6b7280; font-size:14px; user-select:none;
-      padding:0 4px; display:none;
+      padding:2px 0; display:none; text-align:center; letter-spacing:2px;
     }
-    #${PROFILE_ACTIONS_ID}.pa-floating .pa-grip { display:inline; }
+    #${PROFILE_ACTIONS_ID}.pa-floating .pa-grip { display:block; }
     #${PROFILE_ACTIONS_ID}.pa-anchored .pa-grip { display:none; }
+    /* Buttons fill the column width; tighter padding suits the narrower
+       footprint than the previous wide-row layout. text-align:left so the
+       emoji + label read as natural action items. */
     #${PROFILE_ACTIONS_ID} .pa-btn {
       background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12);
-      border-radius:6px; padding:4px 10px; color:#e7e9ea; cursor:pointer;
+      border-radius:6px; padding:5px 8px; color:#e7e9ea; cursor:pointer;
       font-size:11px; font-family:inherit; transition:background 0.15s;
+      width:100%; box-sizing:border-box; text-align:left; white-space:nowrap;
+      overflow:hidden; text-overflow:ellipsis;
     }
     #${PROFILE_ACTIONS_ID} .pa-btn:hover { background:rgba(59,130,246,0.2); border-color:rgba(59,130,246,0.4); }
     #${PROFILE_ACTIONS_ID} .pa-btn.danger { border-color:rgba(239,68,68,0.3); color:#f87171; }
     #${PROFILE_ACTIONS_ID} .pa-btn.danger:hover { background:rgba(239,68,68,0.15); }
     #${PROFILE_ACTIONS_ID} .pa-btn:disabled { opacity:0.5; cursor:default; }
-    #${PROFILE_ACTIONS_ID} .pa-stars { display:flex; gap:1px; margin-left:auto; }
+    /* Stars row stays horizontal — 5 stars in one line, centered inside
+       the column. margin-left:auto from the old wide layout would push
+       them off the right edge of a 140px column, so we drop it. */
+    #${PROFILE_ACTIONS_ID} .pa-stars {
+      display:flex; gap:1px; justify-content:center;
+      padding:2px 0; border-top:1px solid rgba(255,255,255,0.06);
+    }
     #${PROFILE_ACTIONS_ID} .pa-star { font-size:15px; cursor:pointer; color:#4b5563; user-select:none; background:none; border:none; padding:0 1px; }
     #${PROFILE_ACTIONS_ID} .pa-star.active { color:#fbbf24; }
     #${PROFILE_ACTIONS_ID} .pa-star:hover { color:#f59e0b; }
+    /* Reminder + notes wraps already had width:100% which works fine in
+       the vertical column. The preset row inside reminder-wrap wraps to
+       multiple lines because 5 chips don't fit one row at 140px wide. */
+    #${PROFILE_ACTIONS_ID} .pa-reminder-wrap,
     #${PROFILE_ACTIONS_ID} .pa-notes-wrap {
-      width:100%; margin-top:4px;
+      width:100%; box-sizing:border-box;
     }
     #${PROFILE_ACTIONS_ID} .pa-notes-input {
       width:100%; box-sizing:border-box; background:rgba(255,255,255,0.05);
@@ -1105,74 +1124,83 @@ function injectProfileActions(contactId: string, platform: string): void {
       if (!anchorContainer.isConnected) {
         el.classList.remove('pa-anchored');
         el.classList.add('pa-floating');
+        // Clear every inline coordinate so the .pa-floating CSS defaults
+        // (top:50% / left:8px / translateY(-50%)) take over. Width is
+        // driven by the column rule too, so explicit clear is fine.
         el.style.left = ''; el.style.bottom = ''; el.style.width = '';
-        el.style.top = ''; el.style.transform = '';
+        el.style.top = ''; el.style.transform = ''; el.style.height = '';
         return;
       }
       const rect = anchorContainer.getBoundingClientRect();
       if (rect.width < 50 || rect.height < 50) {
         el.classList.remove('pa-anchored');
         el.classList.add('pa-floating');
+        // Clear every inline coordinate so the .pa-floating CSS defaults
+        // (top:50% / left:8px / translateY(-50%)) take over. Width is
+        // driven by the column rule too, so explicit clear is fine.
         el.style.left = ''; el.style.bottom = ''; el.style.width = '';
-        el.style.top = ''; el.style.transform = '';
+        el.style.top = ''; el.style.transform = ''; el.style.height = '';
         return;
       }
-      // v0.57.68: position priority — below container, then above, then
-      // detach to free-floating top-center. The earlier viewport-bottom
-      // fallback was the actual bug the user reported (\"covering the
-      // bottom row of buttons\"): on Sniffies layouts where the chat
-      // container reaches the viewport bottom AND starts near the top,
-      // BOTH the below-and-above branches failed and we'd plant the bar
-      // at the bottom edge of the viewport — landing right on top of
-      // Sniffies' message composer. The replacement gives up the
-      // anchor when neither side has room and switches to floating
-      // top-center instead, which never overlaps the chat composer at
-      // the bottom of the panel.
-      const left = Math.round(Math.max(4, rect.left + 4));
-      const width = Math.round(Math.max(180, Math.min(rect.width - 8, window.innerWidth - 8)));
-      const barH = el.offsetHeight || 44; // measured after first layout; 44 is a safe default
-      const gapBelow = window.innerHeight - rect.bottom;
-      let top: number;
-      if (gapBelow >= barH + 8) {
-        // Plenty of room beneath the chat container — sit just below it.
-        top = Math.round(rect.bottom + 4);
-      } else if (rect.top >= barH + 8) {
-        // No room below; tuck above the chat container as the next-best
-        // location. Still doesn't overlap the chat composer.
-        top = Math.round(rect.top - barH - 4);
+      // v0.57.69: vertical column placed to the LEFT of the chat container.
+      // The bar is a fixed-width column (matched in CSS); we just compute
+      // left = chat.left - barWidth - 4 each frame so it tracks the chat
+      // panel as Sniffies animates it open/closed. Two fallbacks:
+      //   - If gapLeft is too small (chat hugs the viewport's left edge),
+      //     try the RIGHT side (left = rect.right + 4)
+      //   - If neither side has room, give up the anchor and dock to the
+      //     viewport's top-left corner (free-floating column with grip).
+      const barW = el.offsetWidth || 140;
+      const gapLeft = rect.left;
+      const gapRight = window.innerWidth - rect.right;
+      let left: number;
+      let mode: string;
+      if (gapLeft >= barW + 8) {
+        left = Math.round(rect.left - barW - 4);
+        mode = 'left';
+      } else if (gapRight >= barW + 8) {
+        left = Math.round(rect.right + 4);
+        mode = 'right';
       } else {
-        // Container fills the viewport entirely. Anchor isn't viable —
-        // switch to free-floating mode and ANCHOR THE TOP of the viewport
-        // (NOT the bottom, which is where the chat composer lives). User
-        // can drag from there.
+        // No room either side — detach to floating top-left. The column
+        // doesn't fit alongside the chat, so we let the user drag it.
         el.classList.remove('pa-anchored');
         el.classList.add('pa-floating');
-        // Park at top-center via inline style; .pa-floating defaults to
-        // bottom:8px which would still overlap the composer.
-        el.style.left = '50%';
+        el.style.left = '8px';
         el.style.top = '8px';
         el.style.bottom = 'auto';
-        el.style.transform = 'translateX(-50%)';
+        el.style.transform = 'none';
         el.style.width = '';
+        el.style.height = '';
         return;
       }
-      if (left !== lastL || top !== lastB || width !== lastW) {
+      // Vertical alignment: pin the column's top to the chat's top edge,
+      // then cap its height at the chat's height so it never extends
+      // past the bottom of the chat (and never grows taller than the
+      // viewport with the max-height in CSS).
+      const top = Math.round(Math.max(8, rect.top));
+      const height = Math.round(Math.max(120, Math.min(rect.height, window.innerHeight - 16)));
+      if (left !== lastL || top !== lastB || height !== lastW) {
         el.style.left = `${left}px`;
         el.style.top = `${top}px`;
         el.style.bottom = 'auto';
-        el.style.width = `${width}px`;
-        lastL = left; lastB = top; lastW = width;
+        el.style.height = `${height}px`;
+        // Width stays driven by the CSS rule (140px); clear any inline
+        // width set by an earlier-version build.
+        el.style.width = '';
+        lastL = left; lastB = top; lastW = height;
       }
-      // v0.57.68: one-shot diagnostic so we can see exactly which branch
-      // fired and what dimensions the chat container reported. Logs once
-      // per tick-shape change (left/top/width tuple), not every frame.
-      if (!(el as any)._lastDiagSig || (el as any)._lastDiagSig !== `${left}_${top}_${width}`) {
-        (el as any)._lastDiagSig = `${left}_${top}_${width}`;
+      // One-shot diagnostic when placement shape changes — useful if the
+      // bar still ends up wrong on a layout we haven't seen, the log
+      // tells us the chat container's rect and which branch we picked.
+      if (!(el as any)._lastDiagSig || (el as any)._lastDiagSig !== `${mode}_${left}_${top}_${height}`) {
+        (el as any)._lastDiagSig = `${mode}_${left}_${top}_${height}`;
         console.log('[Aggregaytor] anchor placement', {
-          containerRect: { top: Math.round(rect.top), bottom: Math.round(rect.bottom), left: Math.round(rect.left), width: Math.round(rect.width), height: Math.round(rect.height) },
-          gapBelow: Math.round(gapBelow), gapAbove: Math.round(rect.top), barH,
-          placed: { top, left, width },
-          mode: gapBelow >= barH + 8 ? 'below' : rect.top >= barH + 8 ? 'above' : 'detached-top',
+          containerRect: { top: Math.round(rect.top), bottom: Math.round(rect.bottom), left: Math.round(rect.left), right: Math.round(rect.right), width: Math.round(rect.width), height: Math.round(rect.height) },
+          gaps: { left: Math.round(gapLeft), right: Math.round(gapRight) },
+          barW,
+          placed: { top, left, height },
+          mode,
           containerTag: anchorContainer.tagName + (anchorContainer.className ? '.' + String(anchorContainer.className).split(' ').slice(0, 2).join('.') : ''),
         });
       }
@@ -1191,7 +1219,7 @@ function injectProfileActions(contactId: string, platform: string): void {
     // any stale saved position once so the new bottom-center default
     // takes effect for everyone. Future user drags re-save under the
     // version-keyed scheme.
-    const POS_VERSION = 'v0.57.67';
+    const POS_VERSION = 'v0.57.69';
     try {
       if (localStorage.getItem('aggregaytor_pa_floating_pos_version') !== POS_VERSION) {
         localStorage.removeItem('aggregaytor_pa_floating_pos');
