@@ -1117,15 +1117,17 @@ function injectProfileActions(contactId: string, platform: string): void {
         el.style.top = ''; el.style.transform = '';
         return;
       }
-      // v0.57.67: position the bar IMMEDIATELY BELOW the container instead
-      // of inside its bottom edge. The previous "just above container's
-      // bottom" placement landed on top of Sniffies' message-input
-      // composer; users couldn't tell whether they were clicking our bar
-      // or their own send button. Now the bar sits as a separate strip
-      // beneath the chat window. Three placement strategies in priority
-      // order: below the container (normal), above when the container
-      // hugs the viewport bottom (rare), or pinned to viewport bottom as
-      // a last resort if the container fills the screen.
+      // v0.57.68: position priority — below container, then above, then
+      // detach to free-floating top-center. The earlier viewport-bottom
+      // fallback was the actual bug the user reported (\"covering the
+      // bottom row of buttons\"): on Sniffies layouts where the chat
+      // container reaches the viewport bottom AND starts near the top,
+      // BOTH the below-and-above branches failed and we'd plant the bar
+      // at the bottom edge of the viewport — landing right on top of
+      // Sniffies' message composer. The replacement gives up the
+      // anchor when neither side has room and switches to floating
+      // top-center instead, which never overlaps the chat composer at
+      // the bottom of the panel.
       const left = Math.round(Math.max(4, rect.left + 4));
       const width = Math.round(Math.max(180, Math.min(rect.width - 8, window.innerWidth - 8)));
       const barH = el.offsetHeight || 44; // measured after first layout; 44 is a safe default
@@ -1135,11 +1137,24 @@ function injectProfileActions(contactId: string, platform: string): void {
         // Plenty of room beneath the chat container — sit just below it.
         top = Math.round(rect.bottom + 4);
       } else if (rect.top >= barH + 8) {
-        // Container reaches viewport bottom; tuck above as escape.
+        // No room below; tuck above the chat container as the next-best
+        // location. Still doesn't overlap the chat composer.
         top = Math.round(rect.top - barH - 4);
       } else {
-        // Container fills the viewport entirely — fallback to bottom edge.
-        top = Math.round(window.innerHeight - barH - 4);
+        // Container fills the viewport entirely. Anchor isn't viable —
+        // switch to free-floating mode and ANCHOR THE TOP of the viewport
+        // (NOT the bottom, which is where the chat composer lives). User
+        // can drag from there.
+        el.classList.remove('pa-anchored');
+        el.classList.add('pa-floating');
+        // Park at top-center via inline style; .pa-floating defaults to
+        // bottom:8px which would still overlap the composer.
+        el.style.left = '50%';
+        el.style.top = '8px';
+        el.style.bottom = 'auto';
+        el.style.transform = 'translateX(-50%)';
+        el.style.width = '';
+        return;
       }
       if (left !== lastL || top !== lastB || width !== lastW) {
         el.style.left = `${left}px`;
@@ -1147,6 +1162,19 @@ function injectProfileActions(contactId: string, platform: string): void {
         el.style.bottom = 'auto';
         el.style.width = `${width}px`;
         lastL = left; lastB = top; lastW = width;
+      }
+      // v0.57.68: one-shot diagnostic so we can see exactly which branch
+      // fired and what dimensions the chat container reported. Logs once
+      // per tick-shape change (left/top/width tuple), not every frame.
+      if (!(el as any)._lastDiagSig || (el as any)._lastDiagSig !== `${left}_${top}_${width}`) {
+        (el as any)._lastDiagSig = `${left}_${top}_${width}`;
+        console.log('[Aggregaytor] anchor placement', {
+          containerRect: { top: Math.round(rect.top), bottom: Math.round(rect.bottom), left: Math.round(rect.left), width: Math.round(rect.width), height: Math.round(rect.height) },
+          gapBelow: Math.round(gapBelow), gapAbove: Math.round(rect.top), barH,
+          placed: { top, left, width },
+          mode: gapBelow >= barH + 8 ? 'below' : rect.top >= barH + 8 ? 'above' : 'detached-top',
+          containerTag: anchorContainer.tagName + (anchorContainer.className ? '.' + String(anchorContainer.className).split(' ').slice(0, 2).join('.') : ''),
+        });
       }
       rafId = requestAnimationFrame(tick);
     };
