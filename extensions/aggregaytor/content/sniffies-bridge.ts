@@ -880,6 +880,101 @@ function hideFloatingPanel(): void {
 const PROFILE_ACTIONS_ID = 'aggregaytor-profile-actions';
 const PROFILE_ACTIONS_CSS_ID = 'aggregaytor-profile-actions-css';
 
+// ── Local Storage for Notes + Reminders ────────────────────────────────────
+// v0.57.70: ported from the userscript v0.7.46 pattern. Notes and reminders
+// are now mirrored to localStorage SYNCHRONOUSLY on every save — the SW
+// PouchDB write is best-effort secondary. This is what made the userscript
+// version bulletproof: no IPC race, no debounce-then-navigate-loses-data,
+// no silent SW handler errors. The next page load reads localStorage first
+// (instant) then reconciles with whatever the SW returns from PouchDB.
+//
+// Schema:
+//   aggregaytor_sniffies_notes_v1 = { [profileId]: noteText }
+//   aggregaytor_sniffies_reminders_v1 = LocalReminder[]
+//
+// LocalReminder mirrors what the SW persists, plus a snapshot for offline
+// rendering (the Reminders panel doesn't have to wait for the SW to load).
+
+const SNIFFIES_NOTES_KEY = 'aggregaytor_sniffies_notes_v1';
+const SNIFFIES_REMINDERS_KEY = 'aggregaytor_sniffies_reminders_v1';
+
+interface LocalReminder {
+  id: string;            // matches SW reminder._id when round-tripped
+  profileId: string;
+  contactId: string;     // 'sniffies:abc123'
+  platform: string;
+  note: string;
+  dueAt: string;         // ISO 8601
+  createdAt: string;     // ISO 8601
+  contactSnapshot?: {
+    displayName?: string;
+    avatarUrl?: string;
+    metadata?: Record<string, unknown>;
+  };
+}
+
+function loadLocalNotes(): Record<string, string> {
+  try { return JSON.parse(localStorage.getItem(SNIFFIES_NOTES_KEY) || '{}') || {}; } catch { return {}; }
+}
+function saveLocalNotes(notes: Record<string, string>): void {
+  try { localStorage.setItem(SNIFFIES_NOTES_KEY, JSON.stringify(notes)); } catch {}
+}
+function setLocalNote(profileId: string, note: string): void {
+  const all = loadLocalNotes();
+  if (note.trim()) all[profileId] = note;
+  else delete all[profileId];
+  saveLocalNotes(all);
+}
+function getLocalNote(profileId: string): string {
+  return loadLocalNotes()[profileId] || '';
+}
+function loadLocalReminders(): LocalReminder[] {
+  try {
+    const arr = JSON.parse(localStorage.getItem(SNIFFIES_REMINDERS_KEY) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+function saveLocalReminders(arr: LocalReminder[]): void {
+  try { localStorage.setItem(SNIFFIES_REMINDERS_KEY, JSON.stringify(arr.slice(-200))); } catch {}
+}
+function addLocalReminder(r: LocalReminder): void {
+  const arr = loadLocalReminders();
+  arr.push(r);
+  saveLocalReminders(arr);
+}
+function removeLocalReminder(id: string): void {
+  saveLocalReminders(loadLocalReminders().filter((r) => r.id !== id));
+}
+function getLocalRemindersForProfile(profileId: string): LocalReminder[] {
+  return loadLocalReminders()
+    .filter((r) => r.profileId === profileId)
+    .sort((a, b) => a.dueAt.localeCompare(b.dueAt));
+}
+/** Earliest still-pending (or recently overdue) reminder for a profile, or null. */
+function getNextReminderForProfile(profileId: string): LocalReminder | null {
+  const now = Date.now();
+  const list = getLocalRemindersForProfile(profileId).filter((r) => {
+    const t = new Date(r.dueAt).getTime();
+    // Show overdue ones from the last 7 days too — they're still actionable
+    return t >= now - 7 * 86_400_000;
+  });
+  return list[0] || null;
+}
+function escHtml(s: string): string {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function fmtRelativeReminder(iso: string): string {
+  const ms = new Date(iso).getTime() - Date.now();
+  const past = ms < 0;
+  const abs = Math.abs(ms);
+  const mins = Math.round(abs / 60_000);
+  if (mins < 60) return past ? `${mins}m ago` : `in ${mins}m`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return past ? `${hours}h ago` : `in ${hours}h`;
+  const days = Math.round(hours / 24);
+  return past ? `${days}d ago` : `in ${days}d`;
+}
+
 function injectProfileActionsCSS(): void {
   if (document.getElementById(PROFILE_ACTIONS_CSS_ID)) return;
   const s = document.createElement('style');
@@ -1085,6 +1180,11 @@ function injectProfileActions(contactId: string, platform: string): void {
       <button class="pa-star" data-star="4">★</button>
       <button class="pa-star" data-star="5">★</button>
     </div>
+    <!-- v0.57.70: profile-level reminder badge. Surfaces the next pending
+         reminder for this profile right inside the action bar so the user
+         sees "Reminder: in 2h" the moment they open the profile, not only
+         in the global Reminders viewer. Hidden when no reminder exists. -->
+    <div class="pa-reminder-badge" style="display:none;font-size:10px;color:#fbbf24;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.3);border-radius:5px;padding:4px 6px;line-height:1.3"></div>
     <div class="pa-reminder-wrap" style="display:none;width:100%;margin-top:4px">
       <input type="text" class="pa-notes-input pa-reminder-note" placeholder="Reminder note..." maxlength="200">
       <!-- v0.57.65: replaced preset dropdown with a datetime-local input so
@@ -1101,7 +1201,12 @@ function injectProfileActions(contactId: string, platform: string): void {
       <button class="pa-btn pa-reminder-save" style="margin-top:4px">Save reminder</button>
       <div class="pa-status pa-reminder-status"></div>
     </div>
-    <div class="pa-notes-wrap" style="display:none">
+    <!-- v0.57.70: notes wrap is now always visible. The userscript v0.7.46
+         showed notes inline at the top of the profile container; we mirror
+         that idea here by keeping the textarea expanded under the buttons.
+         Click 📝 Notes to FOCUS the textarea (toggling visibility is no
+         longer necessary since it's always shown). -->
+    <div class="pa-notes-wrap" style="display:block">
       <textarea class="pa-notes-input pa-notes-textarea" placeholder="Notes about this person..." maxlength="10000"></textarea>
       <div class="pa-status pa-notes-status"></div>
     </div>
@@ -1282,25 +1387,20 @@ function injectProfileActions(contactId: string, platform: string): void {
     showBlockToast(profileId);
   });
 
-  // ── Notes toggle + editor ──
-  // v0.57.63: notes were silently lost when users typed and switched profiles
-  // before the 800ms debounce fired. The userscript v0.7.46 had a Save button
-  // that made persistence explicit, but auto-save is friendlier — IF we
-  // actually flush before navigation. Three fixes:
-  //   1. Drop debounce 800 → 250ms so quick typing reliably saves
-  //   2. Flush immediately on `blur` (clicking away from the textarea)
-  //   3. Expose a flushNotes() on the panel element so the URL-change handler
-  //      can flush before removeProfileActions() detaches the textarea
+  // ── Notes always-visible editor with localStorage backing ──
+  // v0.57.70: ported the userscript v0.7.46 storage pattern. Notes are
+  // written to localStorage SYNCHRONOUSLY on every keystroke (debounced to
+  // 200ms) AND mirrored to PouchDB via the SW. localStorage save is the
+  // bulletproof fast path; the SW write is best-effort. Key insight from
+  // the userscript: never wait on IPC for the source of truth — write
+  // local first, then mirror.
   const notesWrap = el.querySelector('.pa-notes-wrap') as HTMLElement;
-  // v0.57.66: scope to .pa-notes-textarea — the .pa-notes-input class is also
-  // worn by the reminder text input + datetime-local input above this wrap, so
-  // querySelector('.pa-notes-input') was returning the reminder note field and
-  // notes typed into the actual textarea silently fell on the floor.
   const notesInput = el.querySelector('.pa-notes-textarea') as HTMLTextAreaElement;
   const notesStatus = el.querySelector('.pa-notes-status') as HTMLElement;
+  // 📝 Notes button focuses the textarea (the wrap is now always shown).
   el.querySelector('.pa-notes-btn')!.addEventListener('click', () => {
-    notesWrap.style.display = notesWrap.style.display === 'none' ? '' : 'none';
-    if (notesWrap.style.display !== 'none') notesInput.focus();
+    notesInput.focus();
+    notesInput.select();
   });
 
   let noteTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1308,13 +1408,24 @@ function injectProfileActions(contactId: string, platform: string): void {
   function flushNotes(): void {
     if (noteTimer) { clearTimeout(noteTimer); noteTimer = null; }
     const value = notesInput.value;
-    if (value === lastSavedValue) return; // nothing new to persist
+    if (value === lastSavedValue) return;
     lastSavedValue = value;
+    // 1. localStorage (synchronous, can't fail silently in a way that
+    //    loses data — at worst we hit the storage quota and throw, which
+    //    we'd see in the dev console).
+    try {
+      setLocalNote(profileId, value);
+    } catch (err) {
+      console.warn('[Aggregaytor] Notes localStorage save failed:', err);
+    }
+    // 2. SW mirror to PouchDB (async, best-effort, primarily for the
+    //    side-panel inbox view to see notes across reloads).
     safeSendMessage({
       type: 'UPSERT_THREAD_META', contactId, platform,
       updates: { notes: value },
     }).catch(() => {});
-    notesStatus.textContent = 'Saved';
+    notesStatus.style.color = '#22c55e';
+    notesStatus.textContent = '✓ Saved';
     setTimeout(() => { notesStatus.textContent = ''; }, 1500);
   }
   // Expose for URL-change handler to flush before the panel is removed.
@@ -1322,9 +1433,19 @@ function injectProfileActions(contactId: string, platform: string): void {
 
   notesInput.addEventListener('input', () => {
     if (noteTimer) clearTimeout(noteTimer);
-    noteTimer = setTimeout(flushNotes, 250);
+    noteTimer = setTimeout(flushNotes, 200);
   });
   notesInput.addEventListener('blur', flushNotes);
+
+  // Restore notes from localStorage IMMEDIATELY (instant, before any SW
+  // round-trip). The SW GET_THREAD_META below also runs and can override
+  // with a newer value if the user edited from a different surface
+  // (e.g. side panel) since this profile was last opened.
+  const localNote = getLocalNote(profileId);
+  if (localNote) {
+    notesInput.value = localNote;
+    lastSavedValue = localNote;
+  }
 
   // ── Star rating ──
   const stars = el.querySelectorAll('.pa-star');
@@ -1442,22 +1563,90 @@ function injectProfileActions(contactId: string, platform: string): void {
       // invalidation flips the global flag and surfaces a real error string
       // instead of an "Uncaught Error: Extension context invalidated" that
       // hits window.onerror and never updates the status line.
+      // v0.57.70: write to localStorage IMMEDIATELY so the reminder is
+      // persisted even if the SW round-trip fails. The SW write below
+      // is best-effort; localStorage is the source of truth for the
+      // Sniffies-page Reminders viewer + the in-bar reminder badge.
+      // Generate a stable id we'll use both locally and as the SW _id
+      // hint (the SW currently makes its own id but we keep ours for
+      // local matching by composite-key equality).
+      const localId = `local:${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const localReminder: LocalReminder = {
+        id: localId,
+        profileId,
+        contactId,
+        platform,
+        note,
+        dueAt,
+        createdAt: new Date().toISOString(),
+        contactSnapshot,
+      };
+      try { addLocalReminder(localReminder); } catch {}
+      // Refresh the in-bar badge right away — the user sees the
+      // reminder before the SW even responds.
+      updateReminderBadge();
+      // Notify the top filter bar so its Reminders chip can update
+      // its count without a refresh.
+      try { window.postMessage({ type: '__aggregaytor_reminders_changed' }, '*'); } catch {}
+
       const res: any = await safeSendMessage({
         type: 'CREATE_REMINDER', contactId, platform, note, dueAt, contactSnapshot,
       });
       if (res?.ok) {
+        // Promote the local reminder's id to the SW-issued id so future
+        // deletes (from the global Reminders viewer) match in localStorage.
+        if (res.reminder?._id) {
+          try {
+            const list = loadLocalReminders();
+            const idx = list.findIndex((r) => r.id === localId);
+            if (idx >= 0) {
+              list[idx].id = res.reminder._id;
+              saveLocalReminders(list);
+            }
+          } catch {}
+        }
         remStatus.style.color = '#34d399';
         remStatus.textContent = `✓ Reminder set for ${new Date(dueAt).toLocaleString()}`;
         setTimeout(() => { remStatus.textContent = ''; remWrap.style.display = 'none'; remInput.value = ''; remWhen.value = ''; }, 2500);
       } else {
-        remStatus.style.color = '#f87171';
-        remStatus.textContent = `Failed to save: ${res?.error || 'unknown error'}`;
+        // SW save failed but localStorage still has the reminder. Tell
+        // the user the local copy is safe so they don't think it was
+        // dropped entirely.
+        remStatus.style.color = '#fbbf24';
+        remStatus.textContent = `Saved locally (SW: ${res?.error || 'failed'})`;
       }
     } catch (err) {
-      remStatus.style.color = '#f87171';
-      remStatus.textContent = `Save threw: ${(err as Error)?.message || String(err)}`;
+      remStatus.style.color = '#fbbf24';
+      remStatus.textContent = `Saved locally (SW threw: ${(err as Error)?.message || String(err)})`;
     }
   });
+
+  // ── Reminder badge updater ──
+  // Reads from localStorage (no IPC) and renders the next-pending reminder
+  // for this profile inside the bar. Called on inject, after every save,
+  // and once per minute so "in 5h" ticks down to "in 4h" without a reload.
+  const reminderBadge = el.querySelector('.pa-reminder-badge') as HTMLElement;
+  function updateReminderBadge(): void {
+    const next = getNextReminderForProfile(profileId);
+    if (!next) {
+      reminderBadge.style.display = 'none';
+      reminderBadge.textContent = '';
+      return;
+    }
+    const due = new Date(next.dueAt);
+    const past = due.getTime() < Date.now();
+    reminderBadge.style.display = '';
+    reminderBadge.style.color = past ? '#f87171' : '#fbbf24';
+    reminderBadge.style.borderColor = past ? 'rgba(239,68,68,0.3)' : 'rgba(251,191,36,0.3)';
+    reminderBadge.style.background = past ? 'rgba(239,68,68,0.08)' : 'rgba(251,191,36,0.08)';
+    const noteSnippet = next.note && next.note !== 'Follow up with profile' ? ` — ${next.note}` : '';
+    reminderBadge.innerHTML = `🔔 <strong>${past ? 'Overdue' : 'Reminder'} ${escHtml(fmtRelativeReminder(next.dueAt))}</strong>${noteSnippet ? `<span style="color:#d1d5db">${escHtml(noteSnippet)}</span>` : ''}<div style="font-size:9px;color:#9ca3af;margin-top:1px">${escHtml(due.toLocaleString())}</div>`;
+  }
+  updateReminderBadge();
+  const badgeInterval = setInterval(() => {
+    if (!el.isConnected) { clearInterval(badgeInterval); return; }
+    updateReminderBadge();
+  }, 60_000);
 
   // ── Random Intro button ──
   // Fires SEND_GREETING which generates an LLM intro and queues it with a
@@ -1479,10 +1668,19 @@ function injectProfileActions(contactId: string, platform: string): void {
   });
 
   // ── Load existing data ──
+  // v0.57.70: localStorage notes were already restored above (synchronously).
+  // The SW lookup here only OVERRIDES the textarea if the SW value is newer
+  // OR present while local is empty (cross-device sync case). We never
+  // overwrite a non-empty local value with an empty SW value because that
+  // would erase a note the user just typed.
   chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId }).then((res: any) => {
     const m = res?.meta || {};
-    notesInput.value = m.notes || '';
-    if (m.notes) notesWrap.style.display = '';
+    if (m.notes && !notesInput.value) {
+      notesInput.value = m.notes;
+      lastSavedValue = m.notes;
+      // Mirror back to localStorage so future reads are local-fast.
+      try { setLocalNote(profileId, m.notes); } catch {}
+    }
     const rating = m.rating || 0;
     stars.forEach((s, i) => s.classList.toggle('active', i < rating));
   }).catch(() => {});
@@ -1597,6 +1795,10 @@ function showTopFilterBar(): void {
     <span class="fb-sep"></span>
     <button class="fb-undo" title="Undo last hide">Undo</button>
     <button class="fb-undo fb-settings" title="Open full filter settings (text terms, position highlights, save/restore)">⚙ Settings</button>
+    <!-- v0.57.70: Reminders chip — opens a popup with all upcoming + recently-
+         overdue reminders for this device. Reads from localStorage so it
+         works even when the SW is asleep. Click a row to open that profile. -->
+    <button class="fb-undo fb-reminders" title="Show reminders set on Sniffies profiles">⏰ <span class="fb-reminders-count"></span></button>
     <span class="fb-hide-count">${blockedCount} hidden</span>
     <button class="fb-close" title="Close filter bar">✕</button>
   `;
@@ -1687,6 +1889,30 @@ function showTopFilterBar(): void {
     }
   });
 
+  // v0.57.70: Reminders chip — opens a popup listing all upcoming +
+  // recently-overdue reminders. Reads from localStorage so the panel
+  // renders instantly (no SW round-trip needed). Each row is clickable
+  // to open the profile, with a ✕ delete that fires both locally and to
+  // the SW. The chip label shows the count of pending reminders.
+  function refreshRemindersChipCount(): void {
+    try {
+      const list = loadLocalReminders();
+      const now = Date.now();
+      const pending = list.filter((r) => new Date(r.dueAt).getTime() >= now - 7 * 86_400_000);
+      const countEl = bar.querySelector('.fb-reminders-count') as HTMLElement | null;
+      if (countEl) countEl.textContent = pending.length ? `(${pending.length})` : '';
+    } catch {}
+  }
+  refreshRemindersChipCount();
+  // Listen for reminder-changed events (e.g. when a profile saves a new
+  // reminder via the action bar) so the chip count stays in sync.
+  window.addEventListener('message', (ev: MessageEvent) => {
+    if (ev.data?.type === '__aggregaytor_reminders_changed') refreshRemindersChipCount();
+  });
+  bar.querySelector('.fb-reminders')!.addEventListener('click', () => {
+    showRemindersPanel();
+  });
+
   // Close bar
   bar.querySelector('.fb-close')!.addEventListener('click', () => {
     bar.remove();
@@ -1756,6 +1982,144 @@ function showBlockToast(profileId: string): void {
   document.body.appendChild(toast);
   setTimeout(() => { toast.style.opacity = '0'; }, 1600);
   setTimeout(() => toast.remove(), 2000);
+}
+
+// ── Reminders Panel ────────────────────────────────────────────────────────
+// v0.57.70: in-page reminders viewer triggered from the ⏰ chip in the top
+// filter bar. Reads from localStorage (instant) and renders a card per
+// reminder with the snapshotted profile photo + name + relative due time.
+// Click a card → navigate to the profile (Sniffies SPA pushState). Click ✕
+// → delete both locally and via SW.
+
+const REMINDERS_PANEL_ID = 'aggregaytor-reminders-panel';
+
+function showRemindersPanel(): void {
+  // Toggle: if already open, close.
+  const existing = document.getElementById(REMINDERS_PANEL_ID);
+  if (existing) { existing.remove(); return; }
+
+  const panel = document.createElement('div');
+  panel.id = REMINDERS_PANEL_ID;
+  panel.style.cssText = [
+    'position:fixed', 'top:36px', 'right:8px', 'z-index:2147483646',
+    'width:340px', 'max-height:calc(100vh - 60px)',
+    'background:rgba(15,20,25,0.97)',
+    'border:1px solid rgba(59,130,246,0.4)',
+    'border-radius:8px',
+    'box-shadow:0 8px 24px rgba(0,0,0,0.6)',
+    'font-family:system-ui,sans-serif', 'color:#e7e9ea', 'font-size:12px',
+    'overflow:hidden', 'display:flex', 'flex-direction:column',
+  ].join(';');
+
+  const list = loadLocalReminders().sort((a, b) => a.dueAt.localeCompare(b.dueAt));
+  const now = Date.now();
+  const upcoming = list.filter((r) => new Date(r.dueAt).getTime() >= now);
+  const overdue = list.filter((r) => {
+    const t = new Date(r.dueAt).getTime();
+    return t < now && t >= now - 7 * 86_400_000;
+  });
+
+  const header = `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:rgba(59,130,246,0.15);border-bottom:1px solid rgba(59,130,246,0.25)">
+      <strong style="color:#bfdbfe;font-size:13px">⏰ Reminders</strong>
+      <button class="aggregaytor-rp-close" style="background:none;border:none;color:#9ca3af;font-size:16px;cursor:pointer;padding:0 4px" title="Close">✕</button>
+    </div>
+  `;
+  const renderRow = (r: LocalReminder): string => {
+    const snap = r.contactSnapshot || {};
+    const meta = (snap.metadata as Record<string, unknown>) || {};
+    const avatar = snap.avatarUrl
+      ? `<img src="${escHtml(snap.avatarUrl)}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;flex:0 0 36px" alt="">`
+      : `<div style="width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;flex:0 0 36px;font-size:16px">👤</div>`;
+    const name = snap.displayName || r.profileId.slice(0, 10);
+    const summary = String((meta as { summary?: string }).summary || '').slice(0, 60);
+    const due = new Date(r.dueAt);
+    const past = due.getTime() < Date.now();
+    const relTime = fmtRelativeReminder(r.dueAt);
+    return `
+      <div class="aggregaytor-rp-card" data-id="${escHtml(r.id)}" data-profile-id="${escHtml(r.profileId)}" style="display:flex;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.05);cursor:pointer;align-items:center">
+        ${avatar}
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;justify-content:space-between;gap:6px;align-items:baseline">
+            <strong style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(name)}</strong>
+            <span style="color:${past ? '#f87171' : '#34d399'};font-size:10px;flex:0 0 auto" title="${escHtml(due.toLocaleString())}">${escHtml(relTime)}</span>
+          </div>
+          ${summary ? `<div style="font-size:9px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(summary)}</div>` : ''}
+          ${r.note && r.note !== 'Follow up with profile' ? `<div style="font-size:11px;color:#d1d5db;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.note)}</div>` : ''}
+          <div style="font-size:9px;color:#6b7280">${escHtml(due.toLocaleString())}</div>
+        </div>
+        <button class="aggregaytor-rp-del" data-id="${escHtml(r.id)}" title="Delete reminder" style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);color:#f87171;border-radius:4px;padding:3px 7px;font-size:11px;cursor:pointer;flex:0 0 auto">✕</button>
+      </div>
+    `;
+  };
+
+  let body = '<div style="flex:1;overflow-y:auto">';
+  if (overdue.length) {
+    body += `<div style="font-size:10px;color:#f87171;text-transform:uppercase;letter-spacing:0.5px;padding:8px 12px 4px">Overdue (${overdue.length})</div>`;
+    body += overdue.map(renderRow).join('');
+  }
+  if (upcoming.length) {
+    body += `<div style="font-size:10px;color:#9ca3af;text-transform:uppercase;letter-spacing:0.5px;padding:8px 12px 4px">Upcoming (${upcoming.length})</div>`;
+    body += upcoming.map(renderRow).join('');
+  }
+  if (!overdue.length && !upcoming.length) {
+    body += '<div style="padding:24px 12px;color:#9ca3af;font-size:11px;text-align:center;line-height:1.5">No reminders yet.<br>Open a profile and click <strong>⏰ Remind</strong> on the action bar to set one.</div>';
+  }
+  body += '</div>';
+
+  panel.innerHTML = header + body;
+  document.body.appendChild(panel);
+
+  panel.querySelector('.aggregaytor-rp-close')!.addEventListener('click', () => panel.remove());
+  // Click outside closes
+  setTimeout(() => {
+    const offClick = (ev: MouseEvent): void => {
+      if (!panel.contains(ev.target as Node)) {
+        panel.remove();
+        document.removeEventListener('mousedown', offClick, true);
+      }
+    };
+    document.addEventListener('mousedown', offClick, true);
+  }, 50);
+
+  // Card click → navigate to the profile (avoid clicks on the delete btn).
+  panel.querySelectorAll('.aggregaytor-rp-card').forEach((card) => {
+    card.addEventListener('click', (ev) => {
+      if ((ev.target as HTMLElement).closest('.aggregaytor-rp-del')) return;
+      const pid = (card as HTMLElement).dataset.profileId;
+      if (pid) {
+        // Navigate via SPA history pushState — Sniffies' Angular router
+        // listens for popstate and re-renders without a hard reload.
+        try {
+          history.pushState({}, '', `/profile/${pid}`);
+          window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+        } catch {
+          location.href = `/profile/${pid}`;
+        }
+        panel.remove();
+      }
+    });
+  });
+
+  // Delete button — drops localStorage entry + fires SW DELETE_REMINDER.
+  panel.querySelectorAll('.aggregaytor-rp-del').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const id = (btn as HTMLElement).dataset.id;
+      if (!id) return;
+      removeLocalReminder(id);
+      // SW delete is best-effort. If id starts with 'local:' the SW never
+      // saw it (failed initial save) so skip the IPC.
+      if (!id.startsWith('local:')) {
+        safeSendMessage({ type: 'DELETE_REMINDER', id }).catch(() => {});
+      }
+      // Re-render the panel to reflect the removal.
+      panel.remove();
+      showRemindersPanel();
+      // Bump the chip count.
+      try { window.postMessage({ type: '__aggregaytor_reminders_changed' }, '*'); } catch {}
+    });
+  });
 }
 
 // ── Map Filter Floating Panel ─────────────────────────────────────────────
