@@ -1312,28 +1312,42 @@ async function handleMessage(msg: any): Promise<any> {
         { name: 'searchIndex',         entries: getIndexSize(), cap: SEARCH_INDEX_MAX_DOCS, bytesEstimate: getIndexSize() * 512, clearable: true },
       ];
 
-      // 2. chrome.storage.local + session — bytes are exact via getBytesInUse.
-      //    Per-key breakdown lets the user see what's hogging persistent storage.
-      const localKeys = await new Promise<Record<string, number>>((resolve) => {
-        try {
-          chrome.storage.local.get(null, (all) => {
-            const out: Record<string, number> = {};
-            for (const k of Object.keys(all || {})) {
-              try { out[k] = (JSON.stringify(all[k]) || '').length * 2; } catch { out[k] = 0; }
-            }
-            resolve(out);
-          });
-        } catch { resolve({}); }
-      });
+      // 2. chrome.storage.local + session — use per-key getBytesInUse rather
+      //    than JSON.stringify-ing every value. v0.57.64: the prior code
+      //    serialized every value to count its byte length, which on a
+      //    4GB-bloated SW with megabyte-scale values (search index dumps,
+      //    error log) could allocate hundreds of MB of throwaway strings
+      //    inside the GET_MEMORY_BREAKDOWN handler itself — making the
+      //    diagnostic the heaviest call in the SW. getBytesInUse is exact
+      //    AND skips deserialization entirely. We also limit per-key
+      //    responses to keys (no values) so the response payload stays small.
       const localTotalBytes = await new Promise<number>((resolve) => {
         try { chrome.storage.local.getBytesInUse(null, (b) => resolve(b || 0)); } catch { resolve(0); }
       });
+      const localKeyNames = await new Promise<string[]>((resolve) => {
+        try { chrome.storage.local.get(null, (all) => resolve(Object.keys(all || {}))); } catch { resolve([]); }
+      });
+      const localKeys: Record<string, number> = {};
+      for (const k of localKeyNames) {
+        try {
+          const b = await new Promise<number>((res) => {
+            try { chrome.storage.local.getBytesInUse([k], (n) => res(n || 0)); } catch { res(0); }
+          });
+          localKeys[k] = b;
+        } catch { localKeys[k] = 0; }
+      }
+      // session is small so JSON-len-stringify is fine, but skip large values
+      // (>100KB) to bound the response size — the panel only cares about
+      // counting and the top-N display caps to 8 anyway.
       const sessionKeys = await new Promise<Record<string, number>>((resolve) => {
         try {
           chrome.storage.session.get(null, (all) => {
             const out: Record<string, number> = {};
             for (const k of Object.keys(all || {})) {
-              try { out[k] = (JSON.stringify(all[k]) || '').length * 2; } catch { out[k] = 0; }
+              try {
+                const s = JSON.stringify(all[k]) || '';
+                out[k] = s.length * 2;
+              } catch { out[k] = 0; }
             }
             resolve(out);
           });
