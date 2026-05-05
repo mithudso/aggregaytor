@@ -1,6 +1,6 @@
 {
   "name": "@aggregaytor/extension",
-  "version": "0.57.63",
+  "version": "0.57.64",
   "private": true,
   "type": "module",
   "scripts": {

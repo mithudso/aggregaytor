@@ -124,9 +124,21 @@ function showSpToast(message, kind = 'info', durationMs = 2200) {
 // shape ({ ok, error? } at minimum) and any sync throw or rejection becomes
 // a structured error rather than crashing the click handler. Surfaces a
 // toast on failure so users see what broke instead of a dead button.
-async function spSend(msg, { silent = false } = {}) {
+async function spSend(msg, { silent = false, timeoutMs = 15000 } = {}) {
   try {
-    const res = await chrome.runtime.sendMessage(msg);
+    // v0.57.64: race chrome.runtime.sendMessage against a timeout so a wedged
+    // SW handler can't leave the panel UI blank forever. 15s is generous —
+    // most handlers respond <1s; the heavy ones (GET_MEMORY_BREAKDOWN,
+    // GET_THREAD_SUMMARIES) finish in 1-3s. If we hit the timeout, the
+    // caller receives { ok:false, error:'timeout' } and can fall back.
+    const res = await Promise.race([
+      chrome.runtime.sendMessage(msg),
+      new Promise((resolve) => setTimeout(() => resolve('__SP_TIMEOUT__'), timeoutMs)),
+    ]);
+    if (res === '__SP_TIMEOUT__') {
+      if (!silent) showSpToast(`${msg?.type} timed out after ${Math.round(timeoutMs / 1000)}s`, 'error', 4000);
+      return { ok: false, error: `timeout after ${timeoutMs}ms` };
+    }
     if (res === undefined) {
       if (!silent) showSpToast(`No response from background (${msg?.type})`, 'error', 3000);
       return { ok: false, error: 'no response' };
@@ -2473,11 +2485,35 @@ async function loadMemoryBreakdown() {
   const body = document.getElementById('sp-mem-body');
   const summary = document.getElementById('sp-mem-summary');
   if (!body) return;
-  const res = await spSend({ type: 'GET_MEMORY_BREAKDOWN' }, { silent: true });
+  // v0.57.64: explicit Loading state on first call so the tab isn't blank
+  // while the SW handler runs (it queries chrome.storage twice + IndexedDB
+  // estimate, which can take 200-800ms on a heavily-loaded SW).
+  if (!body.dataset.populated) {
+    body.innerHTML = '<div class="settings-info">Loading memory stats…</div>';
+  }
+  // v0.57.64: dropped silent:true. Previously a SW timeout / handler error
+  // returned { ok:false } and we set a generic "Failed to fetch" message
+  // with no detail, but in practice the user reported the body staying
+  // completely blank — that points at a JS exception during rendering, not
+  // a transport failure. spSend's surfaced toast tells us which.
+  const res = await spSend({ type: 'GET_MEMORY_BREAKDOWN' });
   if (!res?.ok) {
-    body.innerHTML = '<div class="settings-info" style="color:#f87171">Failed to fetch memory breakdown.</div>';
+    body.innerHTML = `<div class="settings-info" style="color:#f87171">Failed to fetch memory breakdown: ${esc(res?.error || 'unknown')}</div>`;
     return;
   }
+  // v0.57.64: defensive defaults. If the SW handler returned a partial
+  // shape (newer panel, older SW), fill in empty values so rendering can't
+  // throw on a missing key. Rendering the section "Service Worker" with
+  // 0 caches is fine — it's clearly visible that the response was thin.
+  res.sw = res.sw || { uptimeHrs: 0, heapBytes: null, caches: [] };
+  res.sw.caches = Array.isArray(res.sw.caches) ? res.sw.caches : [];
+  res.contentScripts = Array.isArray(res.contentScripts) ? res.contentScripts : [];
+  res.storage = res.storage || { local: { totalBytes: 0, byKey: {} } };
+  res.storage.local = res.storage.local || { totalBytes: 0, byKey: {} };
+  res.indexedDB = res.indexedDB || { usageBytes: 0, quotaBytes: 0 };
+  // Wrap the rest in try/catch — any rendering exception now shows in the
+  // body instead of leaving the tab blank.
+  try {
   const sectionStyle = 'margin-top:8px;border-top:1px solid rgba(255,255,255,0.06);padding-top:6px';
   const rowStyle = 'display:grid;grid-template-columns:1fr 60px 60px 60px 50px;gap:6px;padding:3px 0;align-items:center';
   const headerStyle = rowStyle + ';font-weight:600;color:#9ca3af;font-size:9px;text-transform:uppercase;border-bottom:1px solid rgba(255,255,255,0.04)';
@@ -2554,7 +2590,8 @@ async function loadMemoryBreakdown() {
         <span></span>
       </div>
     </div>`;
-  summary.textContent = `SW heap caches: ${fmtBytes(res.sw.caches.reduce((s, c) => s + c.bytesEstimate, 0))} · IDB: ${fmtBytes(idbBytes)}`;
+  if (summary) summary.textContent = `SW heap caches: ${fmtBytes(res.sw.caches.reduce((s, c) => s + (c.bytesEstimate || 0), 0))} · IDB: ${fmtBytes(idbBytes)}`;
+  body.dataset.populated = '1';
 
   // Wire up per-cache clear buttons (delegation works fine on innerHTML)
   body.querySelectorAll('[data-free-cache]').forEach(btn => {
@@ -2566,6 +2603,21 @@ async function loadMemoryBreakdown() {
       loadMemoryBreakdown();
     });
   });
+  } catch (renderErr) {
+    // v0.57.64: surface rendering failures so the tab doesn't sit blank.
+    // Previously any uncaught throw in the rendering loop left the body
+    // empty since innerHTML was set near the END — now we explain what
+    // broke and dump the response shape for debugging.
+    console.error('[Panel] Memory tab rendering failed:', renderErr, res);
+    body.innerHTML = `
+      <div class="settings-info" style="color:#f87171">
+        Memory tab rendering failed: ${esc(renderErr?.message || String(renderErr))}
+      </div>
+      <details style="margin-top:6px;font-size:10px;color:#9ca3af">
+        <summary style="cursor:pointer">Response shape (debug)</summary>
+        <pre style="white-space:pre-wrap;word-break:break-all;background:rgba(0,0,0,0.3);padding:6px;border-radius:4px;margin-top:4px">${esc(JSON.stringify(res, null, 2).slice(0, 3000))}</pre>
+      </details>`;
+  }
 }
 function startMemoryAutoRefresh() {
   loadMemoryBreakdown();
@@ -2583,6 +2635,17 @@ document.getElementById('sp-mem-free-all')?.addEventListener('click', async () =
   btn.disabled = false; btn.textContent = 'Free all SW caches';
   if (r?.ok) showSpToast('Freed all SW caches', 'success');
   loadMemoryBreakdown();
+});
+// v0.57.64: nuclear option — reload the extension. Kills the SW process and
+// every content script bridge; everything restarts from a fresh heap. The
+// only thing that survives is chrome.storage.local (PouchDB IDB persists too).
+// This is what to click when SW heap gets pinned high and Free-all isn't
+// reclaiming. After click the panel itself reloads, so we don't bother
+// updating the UI.
+document.getElementById('sp-mem-reload-ext')?.addEventListener('click', () => {
+  if (!confirm('Reload the extension? This kills the service worker and content scripts. Your data is safe (persisted in IndexedDB) but the side panel will close.')) return;
+  showSpToast('Reloading extension…', 'warn', 1500);
+  setTimeout(() => { try { chrome.runtime.reload(); } catch {} }, 500);
 });
 
 // Style guide
