@@ -1450,6 +1450,15 @@ export async function generateSuggestions(
   contactId?: string,
 ): Promise<SuggestionResult> {
   const config = await getBestProvider();
+
+  // v0.57.63: short-circuit when the user has disabled the suggestions
+  // LLM feature. Same rationale as generateAutoResponse — don't burn the
+  // prompt-build work just to throw inside callProvider's feature gate.
+  const rateSettings = await getLLMRateSettings();
+  if (!rateSettings.enableSuggestions) {
+    return { suggestions: localSuggestions(messages), provider: 'local' };
+  }
+
   const systemPrompt = await buildSystemPromptWithContext(contactName, platform, contactId);
   const conversation = buildConversationContext(messages, contactName, "suggestions");
 
@@ -1470,11 +1479,17 @@ export async function generateSuggestions(
     console.log(`${LOG} Got ${suggestions.length} suggestions from ${config.provider}`);
     return { suggestions, provider: config.provider };
   } catch (err) {
-    console.error(`${LOG} ${config.provider} failed, falling back to local:`, err);
+    // v0.57.63: don't error-log expected disabled/rate-limited states.
+    const msg = (err as Error)?.message || String(err);
+    if (/feature '[^']+' is disabled|Rate limited/.test(msg)) {
+      console.log(`${LOG} Suggestions skipped: ${msg}`);
+    } else {
+      console.error(`${LOG} ${config.provider} failed, falling back to local:`, err);
+    }
     return {
       suggestions: localSuggestions(messages),
       provider: 'local',
-      error: (err as Error).message,
+      error: msg,
     };
   }
 }
@@ -1720,6 +1735,27 @@ export async function generateAutoResponse(
   contactId?: string,
 ): Promise<AutoRespondResult> {
   const config = await getBestProvider();
+
+  // v0.57.63: short-circuit when the user has unchecked "auto-respond" in
+  // Settings → AI rate limits. Previously we'd build the full prompt, fire
+  // the call, get rejected by callProvider's feature gate, and then log
+  // `[Aggregaytor:LLM] Auto-respond failed: feature 'auto-respond' is
+  // disabled` as a console.error — which the rolling error log captures and
+  // surfaces as a real-looking bug. Disabled is a configured state, not a
+  // fault. Returning the local fallback silently here keeps the error log
+  // clean and saves the prompt-build work for nothing.
+  const rateSettings = await getLLMRateSettings();
+  if (!rateSettings.enableAutoRespond) {
+    const suggestions = localSuggestions(messages);
+    return {
+      response: suggestions[0] || 'Hey',
+      tier: 'low',
+      reason: 'auto-respond disabled in settings',
+      sendPicture: null,
+      provider: 'local',
+    };
+  }
+
   const systemPrompt = await buildAutoRespondPrompt(contactName, platform, settings, contactId);
   const conversation = buildConversationContext(messages, contactName, "auto-respond");
   const userPrompt = `Here is the conversation:\n\n${conversation}\n\nGenerate your JSON response:`;
@@ -1744,8 +1780,25 @@ export async function generateAutoResponse(
     console.log(`${LOG} Auto-response: tier=${parsed.tier}, response="${parsed.response.slice(0, 50)}..."`);
     return { ...parsed, provider: config.provider };
   } catch (err) {
-    console.error(`${LOG} Auto-respond failed:`, err);
-    return { response: localSuggestions(messages)[0] || 'Hey', tier: 'low', reason: 'fallback', sendPicture: null, provider: 'local', error: (err as Error).message };
+    // v0.57.63: distinguish expected configuration states (feature disabled,
+    // rate-limited background request) from real failures. The former are
+    // user-controlled toggles, not bugs — log at info level so they don't
+    // pollute the rolling error log. Real network/parse errors still
+    // console.error as before so the user can spot them.
+    const msg = (err as Error)?.message || String(err);
+    if (/feature '[^']+' is disabled|Rate limited/.test(msg)) {
+      console.log(`${LOG} Auto-respond skipped: ${msg}`);
+    } else {
+      console.error(`${LOG} Auto-respond failed:`, err);
+    }
+    return {
+      response: localSuggestions(messages)[0] || 'Hey',
+      tier: 'low',
+      reason: 'fallback',
+      sendPicture: null,
+      provider: 'local',
+      error: msg,
+    };
   }
 }
 
@@ -1818,7 +1871,14 @@ export async function generateNickname(
   if (metadata.ethnicity) clues.push(`Ethnicity: ${metadata.ethnicity}`);
   if (lastMessageBody) clues.push(`Last message: "${lastMessageBody.slice(0, 60)}"`);
 
-  if (config.provider === 'local' || !config.apiKey) {
+  // v0.57.63: short-circuit when nicknames are disabled. The local
+  // descriptive nickname builder below is the same one used for the
+  // 'local' provider — wired up here too so disabled-feature throws
+  // don't reach the rolling error log.
+  const rateSettings = await getLLMRateSettings();
+  const nicknamesDisabled = !rateSettings.enableNicknames;
+
+  if (config.provider === 'local' || !config.apiKey || nicknamesDisabled) {
     // Generate a simple descriptive nickname locally
     const parts: string[] = [];
     if (metadata.bodyType || metadata.body) parts.push(String(metadata.bodyType || metadata.body));
@@ -1851,6 +1911,14 @@ export async function extractDossierFields(
 ): Promise<Record<string, string>> {
   const config = await getBestProvider();
   if (config.provider === 'local' || !config.apiKey) {
+    return localDossierExtraction(messages);
+  }
+
+  // v0.57.63: short-circuit when dossier extraction is disabled — fall
+  // back to the regex-based local extractor instead of throwing inside
+  // callProvider's feature gate and surfacing a noisy error log entry.
+  const rateSettings = await getLLMRateSettings();
+  if (!rateSettings.enableDossierExtract) {
     return localDossierExtraction(messages);
   }
 
@@ -1911,7 +1979,13 @@ Return ONLY a JSON object with the fields you found new info for. Omit fields wi
       return {};
     }
   } catch (err) {
-    console.error(`${LOG} Dossier extraction failed:`, err);
+    // v0.57.63: don't error-log expected disabled/rate-limited states.
+    const msg = (err as Error)?.message || String(err);
+    if (/feature '[^']+' is disabled|Rate limited/.test(msg)) {
+      console.log(`${LOG} Dossier extraction skipped: ${msg}`);
+    } else {
+      console.error(`${LOG} Dossier extraction failed:`, err);
+    }
     return localDossierExtraction(messages);
   }
 }
@@ -1959,6 +2033,13 @@ export async function generateConversationSummary(
     return localSummary(messages);
   }
 
+  // v0.57.63: short-circuit when summaries are disabled. Local fallback
+  // still gives a useful word-count summary so the UI isn't blank.
+  const rateSettings = await getLLMRateSettings();
+  if (!rateSettings.enableSummaries) {
+    return localSummary(messages);
+  }
+
   const conversation = buildConversationContext(messages, contactName, "summary");
   const prompt = `Analyze this ${platform} conversation and return a JSON object:
 {
@@ -1984,7 +2065,13 @@ Return ONLY the JSON object.`;
       return { text: text.slice(0, 200), commitments: [] };
     }
   } catch (err) {
-    console.error(`${LOG} Summary generation failed:`, err);
+    // v0.57.63: don't error-log expected disabled/rate-limited states.
+    const msg = (err as Error)?.message || String(err);
+    if (/feature '[^']+' is disabled|Rate limited/.test(msg)) {
+      console.log(`${LOG} Summary generation skipped: ${msg}`);
+    } else {
+      console.error(`${LOG} Summary generation failed:`, err);
+    }
     return localSummary(messages);
   }
 }
