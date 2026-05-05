@@ -1018,6 +1018,39 @@ function injectProfileActionsCSS(): void {
     }
     #${PROFILE_ACTIONS_ID}.pa-floating .pa-grip { display:block; }
     #${PROFILE_ACTIONS_ID}.pa-anchored .pa-grip { display:none; }
+    /* v0.57.71: collapse toggle. Visible when expanded as a small ◀
+       button at the top of the column. When the column is collapsed
+       (.pa-collapsed) every other child is hidden and the toggle is the
+       only visible thing — it grows to a vertical handle the user can
+       click to re-expand. */
+    #${PROFILE_ACTIONS_ID} .pa-collapse-btn {
+      align-self:flex-end; background:rgba(255,255,255,0.04);
+      border:1px solid rgba(255,255,255,0.1); color:#9ca3af;
+      border-radius:4px; cursor:pointer; padding:2px 6px;
+      font-size:11px; line-height:1; transition:background 0.15s;
+      width:auto;
+    }
+    #${PROFILE_ACTIONS_ID} .pa-collapse-btn:hover { background:rgba(59,130,246,0.18); color:#bfdbfe; border-color:rgba(59,130,246,0.4); }
+    #${PROFILE_ACTIONS_ID}.pa-collapsed {
+      width:30px; padding:6px 4px; gap:0;
+      align-items:center; cursor:pointer;
+    }
+    #${PROFILE_ACTIONS_ID}.pa-collapsed .pa-collapse-btn {
+      align-self:center; padding:6px 4px; font-size:13px;
+      width:100%; box-sizing:border-box;
+      background:rgba(59,130,246,0.15); border-color:rgba(59,130,246,0.4);
+      color:#bfdbfe;
+    }
+    /* Hide everything else inside the collapsed column. The bar becomes
+       a vertical sliver with just the ▶ expand button visible. */
+    #${PROFILE_ACTIONS_ID}.pa-collapsed .pa-btn:not(.pa-collapse-btn),
+    #${PROFILE_ACTIONS_ID}.pa-collapsed .pa-stars,
+    #${PROFILE_ACTIONS_ID}.pa-collapsed .pa-notes-wrap,
+    #${PROFILE_ACTIONS_ID}.pa-collapsed .pa-reminder-wrap,
+    #${PROFILE_ACTIONS_ID}.pa-collapsed .pa-reminder-badge,
+    #${PROFILE_ACTIONS_ID}.pa-collapsed .pa-grip {
+      display:none !important;
+    }
     /* Buttons fill the column width; tighter padding suits the narrower
        footprint than the previous wide-row layout. text-align:left so the
        emoji + label read as natural action items. */
@@ -1169,6 +1202,11 @@ function injectProfileActions(contactId: string, platform: string): void {
 
   el.innerHTML = `
     <span class="pa-grip" title="Drag to reposition">⋮⋮</span>
+    <!-- v0.57.71: collapse toggle at top of column. ◀ collapses to a thin
+         strip; the strip shows ▶ to expand back. State persists in
+         localStorage so the bar starts in the user's preferred mode every
+         reload. -->
+    <button class="pa-collapse-btn" title="Collapse the action bar (click again to expand)" type="button">◀</button>
     <button class="pa-btn danger pa-hide-btn" ${isBlocked ? 'disabled' : ''}>${isBlocked ? '🚫 Hidden' : '🚫 Hide'}</button>
     <button class="pa-btn pa-notes-btn" title="Toggle notes editor">📝 Notes</button>
     <button class="pa-btn pa-reminder-btn" title="Set a reminder to follow up with this person">⏰ Remind</button>
@@ -1376,6 +1414,37 @@ function injectProfileActions(contactId: string, platform: string): void {
       document.addEventListener('mouseup', end);
     }
   }
+
+  // ── Collapse / expand toggle ──
+  // v0.57.71: state persists in localStorage so the bar starts in the
+  // user's preferred mode every reload. Click anywhere on the collapsed
+  // strip (not just the button) expands it back, since the strip is
+  // tiny and "click anywhere on this thing" is the most discoverable
+  // re-expand interaction.
+  const COLLAPSED_KEY = 'aggregaytor_pa_collapsed';
+  const collapseBtn = el.querySelector('.pa-collapse-btn') as HTMLButtonElement;
+  function setCollapsed(collapsed: boolean): void {
+    el.classList.toggle('pa-collapsed', collapsed);
+    collapseBtn.textContent = collapsed ? '▶' : '◀';
+    collapseBtn.title = collapsed ? 'Expand the action bar' : 'Collapse the action bar';
+    try { localStorage.setItem(COLLAPSED_KEY, collapsed ? '1' : '0'); } catch {}
+  }
+  // Restore collapsed state from localStorage on inject.
+  try {
+    if (localStorage.getItem(COLLAPSED_KEY) === '1') setCollapsed(true);
+  } catch {}
+  collapseBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    setCollapsed(!el.classList.contains('pa-collapsed'));
+  });
+  // Click on the collapsed strip itself (anywhere) expands it. We bind
+  // to the whole element but only act when collapsed AND the click
+  // wasn't on the button (its handler already toggled).
+  el.addEventListener('click', (ev) => {
+    if (!el.classList.contains('pa-collapsed')) return;
+    if ((ev.target as HTMLElement).closest('.pa-collapse-btn')) return;
+    setCollapsed(false);
+  });
 
   // ── Hide button ──
   const hideBtn = el.querySelector('.pa-hide-btn') as HTMLButtonElement;
