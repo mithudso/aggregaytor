@@ -904,11 +904,23 @@ function injectProfileActionsCSS(): void {
       z-index:2147483646; max-width:calc(100vw - 24px); margin:0;
       box-shadow:0 4px 16px rgba(0,0,0,0.5);
     }
+    /* v0.57.66: anchored mode — pinned to the bottom of the active
+       chat/profile window. left/bottom/width are set inline by the
+       follower loop, so we leave them blank here. The drag grip is
+       hidden because the bar isn't movable when anchored. */
+    #${PROFILE_ACTIONS_ID}.pa-anchored {
+      position:fixed; z-index:2147483646; margin:0;
+      box-shadow:0 -2px 16px rgba(0,0,0,0.5);
+      border-top-left-radius:8px; border-top-right-radius:8px;
+      border-bottom-left-radius:0; border-bottom-right-radius:0;
+      border-bottom:none;
+    }
     #${PROFILE_ACTIONS_ID} .pa-grip {
       cursor:move; color:#6b7280; font-size:14px; user-select:none;
       padding:0 4px; display:none;
     }
     #${PROFILE_ACTIONS_ID}.pa-floating .pa-grip { display:inline; }
+    #${PROFILE_ACTIONS_ID}.pa-anchored .pa-grip { display:none; }
     #${PROFILE_ACTIONS_ID} .pa-btn {
       background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12);
       border-radius:6px; padding:4px 10px; color:#e7e9ea; cursor:pointer;
@@ -1002,11 +1014,13 @@ function findProfileContainer(): HTMLElement | null {
  * profiles within the debounce window doesn't drop the user's typing. The
  * panel exposes _flushNotes via wireProfileActionsHandlers; we call it
  * synchronously here, which fires off a chrome.runtime.sendMessage that
- * survives the panel's removal (the closure keeps the data alive). */
+ * survives the panel's removal (the closure keeps the data alive).
+ * v0.57.66: also tear down the anchor follower loop. */
 function removeProfileActions(): void {
   const el = document.getElementById(PROFILE_ACTIONS_ID);
   if (!el) return;
   try { (el as any)._flushNotes?.(); } catch {}
+  try { (el as any)._cancelAnchor?.(); } catch {}
   el.remove();
 }
 
@@ -1019,21 +1033,22 @@ function injectProfileActions(contactId: string, platform: string): void {
   removeProfileActions();
   injectProfileActionsCSS();
 
-  // v0.57.43: ALWAYS float. Earlier versions tried to anchor the bar
-  // inside Sniffies' .his-profile / chat overlay container when one was
-  // found, but Sniffies' Angular tree re-renders parts of the chat
-  // overlay frequently — wiping the anchored bar AND leaving _lastDomInjectId
-  // pointing at a stale dead element so the next tick refused to re-inject.
-  // The floating fallback (fixed-position strip with a drag grip) is more
-  // robust: lives in document.body which Angular doesn't manage, has a
-  // ~max-int z-index that nothing can occlude, and the user can drag it
-  // out of the way once.
-  const useFloating = true;
+  // v0.57.66: anchor mode. Earlier versions inserted the bar AS A CHILD of
+  // .his-profile / the chat overlay so Sniffies' Angular tree would clobber
+  // it on every re-render, and v0.57.43 reverted to a fully-free-floating
+  // bar with a drag grip. The compromise here keeps the bar in document.body
+  // (which Angular never touches) but VISUALLY pins it to the bottom of the
+  // chat/profile container via fixed positioning. A rAF-throttled follower
+  // recomputes left/bottom/width each frame so the bar tracks the container
+  // as Sniffies' UI animates open/closed; if the container disappears, the
+  // follower flips the bar back to centered-floating mode automatically.
+  const anchorContainer = findProfileContainer();
+  const useAnchor = !!anchorContainer;
 
   const profileId = contactId.replace(/^[a-z]+:/, '');
   const el = document.createElement('div');
   el.id = PROFILE_ACTIONS_ID;
-  if (useFloating) el.className = 'pa-floating';
+  el.className = useAnchor ? 'pa-anchored' : 'pa-floating';
 
   // Check if already blocked in the local map-filter blocklist
   let blockedIds: string[] = [];
@@ -1055,29 +1070,76 @@ function injectProfileActions(contactId: string, platform: string): void {
     </div>
     <div class="pa-reminder-wrap" style="display:none;width:100%;margin-top:4px">
       <input type="text" class="pa-notes-input pa-reminder-note" placeholder="Reminder note..." maxlength="200">
-      <select class="pa-notes-input pa-reminder-when" style="margin-top:4px">
-        <option value="3600000">In 1 hour</option>
-        <option value="14400000">In 4 hours</option>
-        <option value="86400000" selected>Tomorrow</option>
-        <option value="259200000">In 3 days</option>
-        <option value="604800000">In 1 week</option>
-      </select>
+      <!-- v0.57.65: replaced preset dropdown with a datetime-local input so
+           the user can pick exactly when. Also kept a quick-preset row of
+           buttons for one-tap common cases. -->
+      <input type="datetime-local" class="pa-notes-input pa-reminder-when" style="margin-top:4px;color-scheme:dark">
+      <div class="pa-reminder-presets" style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap">
+        <button class="pa-btn pa-reminder-preset" data-offset="3600000" style="font-size:10px;padding:2px 6px;width:auto">+1h</button>
+        <button class="pa-btn pa-reminder-preset" data-offset="14400000" style="font-size:10px;padding:2px 6px;width:auto">+4h</button>
+        <button class="pa-btn pa-reminder-preset" data-offset="86400000" style="font-size:10px;padding:2px 6px;width:auto">Tomorrow</button>
+        <button class="pa-btn pa-reminder-preset" data-offset="259200000" style="font-size:10px;padding:2px 6px;width:auto">+3d</button>
+        <button class="pa-btn pa-reminder-preset" data-offset="604800000" style="font-size:10px;padding:2px 6px;width:auto">+1w</button>
+      </div>
       <button class="pa-btn pa-reminder-save" style="margin-top:4px">Save reminder</button>
       <div class="pa-status pa-reminder-status"></div>
     </div>
     <div class="pa-notes-wrap" style="display:none">
-      <textarea class="pa-notes-input" placeholder="Notes about this person..." maxlength="10000"></textarea>
-      <div class="pa-status"></div>
+      <textarea class="pa-notes-input pa-notes-textarea" placeholder="Notes about this person..." maxlength="10000"></textarea>
+      <div class="pa-status pa-notes-status"></div>
     </div>
   `;
 
-  // Insert at the top of the profile container
-  if (useFloating) {
-    // No DOM anchor — append to body as a fixed-position strip and wire
-    // up dragging via the grip handle so the user can move it out of
-    // the way of Sniffies' own UI.
-    document.body.appendChild(el);
-    // Restore last-saved floating position (if any)
+  // Always lives in document.body so Sniffies' Angular tree doesn't clobber
+  // it on re-render. Visual placement is driven by either the anchor
+  // follower (anchored to a chat/profile container) or saved floating coords.
+  document.body.appendChild(el);
+
+  if (useAnchor && anchorContainer) {
+    // Pin to the bottom of the container; rAF-throttled so the bar tracks
+    // open/close animations and resizes without burning CPU on idle frames.
+    let rafId: number | null = null;
+    let lastL = -1, lastB = -1, lastW = -1;
+    const tick = (): void => {
+      rafId = null;
+      // Container vanished or got hidden — flip back to centered floating
+      // mode so the bar doesn't strand in mid-air.
+      if (!anchorContainer.isConnected) {
+        el.classList.remove('pa-anchored');
+        el.classList.add('pa-floating');
+        el.style.left = ''; el.style.bottom = ''; el.style.width = '';
+        el.style.top = ''; el.style.transform = '';
+        return;
+      }
+      const rect = anchorContainer.getBoundingClientRect();
+      if (rect.width < 50 || rect.height < 50) {
+        el.classList.remove('pa-anchored');
+        el.classList.add('pa-floating');
+        el.style.left = ''; el.style.bottom = ''; el.style.width = '';
+        el.style.top = ''; el.style.transform = '';
+        return;
+      }
+      // Pin the bar inside the container's footprint with a 4px inset, and
+      // sit it just above the container's bottom edge so it reads as
+      // attached to the chat window without obscuring its own scroll bar.
+      const left = Math.round(Math.max(4, rect.left + 4));
+      const width = Math.round(Math.max(180, Math.min(rect.width - 8, window.innerWidth - 8)));
+      const bottom = Math.round(Math.max(4, window.innerHeight - rect.bottom));
+      if (left !== lastL || bottom !== lastB || width !== lastW) {
+        el.style.left = `${left}px`;
+        el.style.bottom = `${bottom}px`;
+        el.style.width = `${width}px`;
+        lastL = left; lastB = bottom; lastW = width;
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    (el as any)._cancelAnchor = (): void => {
+      if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+    };
+  } else {
+    // Fallback: free-float at top-center, with a drag grip the user can
+    // pull to reposition. Last position is remembered across reloads.
     try {
       const raw = localStorage.getItem('aggregaytor_pa_floating_pos');
       if (raw) {
@@ -1089,7 +1151,6 @@ function injectProfileActions(contactId: string, platform: string): void {
         }
       }
     } catch {}
-    // Drag handler scoped to the grip dot
     const grip = el.querySelector('.pa-grip') as HTMLElement | null;
     if (grip) {
       let dragging = false; let dx = 0; let dy = 0;
@@ -1098,7 +1159,7 @@ function injectProfileActions(contactId: string, platform: string): void {
         dragging = true; dx = (ev as MouseEvent).clientX - r.left; dy = (ev as MouseEvent).clientY - r.top;
         ev.preventDefault();
       });
-      const move = (ev: MouseEvent) => {
+      const move = (ev: MouseEvent): void => {
         if (!dragging) return;
         const x = Math.max(0, Math.min(ev.clientX - dx, window.innerWidth - 100));
         const y = Math.max(0, Math.min(ev.clientY - dy, window.innerHeight - 40));
@@ -1106,7 +1167,7 @@ function injectProfileActions(contactId: string, platform: string): void {
         el.style.top = `${y}px`;
         el.style.transform = 'none';
       };
-      const end = () => {
+      const end = (): void => {
         if (!dragging) return;
         dragging = false;
         try {
@@ -1118,10 +1179,6 @@ function injectProfileActions(contactId: string, platform: string): void {
       document.addEventListener('mousemove', move);
       document.addEventListener('mouseup', end);
     }
-  } else if (container.firstChild) {
-    container.insertBefore(el, container.firstChild);
-  } else {
-    container.appendChild(el);
   }
 
   // ── Hide button ──
@@ -1144,8 +1201,12 @@ function injectProfileActions(contactId: string, platform: string): void {
   //   3. Expose a flushNotes() on the panel element so the URL-change handler
   //      can flush before removeProfileActions() detaches the textarea
   const notesWrap = el.querySelector('.pa-notes-wrap') as HTMLElement;
-  const notesInput = el.querySelector('.pa-notes-input') as HTMLTextAreaElement;
-  const notesStatus = el.querySelector('.pa-status') as HTMLElement;
+  // v0.57.66: scope to .pa-notes-textarea — the .pa-notes-input class is also
+  // worn by the reminder text input + datetime-local input above this wrap, so
+  // querySelector('.pa-notes-input') was returning the reminder note field and
+  // notes typed into the actual textarea silently fell on the floor.
+  const notesInput = el.querySelector('.pa-notes-textarea') as HTMLTextAreaElement;
+  const notesStatus = el.querySelector('.pa-notes-status') as HTMLElement;
   el.querySelector('.pa-notes-btn')!.addEventListener('click', () => {
     notesWrap.style.display = notesWrap.style.display === 'none' ? '' : 'none';
     if (notesWrap.style.display !== 'none') notesInput.focus();
@@ -1187,26 +1248,124 @@ function injectProfileActions(contactId: string, platform: string): void {
   });
 
   // ── Reminder toggle + saver ──
+  // v0.57.65: real save-failure surfacing. Previously the .then ran on ANY
+  // resolved Promise — including { ok: false } — so the user saw "Reminder
+  // set for ..." even when the SW handler failed (silent data loss). Now
+  // we check res.ok explicitly. Also: snapshot the current profile (name,
+  // photo, prefs) into the request so the SW persists it on the reminder
+  // doc even if the contact lookup at SW-side fails or the user later
+  // blocks/deletes the contact. The Reminders viewer renders from this
+  // snapshot so reminders never become "who was this again?".
   const remWrap = el.querySelector('.pa-reminder-wrap') as HTMLElement;
   const remInput = el.querySelector('.pa-reminder-note') as HTMLInputElement;
-  const remWhen = el.querySelector('.pa-reminder-when') as HTMLSelectElement;
+  const remWhen = el.querySelector('.pa-reminder-when') as HTMLInputElement;
   const remStatus = el.querySelector('.pa-reminder-status') as HTMLElement;
   el.querySelector('.pa-reminder-btn')!.addEventListener('click', () => {
     remWrap.style.display = remWrap.style.display === 'none' ? '' : 'none';
-    if (remWrap.style.display !== 'none') remInput.focus();
+    if (remWrap.style.display !== 'none') {
+      remInput.focus();
+      // Default the datetime picker to "tomorrow at 9 AM" so the user has a
+      // sensible starting point; they can pick any future moment.
+      if (!remWhen.value) {
+        const t = new Date();
+        t.setDate(t.getDate() + 1);
+        t.setHours(9, 0, 0, 0);
+        // datetime-local needs YYYY-MM-DDTHH:mm format (no seconds, no TZ)
+        const pad = (n: number) => String(n).padStart(2, '0');
+        remWhen.value = `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}T${pad(t.getHours())}:${pad(t.getMinutes())}`;
+      }
+    }
   });
-  el.querySelector('.pa-reminder-save')!.addEventListener('click', () => {
-    const offsetMs = parseInt(remWhen.value || '86400000', 10);
-    const dueAt = new Date(Date.now() + offsetMs).toISOString();
-    const note = remInput.value.trim() || `Follow up with profile`;
-    chrome.runtime.sendMessage({
-      type: 'CREATE_REMINDER', contactId, platform, note, dueAt,
-    }).then(() => {
-      remStatus.textContent = `Reminder set for ${new Date(dueAt).toLocaleString()}`;
-      setTimeout(() => { remStatus.textContent = ''; remWrap.style.display = 'none'; }, 2000);
-    }).catch(() => {
-      remStatus.textContent = 'Failed to save reminder';
+  // Quick-preset buttons: set the datetime input to now + offset
+  el.querySelectorAll('.pa-reminder-preset').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      const offsetMs = parseInt((btn as HTMLElement).dataset.offset || '86400000', 10);
+      const t = new Date(Date.now() + offsetMs);
+      const pad = (n: number) => String(n).padStart(2, '0');
+      remWhen.value = `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}T${pad(t.getHours())}:${pad(t.getMinutes())}`;
     });
+  });
+
+  // Best-effort profile snapshot from the visible page DOM. Sniffies renders
+  // the avatar URL into a background-image style; the displayName usually
+  // appears in the page header. Falls back gracefully if anything is missing —
+  // the SW will also try to fill from the contact store as a backup.
+  function snapshotCurrentProfile(): { displayName?: string; avatarUrl?: string; metadata?: Record<string, unknown> } {
+    const out: { displayName?: string; avatarUrl?: string; metadata?: Record<string, unknown> } = {};
+    try {
+      // Try common header/title selectors — Sniffies hashes class names so we
+      // search broadly for an h1/h2 with text matching a profile name pattern.
+      const headerEl = document.querySelector('h1, h2, [class*="profile-name"], [class*="username"]');
+      const headerText = headerEl?.textContent?.trim();
+      if (headerText && headerText.length < 64) out.displayName = headerText;
+    } catch {}
+    try {
+      // Avatars on Sniffies are CSS background-image url(...) on a marker or
+      // header avatar div. Find the most recent profile-id-bearing image.
+      const profileId = contactId.replace(/^[a-z]+:/, '');
+      const styled = Array.from(document.querySelectorAll('[style*="sniffiesassets"]'))
+        .map((e) => (e as HTMLElement).style.backgroundImage || '')
+        .find((bg) => bg.includes(profileId));
+      const m = styled?.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/i);
+      if (m) out.avatarUrl = m[1];
+    } catch {}
+    try {
+      // Profile metadata text (position, body, age) often appears in stats
+      // pills near the avatar. Quick-and-dirty: scan a few known heuristics
+      // from page text. Don't block save if this fails.
+      const pillText = Array.from(document.querySelectorAll('[class*="stat"], [class*="pill"], [class*="badge"]'))
+        .map((e) => e.textContent?.trim() || '').filter(Boolean).slice(0, 8).join(' · ');
+      if (pillText) out.metadata = { summary: pillText.slice(0, 240) };
+    } catch {}
+    return out;
+  }
+
+  el.querySelector('.pa-reminder-save')!.addEventListener('click', async () => {
+    let dueAt: string;
+    if (remWhen.value) {
+      // datetime-local returns YYYY-MM-DDTHH:mm in LOCAL time — new Date()
+      // interprets that as local, then toISOString() converts to UTC.
+      const local = new Date(remWhen.value);
+      if (Number.isNaN(local.getTime())) {
+        remStatus.textContent = 'Invalid date/time';
+        remStatus.style.color = '#f87171';
+        return;
+      }
+      if (local.getTime() <= Date.now()) {
+        remStatus.textContent = 'Pick a time in the future';
+        remStatus.style.color = '#fbbf24';
+        return;
+      }
+      dueAt = local.toISOString();
+    } else {
+      // No explicit time — default to 24h from now
+      dueAt = new Date(Date.now() + 86_400_000).toISOString();
+    }
+    const note = remInput.value.trim() || `Follow up with profile`;
+    const contactSnapshot = snapshotCurrentProfile();
+    remStatus.style.color = '';
+    remStatus.textContent = 'Saving…';
+    try {
+      // v0.57.66: route through safeSendMessage so a sync throw on context
+      // invalidation flips the global flag and surfaces a real error string
+      // instead of an "Uncaught Error: Extension context invalidated" that
+      // hits window.onerror and never updates the status line.
+      const res: any = await safeSendMessage({
+        type: 'CREATE_REMINDER', contactId, platform, note, dueAt, contactSnapshot,
+      });
+      if (res?.ok) {
+        remStatus.style.color = '#34d399';
+        remStatus.textContent = `✓ Reminder set for ${new Date(dueAt).toLocaleString()}`;
+        setTimeout(() => { remStatus.textContent = ''; remWrap.style.display = 'none'; remInput.value = ''; remWhen.value = ''; }, 2500);
+      } else {
+        remStatus.style.color = '#f87171';
+        remStatus.textContent = `Failed to save: ${res?.error || 'unknown error'}`;
+      }
+    } catch (err) {
+      remStatus.style.color = '#f87171';
+      remStatus.textContent = `Save threw: ${(err as Error)?.message || String(err)}`;
+    }
   });
 
   // ── Random Intro button ──

@@ -230,6 +230,8 @@ body {
 .platform-chip.active { background: rgba(59,130,246,0.2); border-color: rgba(59,130,246,0.5); color: #93c5fd; }
 .platform-chip.archive-chip { border-color: rgba(107,114,128,0.3); color: #6b7280; }
 .platform-chip.archive-chip.active { background: rgba(107,114,128,0.2); border-color: rgba(107,114,128,0.5); color: #d1d5db; }
+.platform-chip.reminders-chip { border-color: rgba(251,191,36,0.35); color: #fbbf24; margin-left: auto; }
+.platform-chip.reminders-chip:hover { background: rgba(251,191,36,0.15); border-color: rgba(251,191,36,0.6); }
 
 /* ── Filter bar ── */
 .filter-bar { border-bottom: 1px solid rgba(255,255,255,0.06); flex-shrink: 0; }

@@ -251,6 +251,20 @@ export interface ReminderDoc {
   notifiedDue: boolean;
   /** ISO 8601 -- creation time */
   createdAt: string;
+  /**
+   * Snapshot of the contact at the moment the reminder was created. Lets the
+   * Reminders viewer show "the person you said you'd follow up with" with
+   * their photo and bio frozen in time, so a profile rename / new photo
+   * doesn't make the reminder ambiguous when it fires days later.
+   *
+   * v0.57.65. Optional for backwards-compat with reminders created before
+   * this field existed.
+   */
+  contactSnapshot?: {
+    displayName?: string;
+    avatarUrl?: string;
+    metadata?: Record<string, unknown>;
+  };
 }
 
 /**

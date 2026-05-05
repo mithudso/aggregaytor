@@ -624,8 +624,182 @@ function undoLastHide(): boolean {
   return true;
 }
 
+/** Undo a SPECIFIC profile-id hide (not just the last one). Used by the
+ *  toast popup so a stack of recent hides each gets its own undo button. */
+function undoHideById(id: string): boolean {
+  if (!settings.blockedIds.has(id)) return false;
+  settings.blockedIds.delete(id);
+  // Strip the id from hideHistory so it isn't undo-stacked twice
+  const idx = hideHistory.indexOf(id);
+  if (idx >= 0) hideHistory.splice(idx, 1);
+  const marker = idToMarker.get(id);
+  if (marker) marker.classList.remove(HIDE_CLASS);
+  saveBlockedIds();
+  // Tell the bridge / store that the profile is unblocked so panel state
+  // and any thread-meta archive flags can update too.
+  window.dispatchEvent(new CustomEvent('__aggregaytor_message', {
+    detail: JSON.parse(JSON.stringify({
+      type: 'PROFILE_UNBLOCKED',
+      contactId: `sniffies:${id}`,
+      platform: 'sniffies',
+    })),
+  }));
+  return true;
+}
+
 // Expose on window for bridge access
 (typeof window !== 'undefined' ? window : globalThis as any).__aggregaytor_undoLastHide = undoLastHide;
+(typeof window !== 'undefined' ? window : globalThis as any).__aggregaytor_undoHideById = undoHideById;
+
+// ── Undo-Hide Popup ────────────────────────────────────────────────────────
+// v0.57.65: every manual hide (middle-click marker, hide button on profile,
+// shift+rightclick) now spawns a 30s toast in the lower-left with the
+// hidden profile's avatar + an Undo button. Lets the user catch fat-finger
+// hides immediately without digging into the unhide menu.
+//
+// Multiple rapid hides coalesce into one stack — the toast container holds
+// the most recent N entries (default 3), oldest pushed out as new ones
+// arrive. Each entry has its own 30-second timer.
+
+const UNDO_TOAST_HOST_ID = 'aggregaytor-undo-hide-host';
+const UNDO_TOAST_DURATION_MS = 30_000;
+const UNDO_TOAST_MAX = 3;
+
+function ensureUndoToastHost(): HTMLElement | null {
+  if (!document.body) return null;
+  let host = document.getElementById(UNDO_TOAST_HOST_ID);
+  if (host) return host;
+  host = document.createElement('div');
+  host.id = UNDO_TOAST_HOST_ID;
+  host.style.cssText = [
+    'position:fixed',
+    'bottom:16px',
+    'left:16px',
+    'z-index:2147483646', // just under the floating panel
+    'display:flex',
+    'flex-direction:column-reverse', // newest at top
+    'gap:6px',
+    'pointer-events:none',
+    'max-width:340px',
+  ].join(';');
+  document.body.appendChild(host);
+  return host;
+}
+
+function getProfileAvatarFromMarker(marker: HTMLElement | null): string | null {
+  if (!marker) return null;
+  // Marker has background-image: url(...) on itself or a child
+  const own = marker.style?.backgroundImage || '';
+  let match = own.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/i);
+  if (match) return match[1];
+  const child = marker.querySelector<HTMLElement>('[style*="sniffiesassets"], [style*="background-image"]');
+  if (child) {
+    const bg = child.style?.backgroundImage || '';
+    match = bg.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/i);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+function showUndoHidePopup(profileId: string, marker: HTMLElement | null): void {
+  const host = ensureUndoToastHost();
+  if (!host) return;
+  // Cap the visible stack
+  while (host.children.length >= UNDO_TOAST_MAX) {
+    host.firstChild?.remove();
+  }
+  const avatarUrl = getProfileAvatarFromMarker(marker);
+  const toast = document.createElement('div');
+  toast.className = 'aggregaytor-undo-toast';
+  toast.style.cssText = [
+    'pointer-events:auto',
+    'display:flex',
+    'gap:10px',
+    'align-items:center',
+    'background:rgba(20,24,30,0.96)',
+    'border:1px solid rgba(255,255,255,0.12)',
+    'border-radius:8px',
+    'padding:8px 10px',
+    'color:#e7e9ea',
+    'font-size:12px',
+    'box-shadow:0 4px 12px rgba(0,0,0,0.5)',
+    'transition:opacity 0.25s,transform 0.25s',
+    'opacity:0',
+    'transform:translateY(8px)',
+  ].join(';');
+  // Build inner DOM. Avatar + text + countdown + Undo button + dismiss.
+  const avatarEl = document.createElement(avatarUrl ? 'img' : 'div');
+  if (avatarUrl) {
+    (avatarEl as HTMLImageElement).src = avatarUrl;
+    avatarEl.style.cssText = 'width:32px;height:32px;border-radius:50%;object-fit:cover;flex:0 0 32px';
+  } else {
+    avatarEl.textContent = '👤';
+    avatarEl.style.cssText = 'width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;flex:0 0 32px;font-size:14px';
+  }
+  const textCol = document.createElement('div');
+  textCol.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:1px';
+  const titleEl = document.createElement('div');
+  titleEl.style.cssText = 'font-weight:600;font-size:11px;color:#fbbf24';
+  titleEl.textContent = 'Profile hidden';
+  const subEl = document.createElement('div');
+  subEl.style.cssText = 'font-size:10px;color:#9ca3af;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+  subEl.textContent = profileId.slice(0, 12);
+  textCol.appendChild(titleEl);
+  textCol.appendChild(subEl);
+  const countdownEl = document.createElement('span');
+  countdownEl.style.cssText = 'font-size:10px;color:#6b7280;flex:0 0 auto';
+  countdownEl.textContent = '30s';
+  const undoBtn = document.createElement('button');
+  undoBtn.textContent = 'Undo';
+  undoBtn.style.cssText = 'background:rgba(59,130,246,0.2);border:1px solid rgba(59,130,246,0.5);color:#93c5fd;border-radius:5px;padding:4px 10px;font-size:11px;cursor:pointer;flex:0 0 auto';
+  const dismissBtn = document.createElement('button');
+  dismissBtn.textContent = '✕';
+  dismissBtn.title = 'Dismiss without undoing';
+  dismissBtn.style.cssText = 'background:transparent;border:none;color:#6b7280;font-size:14px;cursor:pointer;padding:0 4px;flex:0 0 auto';
+  toast.appendChild(avatarEl);
+  toast.appendChild(textCol);
+  toast.appendChild(countdownEl);
+  toast.appendChild(undoBtn);
+  toast.appendChild(dismissBtn);
+  host.appendChild(toast);
+  // Fade in next frame
+  requestAnimationFrame(() => {
+    toast.style.opacity = '1';
+    toast.style.transform = 'translateY(0)';
+  });
+  // Countdown ticker — drives the 30s auto-dismiss visually
+  const startTs = Date.now();
+  let tickInterval: ReturnType<typeof setInterval> | null = setInterval(() => {
+    const remaining = UNDO_TOAST_DURATION_MS - (Date.now() - startTs);
+    if (remaining <= 0) {
+      cleanup();
+      return;
+    }
+    countdownEl.textContent = `${Math.ceil(remaining / 1000)}s`;
+  }, 500);
+  function cleanup(): void {
+    if (tickInterval) { clearInterval(tickInterval); tickInterval = null; }
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(8px)';
+    setTimeout(() => toast.remove(), 250);
+  }
+  undoBtn.addEventListener('click', () => {
+    if (undoHideById(profileId)) {
+      titleEl.textContent = 'Restored';
+      titleEl.style.color = '#34d399';
+      undoBtn.style.display = 'none';
+      countdownEl.style.display = 'none';
+      setTimeout(cleanup, 1200);
+    }
+  });
+  dismissBtn.addEventListener('click', cleanup);
+}
+
+// Expose for the bridge (called from middle-click handler in sniffies-bridge)
+// and from the floating panel hide button which lives in ISOLATED world.
+(typeof window !== 'undefined' ? window : globalThis as any).__aggregaytor_showUndoHide = (profileId: string) => {
+  showUndoHidePopup(profileId, idToMarker.get(profileId) || null);
+};
 
 // Block from floating panel — adds profileId to the blocked set and applies
 window.addEventListener('__aggregaytor_block_by_map_filter', ((event: CustomEvent) => {
@@ -637,6 +811,10 @@ window.addEventListener('__aggregaytor_block_by_map_filter', ((event: CustomEven
   if (hideHistory.length > 50) hideHistory.shift();
   saveBlockedIds();
   applyFilters();
+  // v0.57.65: also surface the 30s undo popup so the inline Hide button on
+  // the profile-actions bar gets the same recoverability as middle-click.
+  // The bridge button posts __aggregaytor_block which we catch here.
+  try { showUndoHidePopup(profileId, idToMarker.get(profileId) || null); } catch {}
 }) as EventListener);
 
 // ── Main Filter Pass ───────────────────────────────────────────────────────
@@ -875,6 +1053,12 @@ function blockById(id: string, marker: HTMLElement | null): void {
       platform: 'sniffies',
     })),
   }));
+  // v0.57.65: spawn the 30s Undo popup in the lower-left so the user can
+  // catch fat-finger hides immediately (middle-click misses on a packed
+  // map are common). Doesn't fire for programmatic blocks coming back via
+  // the bridge from a different surface — those go through the
+  // __aggregaytor_block_by_map_filter event listener which is its own path.
+  showUndoHidePopup(id, marker);
 }
 
 /**
@@ -1391,24 +1575,35 @@ async function fetchPartialsForIds(ids: string[]): Promise<void> {
  */
 function tickPartialsPrefetch(): void {
   if (!filterEnabled) return;
-  // Only prefetch when a position-based filter is actually on — no point
-  // hitting the API otherwise. Checks the chips users actually toggle.
+  // Only prefetch when something that needs the partials API is actually
+  // on — position-based filters use attitude, the ≤2h filter uses
+  // lastActive. Both come from the same partials response.
+  // v0.57.66: hideInactiveOver2h was missing from this guard, so toggling
+  // ≤2h alone meant markerLastActive never got populated and the filter
+  // had nothing to compare against — it appeared to "do nothing".
   const anyPositionFilter =
     settings.hideBottom || settings.hideVersBottom || settings.hideVers ||
     settings.hideVersTop || settings.hideTop || settings.hideSide ||
     settings.hideUnspecified ||
     settings.highlightBottom || settings.highlightVersBottom || settings.highlightVers ||
-    settings.highlightVersTop || settings.highlightTop;
+    settings.highlightVersTop || settings.highlightTop ||
+    settings.hideInactiveOver2h;
   if (!anyPositionFilter) return;
 
   const now = Date.now();
   const batch: string[] = [];
+  // v0.57.66: when ≤2h is on we also need to fetch for IDs that already
+  // have attitude but lack lastActive (lastActive comes back in the same
+  // partials response, but the previous logic skipped any id with attitude
+  // known). Otherwise the inactivity filter would never get data for the
+  // first-seen markers that came in via the adapter feed.
+  const wantLastActive = settings.hideInactiveOver2h;
   for (const id of idToMarker.keys()) {
     if (batch.length >= PARTIALS_BATCH) break;
-    if (markerAttitudes.has(id)) continue;
-    if (manualAttitudes.has(id)) continue;
     if (partialsFetchInFlight.has(id)) continue;
-    if (partialsNoAttitude.has(id)) continue;
+    const hasAttitudeKnown = markerAttitudes.has(id) || manualAttitudes.has(id) || partialsNoAttitude.has(id);
+    const hasLastActive = markerLastActive.has(id);
+    if (hasAttitudeKnown && (!wantLastActive || hasLastActive)) continue;
     const retry = partialsRetryAt.get(id) || 0;
     if (retry > now) continue;
     batch.push(id);

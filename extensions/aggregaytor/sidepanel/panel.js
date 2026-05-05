@@ -1852,7 +1852,7 @@ document.getElementById('back-btn').addEventListener('click', () => {
   if (settingsOpen) closeSettings();
   else goBack();
 });
-document.querySelectorAll('.platform-chip').forEach(chip => {
+document.querySelectorAll('.platform-chip[data-platform]').forEach(chip => {
   chip.addEventListener('click', () => {
     const platform = chip.dataset.platform;
 
@@ -4122,7 +4122,7 @@ const PLATFORM_OPEN_URLS = {
   yahoo: 'https://mail.yahoo.com',
 };
 
-document.querySelectorAll('.platform-chip').forEach(chip => {
+document.querySelectorAll('.platform-chip[data-platform]').forEach(chip => {
   chip.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     const platform = chip.dataset.platform;
@@ -4352,6 +4352,119 @@ let editingTaskContactId = null;
 let editingTaskPlatform = null;
 
 document.getElementById('open-tasks')?.addEventListener('click', () => toggleTaskPanel());
+
+// ── Global Reminders Modal ──────────────────────────────────────────────────
+// v0.57.65: per-thread reminders existed but there was no surface to see
+// every reminder across every contact. The new ⏰ header button opens this
+// overlay which lists upcoming + recently-overdue reminders, each with the
+// profile snapshot (name, avatar, key preferences) captured when the
+// reminder was created. Snapshot lookup happens at create time in the SW;
+// here we just render what's persisted.
+function fmtRelative(iso) {
+  const ms = new Date(iso).getTime() - Date.now();
+  const past = ms < 0;
+  const abs = Math.abs(ms);
+  const mins = Math.round(abs / 60_000);
+  if (mins < 60) return past ? `${mins}m ago` : `in ${mins}m`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return past ? `${hours}h ago` : `in ${hours}h`;
+  const days = Math.round(hours / 24);
+  return past ? `${days}d ago` : `in ${days}d`;
+}
+async function loadAllReminders() {
+  const body = document.getElementById('reminders-body');
+  if (!body) return;
+  body.innerHTML = '<div class="settings-info">Loading reminders…</div>';
+  const res = await spSend({ type: 'GET_ALL_REMINDERS' });
+  if (!res?.ok) {
+    body.innerHTML = `<div class="settings-info" style="color:#f87171">Failed to load reminders: ${esc(res?.error || 'unknown')}</div>`;
+    return;
+  }
+  const upcoming = res.upcoming || [];
+  const overdue = res.overdue || [];
+  if (!upcoming.length && !overdue.length) {
+    body.innerHTML = '<div class="settings-info">No reminders yet. Set one from a profile\'s ⏰ Remind button.</div>';
+    return;
+  }
+  const renderRow = (r) => {
+    const snap = r.contactSnapshot || {};
+    const meta = snap.metadata || {};
+    const avatar = snap.avatarUrl
+      ? `<img src="${esc(snap.avatarUrl)}" style="width:42px;height:42px;border-radius:50%;object-fit:cover;flex:0 0 42px" alt="">`
+      : `<div style="width:42px;height:42px;border-radius:50%;background:rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;flex:0 0 42px;font-size:18px">👤</div>`;
+    const name = snap.displayName || stripPrefix(r.contactId);
+    const prefs = [
+      meta.bodyType || meta.body,
+      meta.attitude || meta.position,
+      meta.age ? `${meta.age}yo` : '',
+      meta.height,
+    ].filter(Boolean).map(String).join(' · ');
+    const due = new Date(r.dueAt);
+    const past = due.getTime() < Date.now();
+    return `
+      <div class="reminder-card" data-contact-id="${esc(r.contactId)}" data-platform="${esc(r.platform)}" style="display:flex;gap:10px;padding:10px;border:1px solid rgba(255,255,255,0.08);border-radius:8px;margin-bottom:8px;background:rgba(255,255,255,0.02);cursor:pointer">
+        ${avatar}
+        <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+            <strong style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(name)}</strong>
+            <span style="color:${past ? '#f87171' : '#34d399'};font-size:10px;flex:0 0 auto" title="${esc(due.toLocaleString())}">${esc(fmtRelative(r.dueAt))}</span>
+          </div>
+          ${prefs ? `<div style="font-size:10px;color:#9ca3af">${esc(prefs)}</div>` : ''}
+          <div style="font-size:11px;color:#d1d5db;overflow:hidden;text-overflow:ellipsis">${esc(r.note || '(no note)')}</div>
+          <div style="font-size:9px;color:#6b7280">${esc(r.platform)} · due ${esc(due.toLocaleString())}</div>
+        </div>
+        <button class="reminder-del-btn" data-id="${esc(r._id)}" title="Delete this reminder" style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);color:#f87171;border-radius:5px;padding:3px 8px;cursor:pointer;align-self:flex-start;font-size:11px">✕</button>
+      </div>`;
+  };
+  let html = '';
+  if (overdue.length) {
+    html += `<div style="font-size:11px;color:#f87171;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Overdue (${overdue.length})</div>`;
+    html += overdue.map(renderRow).join('');
+  }
+  if (upcoming.length) {
+    html += `<div style="font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:0.5px;margin:${overdue.length ? '12px' : '0'} 0 4px">Upcoming (${upcoming.length})</div>`;
+    html += upcoming.map(renderRow).join('');
+  }
+  body.innerHTML = html;
+  // Click anywhere on the card → open the thread for that contact
+  body.querySelectorAll('.reminder-card').forEach(card => {
+    card.addEventListener('click', (e) => {
+      if (e.target.closest('.reminder-del-btn')) return; // delete button has its own handler
+      const cid = card.dataset.contactId;
+      const plat = card.dataset.platform;
+      if (cid && plat) {
+        document.getElementById('reminders-overlay').style.display = 'none';
+        const snap = (res.upcoming.concat(res.overdue).find(x => x._id === card.querySelector('.reminder-del-btn')?.dataset.id))?.contactSnapshot;
+        openThread(cid, plat, snap?.displayName);
+      }
+    });
+  });
+  body.querySelectorAll('.reminder-del-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      btn.disabled = true;
+      const r = await spSend({ type: 'DELETE_REMINDER', id: btn.dataset.id });
+      if (r?.ok) showSpToast('Reminder deleted', 'success');
+      loadAllReminders();
+    });
+  });
+}
+document.getElementById('open-reminders')?.addEventListener('click', () => {
+  const overlay = document.getElementById('reminders-overlay');
+  if (!overlay) return;
+  overlay.style.display = 'flex';
+  loadAllReminders();
+});
+document.getElementById('reminders-close')?.addEventListener('click', () => {
+  const overlay = document.getElementById('reminders-overlay');
+  if (overlay) overlay.style.display = 'none';
+});
+document.getElementById('reminders-overlay')?.addEventListener('click', (e) => {
+  // Click outside the inner content closes (target is the overlay itself)
+  if (e.target === document.getElementById('reminders-overlay')) {
+    document.getElementById('reminders-overlay').style.display = 'none';
+  }
+});
 document.getElementById('task-back-btn')?.addEventListener('click', () => toggleTaskPanel());
 document.getElementById('task-add-btn')?.addEventListener('click', () => showTaskForm());
 document.getElementById('task-sync-btn')?.addEventListener('click', async () => {

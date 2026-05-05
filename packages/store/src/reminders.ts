@@ -11,6 +11,7 @@ export async function createReminder(
   platform: Platform,
   note: string,
   dueAt: string,
+  contactSnapshot?: ReminderDoc['contactSnapshot'],
   db?: PouchDB.Database,
 ): Promise<ReminderDoc> {
   const store = db || await getDB();
@@ -27,6 +28,7 @@ export async function createReminder(
     notifiedApproach: false,
     notifiedDue: false,
     createdAt: now,
+    ...(contactSnapshot ? { contactSnapshot } : {}),
   };
   await store.put(doc);
   return doc;
