@@ -996,9 +996,18 @@ function findProfileContainer(): HTMLElement | null {
   return null;
 }
 
-/** Remove previously injected profile actions. */
+/** Remove previously injected profile actions.
+ *
+ * v0.57.63: before detaching, flush any pending notes save so that switching
+ * profiles within the debounce window doesn't drop the user's typing. The
+ * panel exposes _flushNotes via wireProfileActionsHandlers; we call it
+ * synchronously here, which fires off a chrome.runtime.sendMessage that
+ * survives the panel's removal (the closure keeps the data alive). */
 function removeProfileActions(): void {
-  document.getElementById(PROFILE_ACTIONS_ID)?.remove();
+  const el = document.getElementById(PROFILE_ACTIONS_ID);
+  if (!el) return;
+  try { (el as any)._flushNotes?.(); } catch {}
+  el.remove();
 }
 
 /**
@@ -1126,6 +1135,14 @@ function injectProfileActions(contactId: string, platform: string): void {
   });
 
   // ── Notes toggle + editor ──
+  // v0.57.63: notes were silently lost when users typed and switched profiles
+  // before the 800ms debounce fired. The userscript v0.7.46 had a Save button
+  // that made persistence explicit, but auto-save is friendlier — IF we
+  // actually flush before navigation. Three fixes:
+  //   1. Drop debounce 800 → 250ms so quick typing reliably saves
+  //   2. Flush immediately on `blur` (clicking away from the textarea)
+  //   3. Expose a flushNotes() on the panel element so the URL-change handler
+  //      can flush before removeProfileActions() detaches the textarea
   const notesWrap = el.querySelector('.pa-notes-wrap') as HTMLElement;
   const notesInput = el.querySelector('.pa-notes-input') as HTMLTextAreaElement;
   const notesStatus = el.querySelector('.pa-status') as HTMLElement;
@@ -1135,17 +1152,27 @@ function injectProfileActions(contactId: string, platform: string): void {
   });
 
   let noteTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastSavedValue = '';
+  function flushNotes(): void {
+    if (noteTimer) { clearTimeout(noteTimer); noteTimer = null; }
+    const value = notesInput.value;
+    if (value === lastSavedValue) return; // nothing new to persist
+    lastSavedValue = value;
+    safeSendMessage({
+      type: 'UPSERT_THREAD_META', contactId, platform,
+      updates: { notes: value },
+    }).catch(() => {});
+    notesStatus.textContent = 'Saved';
+    setTimeout(() => { notesStatus.textContent = ''; }, 1500);
+  }
+  // Expose for URL-change handler to flush before the panel is removed.
+  (el as any)._flushNotes = flushNotes;
+
   notesInput.addEventListener('input', () => {
     if (noteTimer) clearTimeout(noteTimer);
-    noteTimer = setTimeout(() => {
-      chrome.runtime.sendMessage({
-        type: 'UPSERT_THREAD_META', contactId, platform,
-        updates: { notes: notesInput.value },
-      }).catch(() => {});
-      notesStatus.textContent = 'Saved';
-      setTimeout(() => { notesStatus.textContent = ''; }, 1500);
-    }, 800);
+    noteTimer = setTimeout(flushNotes, 250);
   });
+  notesInput.addEventListener('blur', flushNotes);
 
   // ── Star rating ──
   const stars = el.querySelectorAll('.pa-star');
