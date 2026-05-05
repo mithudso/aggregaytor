@@ -1575,24 +1575,35 @@ async function fetchPartialsForIds(ids: string[]): Promise<void> {
  */
 function tickPartialsPrefetch(): void {
   if (!filterEnabled) return;
-  // Only prefetch when a position-based filter is actually on — no point
-  // hitting the API otherwise. Checks the chips users actually toggle.
+  // Only prefetch when something that needs the partials API is actually
+  // on — position-based filters use attitude, the ≤2h filter uses
+  // lastActive. Both come from the same partials response.
+  // v0.57.66: hideInactiveOver2h was missing from this guard, so toggling
+  // ≤2h alone meant markerLastActive never got populated and the filter
+  // had nothing to compare against — it appeared to "do nothing".
   const anyPositionFilter =
     settings.hideBottom || settings.hideVersBottom || settings.hideVers ||
     settings.hideVersTop || settings.hideTop || settings.hideSide ||
     settings.hideUnspecified ||
     settings.highlightBottom || settings.highlightVersBottom || settings.highlightVers ||
-    settings.highlightVersTop || settings.highlightTop;
+    settings.highlightVersTop || settings.highlightTop ||
+    settings.hideInactiveOver2h;
   if (!anyPositionFilter) return;
 
   const now = Date.now();
   const batch: string[] = [];
+  // v0.57.66: when ≤2h is on we also need to fetch for IDs that already
+  // have attitude but lack lastActive (lastActive comes back in the same
+  // partials response, but the previous logic skipped any id with attitude
+  // known). Otherwise the inactivity filter would never get data for the
+  // first-seen markers that came in via the adapter feed.
+  const wantLastActive = settings.hideInactiveOver2h;
   for (const id of idToMarker.keys()) {
     if (batch.length >= PARTIALS_BATCH) break;
-    if (markerAttitudes.has(id)) continue;
-    if (manualAttitudes.has(id)) continue;
     if (partialsFetchInFlight.has(id)) continue;
-    if (partialsNoAttitude.has(id)) continue;
+    const hasAttitudeKnown = markerAttitudes.has(id) || manualAttitudes.has(id) || partialsNoAttitude.has(id);
+    const hasLastActive = markerLastActive.has(id);
+    if (hasAttitudeKnown && (!wantLastActive || hasLastActive)) continue;
     const retry = partialsRetryAt.get(id) || 0;
     if (retry > now) continue;
     batch.push(id);

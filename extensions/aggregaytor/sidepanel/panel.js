@@ -1840,7 +1840,7 @@ document.getElementById('back-btn').addEventListener('click', () => {
   if (settingsOpen) closeSettings();
   else goBack();
 });
-document.querySelectorAll('.platform-chip').forEach(chip => {
+document.querySelectorAll('.platform-chip[data-platform]').forEach(chip => {
   chip.addEventListener('click', () => {
     const platform = chip.dataset.platform;
 
@@ -4059,7 +4059,7 @@ const PLATFORM_OPEN_URLS = {
   yahoo: 'https://mail.yahoo.com',
 };
 
-document.querySelectorAll('.platform-chip').forEach(chip => {
+document.querySelectorAll('.platform-chip[data-platform]').forEach(chip => {
   chip.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     const platform = chip.dataset.platform;
