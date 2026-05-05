@@ -15,6 +15,7 @@
     <button class="header-settings" id="btn-show-floating" data-icon="⚡" data-label="Quick" title="Show Quick Actions panel on the platform page — block, notes, rate, and send phrases directly on Sniffies/Grindr">⚡</button>
     <button class="header-settings" id="btn-popout" data-icon="⧉" data-label="Popout" title="Pop out this panel into its own window. Click again in the popup to close it and return to the side panel.">⧉</button>
     <button class="header-settings" id="open-tasks" data-icon="☑" data-label="Tasks" title="Open task list — create and manage to-do items linked to contacts. Syncs with Google Tasks. (Shift+T)">☑</button>
+    <button class="header-settings" id="open-reminders" data-icon="⏰" data-label="Reminders" title="Open reminders — see all upcoming follow-ups across every contact. Each reminder keeps a snapshot of the profile (name, photo, prefs) at the time it was set.">⏰</button>
     <button class="header-settings" id="btn-camera" data-icon="📷" data-label="Photo" title="Take a photo to add to your picture library">📷</button>
     <button class="header-settings" id="btn-gallery" data-icon="🖼" data-label="Gallery" title="Open photo gallery — view all synced profile pictures and your own uploads">🖼</button>
     <button class="header-settings" id="sync-pics-header" data-icon="🔄" data-label="Sync" title="Sync profile pictures — scrape avatars from all open platform tabs and save to local cache">🔄</button>
@@ -898,6 +899,19 @@
       </div>
     </div>
     <div id="task-list" class="task-list"></div>
+  </div>
+
+  <!-- v0.57.65 — Global reminders modal: shows every upcoming + recently-overdue
+       reminder across all contacts, with the profile snapshot (name, photo,
+       preferences) frozen at creation time. Open via the ⏰ header button. -->
+  <div id="reminders-overlay" class="gallery-overlay" style="display:none">
+    <div class="gallery-header">
+      <span id="reminders-title" class="gallery-title">⏰ Reminders</span>
+      <button class="gallery-close" id="reminders-close">✕</button>
+    </div>
+    <div id="reminders-body" style="flex:1;overflow-y:auto;padding:12px;font-size:12px;color:#e7e9ea">
+      <div class="settings-info">Loading reminders…</div>
+    </div>
   </div>
 
   <script src="panel.js"></script>

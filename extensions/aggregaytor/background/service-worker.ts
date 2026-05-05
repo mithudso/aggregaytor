@@ -20,7 +20,7 @@ import {
   getContact, getAllContacts, getContactsByPlatform, getDB, destroyDB,
   exportAllData, importAllData, exportBlocked, importBlocked,
 } from '@aggregaytor/store';
-import type { ThreadSummary, AutoRespondSettings, ProfileFeatures } from '@aggregaytor/store';
+import type { ThreadSummary, AutoRespondSettings, ProfileFeatures, ReminderDoc } from '@aggregaytor/store';
 import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS, clearLLMCaches, queryContacts, getDeprecationWarnings, generateConversationSummary, setProviderModelOverride, getEffectiveModelForProvider, getAllProviderModels, getAllProviderKeys } from './llm.js';
 import type { ContactQueryRow } from './llm.js';
 import { seedIndex, indexMessages, removeFromIndex, clearIndex, searchMessages as fulltextSearch, isIndexReady, getIndexSize, getEvictedCount, getLastEvictionAt, getLifetimeStats, SEARCH_INDEX_MAX_DOCS } from './search-index.js';
@@ -1476,8 +1476,42 @@ async function handleMessage(msg: any): Promise<any> {
     }
 
     // Reminders
-    case 'CREATE_REMINDER': return { ok: true, reminder: await createReminder(msg.contactId, msg.platform, msg.note, msg.dueAt) };
+    // v0.57.65: when creating a reminder, snapshot the contact's current
+    // displayName/avatarUrl/metadata so the reminder remains identifiable
+    // weeks later even if the profile photo or name changed. The bridge can
+    // pass `contactSnapshot` explicitly (already-known data, fast path) OR
+    // omit it and let us fetch from the store. Either way the reminder doc
+    // persists the snapshot — the Reminders viewer pulls from the doc, not
+    // from a live contact lookup, so deleted/blocked profiles still render.
+    case 'CREATE_REMINDER': {
+      let snapshot = msg.contactSnapshot as ReminderDoc['contactSnapshot'] | undefined;
+      if (!snapshot) {
+        try {
+          const c = await getContact(msg.contactId);
+          if (c) {
+            snapshot = {
+              displayName: c.displayName || undefined,
+              avatarUrl: c.avatarUrl || undefined,
+              metadata: c.metadata || undefined,
+            };
+          }
+        } catch { /* fall through, reminder still saves without a snapshot */ }
+      }
+      const reminder = await createReminder(msg.contactId, msg.platform, msg.note, msg.dueAt, snapshot);
+      return { ok: true, reminder };
+    }
     case 'GET_REMINDERS': return { ok: true, reminders: await getReminders(msg.opts) };
+    // v0.57.65: global reminders list (no contact filter, all platforms).
+    // Returns upcoming + recently-overdue so the panel viewer can show
+    // anything that fired in the last 7 days alongside future reminders.
+    case 'GET_ALL_REMINDERS': {
+      const all = await getReminders({ upcoming: false });
+      // Sort upcoming first (closest due first), then overdue most-recent first
+      const now = Date.now();
+      const upcoming = all.filter(r => new Date(r.dueAt).getTime() >= now).sort((a, b) => a.dueAt.localeCompare(b.dueAt));
+      const overdue = all.filter(r => new Date(r.dueAt).getTime() < now).sort((a, b) => b.dueAt.localeCompare(a.dueAt));
+      return { ok: true, upcoming, overdue };
+    }
     case 'DELETE_REMINDER': { await deleteReminder(msg.id); return { ok: true }; }
 
     // LLM
