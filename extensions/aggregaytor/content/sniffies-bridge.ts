@@ -892,28 +892,26 @@ function injectProfileActionsCSS(): void {
       border-radius:8px; font-family:system-ui,sans-serif; font-size:12px; color:#e7e9ea;
       backdrop-filter:blur(6px);
     }
-    /* Fallback: when no profile container is found, anchor the bar to the
-       top of the viewport so it's always visible while a Sniffies chat or
-       profile is open. The user can drag it via the grip dot.
-       v0.57.40: z-index bumped to ~max-int because Sniffies' chat/profile
-       overlay renders at a higher index than our previous 99997 and was
-       visually covering the bar. The new value is well above any plausible
-       overlay stack. */
+    /* v0.57.67: floating fallback now defaults to BOTTOM-center so that
+       when no chat container is detected the bar still sits below most
+       Sniffies UI rather than at the top of the viewport. User-driven
+       drag still wins via the saved-position restore below. */
     #${PROFILE_ACTIONS_ID}.pa-floating {
-      position:fixed; top:50px; left:50%; transform:translateX(-50%);
+      position:fixed; bottom:8px; left:50%; transform:translateX(-50%);
       z-index:2147483646; max-width:calc(100vw - 24px); margin:0;
       box-shadow:0 4px 16px rgba(0,0,0,0.5);
     }
-    /* v0.57.66: anchored mode — pinned to the bottom of the active
-       chat/profile window. left/bottom/width are set inline by the
-       follower loop, so we leave them blank here. The drag grip is
-       hidden because the bar isn't movable when anchored. */
+    /* v0.57.67: anchored mode — pinned IMMEDIATELY BELOW the active
+       chat/profile window so it doesn't overlap the message composer.
+       Full border-radius + downward shadow because the bar reads as a
+       detached strip below the chat (was rounded-top-only and upward-
+       shadowed when it sat directly on the container's bottom edge).
+       left/top/width are set inline by the follower; the grip is hidden
+       since the position is computed each frame from the container rect. */
     #${PROFILE_ACTIONS_ID}.pa-anchored {
       position:fixed; z-index:2147483646; margin:0;
-      box-shadow:0 -2px 16px rgba(0,0,0,0.5);
-      border-top-left-radius:8px; border-top-right-radius:8px;
-      border-bottom-left-radius:0; border-bottom-right-radius:0;
-      border-bottom:none;
+      box-shadow:0 4px 16px rgba(0,0,0,0.5);
+      border-radius:8px;
     }
     #${PROFILE_ACTIONS_ID} .pa-grip {
       cursor:move; color:#6b7280; font-size:14px; user-select:none;
@@ -1119,17 +1117,36 @@ function injectProfileActions(contactId: string, platform: string): void {
         el.style.top = ''; el.style.transform = '';
         return;
       }
-      // Pin the bar inside the container's footprint with a 4px inset, and
-      // sit it just above the container's bottom edge so it reads as
-      // attached to the chat window without obscuring its own scroll bar.
+      // v0.57.67: position the bar IMMEDIATELY BELOW the container instead
+      // of inside its bottom edge. The previous "just above container's
+      // bottom" placement landed on top of Sniffies' message-input
+      // composer; users couldn't tell whether they were clicking our bar
+      // or their own send button. Now the bar sits as a separate strip
+      // beneath the chat window. Three placement strategies in priority
+      // order: below the container (normal), above when the container
+      // hugs the viewport bottom (rare), or pinned to viewport bottom as
+      // a last resort if the container fills the screen.
       const left = Math.round(Math.max(4, rect.left + 4));
       const width = Math.round(Math.max(180, Math.min(rect.width - 8, window.innerWidth - 8)));
-      const bottom = Math.round(Math.max(4, window.innerHeight - rect.bottom));
-      if (left !== lastL || bottom !== lastB || width !== lastW) {
+      const barH = el.offsetHeight || 44; // measured after first layout; 44 is a safe default
+      const gapBelow = window.innerHeight - rect.bottom;
+      let top: number;
+      if (gapBelow >= barH + 8) {
+        // Plenty of room beneath the chat container — sit just below it.
+        top = Math.round(rect.bottom + 4);
+      } else if (rect.top >= barH + 8) {
+        // Container reaches viewport bottom; tuck above as escape.
+        top = Math.round(rect.top - barH - 4);
+      } else {
+        // Container fills the viewport entirely — fallback to bottom edge.
+        top = Math.round(window.innerHeight - barH - 4);
+      }
+      if (left !== lastL || top !== lastB || width !== lastW) {
         el.style.left = `${left}px`;
-        el.style.bottom = `${bottom}px`;
+        el.style.top = `${top}px`;
+        el.style.bottom = 'auto';
         el.style.width = `${width}px`;
-        lastL = left; lastB = bottom; lastW = width;
+        lastL = left; lastB = top; lastW = width;
       }
       rafId = requestAnimationFrame(tick);
     };
@@ -1138,8 +1155,21 @@ function injectProfileActions(contactId: string, platform: string): void {
       if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
     };
   } else {
-    // Fallback: free-float at top-center, with a drag grip the user can
-    // pull to reposition. Last position is remembered across reloads.
+    // Fallback: free-float at bottom-center, with a drag grip the user
+    // can pull to reposition. Last position is remembered across reloads.
+    // v0.57.67: one-shot migration. Earlier versions saved x/y locations
+    // that the user had dragged to (often overlapping the chat composer
+    // when anchored mode wasn't picking up the right container). Clear
+    // any stale saved position once so the new bottom-center default
+    // takes effect for everyone. Future user drags re-save under the
+    // version-keyed scheme.
+    const POS_VERSION = 'v0.57.67';
+    try {
+      if (localStorage.getItem('aggregaytor_pa_floating_pos_version') !== POS_VERSION) {
+        localStorage.removeItem('aggregaytor_pa_floating_pos');
+        localStorage.setItem('aggregaytor_pa_floating_pos_version', POS_VERSION);
+      }
+    } catch {}
     try {
       const raw = localStorage.getItem('aggregaytor_pa_floating_pos');
       if (raw) {
@@ -1147,6 +1177,9 @@ function injectProfileActions(contactId: string, platform: string): void {
         if (typeof pos.x === 'number' && typeof pos.y === 'number') {
           el.style.left = `${Math.max(0, Math.min(pos.x, window.innerWidth - 100))}px`;
           el.style.top = `${Math.max(0, Math.min(pos.y, window.innerHeight - 40))}px`;
+          // The saved position is absolute — cancel both the bottom anchor
+          // AND the centering transform that .pa-floating defaults to.
+          el.style.bottom = 'auto';
           el.style.transform = 'none';
         }
       }
@@ -1165,6 +1198,8 @@ function injectProfileActions(contactId: string, platform: string): void {
         const y = Math.max(0, Math.min(ev.clientY - dy, window.innerHeight - 40));
         el.style.left = `${x}px`;
         el.style.top = `${y}px`;
+        // Drag overrides the bottom-anchor default — switch to absolute top.
+        el.style.bottom = 'auto';
         el.style.transform = 'none';
       };
       const end = (): void => {
