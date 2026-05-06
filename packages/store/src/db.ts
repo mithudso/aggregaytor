@@ -60,7 +60,14 @@ async function ensureIndexes(db: PouchDB.Database): Promise<void> {
  */
 export async function getDB(name = 'aggregaytor'): Promise<PouchDB.Database> {
   if (_db) return _db;
-  _db = new PouchDB(name, { auto_compaction: true });
+  // v0.57.72: revs_limit=5 (default 1000) caps the per-doc revision history
+  // PouchDB keeps in IndexedDB. Per pouchdb/pouchdb#4372, revs_limit hides
+  // but doesn't delete revs — the actual delete happens on compact() —
+  // but a tighter limit means each future compaction has less to chew
+  // through and steady-state IDB size stays smaller. With auto_compaction
+  // already on, this halves the rev tree footprint over a multi-month
+  // database. Older databases get the benefit on the next compact().
+  _db = new PouchDB(name, { auto_compaction: true, revs_limit: 5 });
   await ensureIndexes(_db);
   return _db;
 }

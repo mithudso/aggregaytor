@@ -44,8 +44,15 @@ const LOG = '[Aggregaytor:SearchIndex]';
  * drop out — matching typical user expectations that full-text search is
  * strongest for recent content. Exceeding this triggers a fallback to the
  * legacy PouchDB scan for exhaustive completeness.
+ *
+ * v0.57.72: dropped 20_000 → 5_000 as part of the memory-pressure work.
+ * Each indexed doc holds a tokenized body in FlexSearch's internal reverse
+ * index — at 20_000 a heavy user could carry 50-100MB just for full-text
+ * search. Searches over older messages fall through to a PouchDB scan, so
+ * this is memory-vs-search-latency. The user reported 3.8GB idle; we
+ * trade some search latency for that.
  */
-export const SEARCH_INDEX_MAX_DOCS = 20_000;
+export const SEARCH_INDEX_MAX_DOCS = 5_000;
 
 /**
  * Document shape the index expects — keyed by PouchDB `_id`, body is the

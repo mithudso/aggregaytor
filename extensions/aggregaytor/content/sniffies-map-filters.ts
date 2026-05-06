@@ -1835,6 +1835,47 @@ export function initMapFilters(): void {
     hiddenSinceMs = Date.now();
   }, 60_000);
 
+  // v0.57.72: deep tab-lifecycle teardown. Research confirmed long-lived
+  // SPA content scripts retain through MutationObservers, postMessage
+  // payload retention, and module-level Maps holding HTMLElement refs.
+  // The visibility-hidden trim above only HALVES caches; this listener
+  // does FULL teardown when the tab is hidden for >30 min OR on
+  // pagehide (tab close / navigation away). Result: a Sniffies tab the
+  // user opened and abandoned days ago no longer hoards 100s of MB of
+  // marker refs and partial profile data.
+  let deepTeardownDone = false;
+  function deepTeardown(reason: string): void {
+    if (deepTeardownDone) return;
+    deepTeardownDone = true;
+    console.log(`[Aggregaytor:MapFilters] deep teardown (${reason}) — releasing all caches`);
+    // Release every Map/Set/Array we hold at module scope. A subsequent
+    // applyFilters() rebuilds from the live DOM + adapter scrapes.
+    idToMarker.clear();
+    markerAttitudes.clear();
+    manualAttitudes.clear();
+    markerProfileText.clear();
+    markerLastActive.clear();
+    chatActivity.clear();
+    chatPreviews.clear();
+    badgeElements.forEach((b) => { try { b.remove(); } catch {} });
+    badgeElements.clear();
+    hideHistory.length = 0;
+    // Force a microtask GC opportunity by yielding the event loop.
+    queueMicrotask(() => {});
+  }
+  // pagehide fires on tab close, navigation away, BFCache eviction —
+  // the most reliable "tab is going away" signal in modern Chrome.
+  window.addEventListener('pagehide', () => deepTeardown('pagehide'));
+  // Also tear down after 30 min hidden (user backgrounded the tab and
+  // forgot it). Re-init isn't needed because the user has to interact
+  // with the page first when they return, and adapter scrapes
+  // re-populate the Maps as new fetch responses come through.
+  setInterval(() => {
+    if (!hiddenSinceMs) return;
+    if (Date.now() - hiddenSinceMs < 30 * 60_000) return;
+    deepTeardown('30min hidden');
+  }, 5 * 60_000);
+
   // v0.57.62: respond to memory inspection requests from the bridge so the
   // side panel's Memory tab can show per-cache sizes for the MAIN-world map
   // filter state. Synchronous reply via postMessage; the bridge forwards to
