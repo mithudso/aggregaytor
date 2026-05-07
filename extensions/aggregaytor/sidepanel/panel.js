@@ -2744,6 +2744,102 @@ document.getElementById('sp-mem-reload-ext')?.addEventListener('click', () => {
   setTimeout(() => { try { chrome.runtime.reload(); } catch {} }, 500);
 });
 
+// ── Database Breakdown ─────────────────────────────────────────────────────
+// v0.57.77: lazy-scan PouchDB and render a breakdown of what's inside.
+// Click the Scan button → SW streams allDocs in 1000-row pages and groups
+// by docType + (docType:platform), plus tracks the top-10 largest individual
+// docs. Result usually arrives in 1-15s depending on DB size; we show a
+// progressive "Scanning…" state with a spinner.
+async function loadDbStats() {
+  const body = document.getElementById('sp-db-stats-body');
+  const summary = document.getElementById('sp-db-stats-summary');
+  const btn = document.getElementById('sp-db-stats-scan');
+  if (!body) return;
+  body.innerHTML = '<div class="settings-info">Scanning database… this can take 5-15 seconds on a heavy DB.</div>';
+  if (summary) summary.textContent = 'scanning…';
+  if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
+  // Generous timeout — full scan can take >30s on heavy DBs.
+  const res = await spSend({ type: 'GET_DB_STATS' }, { timeoutMs: 90000 });
+  if (btn) { btn.disabled = false; btn.textContent = 'Scan database'; }
+  if (!res?.ok) {
+    body.innerHTML = `<div class="settings-info" style="color:#f87171">Scan failed: ${esc(res?.error || 'unknown')}</div>`;
+    if (summary) summary.textContent = '';
+    return;
+  }
+  const fmtBytesShort = (b) => {
+    if (!b) return '0';
+    if (b < 1024) return `${b}B`;
+    if (b < 1048576) return `${(b / 1024).toFixed(1)}KB`;
+    if (b < 1073741824) return `${(b / 1048576).toFixed(1)}MB`;
+    return `${(b / 1073741824).toFixed(2)}GB`;
+  };
+  const rowStyle = 'display:grid;grid-template-columns:1fr 70px 90px 90px;gap:8px;padding:3px 0;align-items:center';
+  const headerStyle = rowStyle + ';font-weight:600;color:#9ca3af;font-size:9px;text-transform:uppercase;border-bottom:1px solid rgba(255,255,255,0.04)';
+  const sectionStyle = 'margin-top:8px;border-top:1px solid rgba(255,255,255,0.06);padding-top:6px';
+
+  // Per-docType table
+  const byTypeRows = (res.byType || []).map((t) => {
+    const avg = t.count ? Math.round(t.bytes / t.count) : 0;
+    return `
+      <div style="${rowStyle}">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><code>${esc(t.type)}</code></span>
+        <span style="text-align:right">${t.count.toLocaleString()}</span>
+        <span style="text-align:right">${fmtBytesShort(t.bytes)}</span>
+        <span style="text-align:right;color:#6b7280">${fmtBytesShort(avg)}/doc</span>
+      </div>`;
+  }).join('');
+
+  // Per-(type:platform) — only show entries with platform set + non-trivial size.
+  const platRows = (res.byTypePlatform || [])
+    .filter((p) => p.bytes > 1024)
+    .slice(0, 12)
+    .map((p) => `
+      <div style="${rowStyle}">
+        <span style="color:#d1d5db;padding-left:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><code>${esc(p.type)}</code> · <span style="color:#93c5fd">${esc(p.platform)}</span></span>
+        <span style="text-align:right">${p.count.toLocaleString()}</span>
+        <span style="text-align:right">${fmtBytesShort(p.bytes)}</span>
+        <span></span>
+      </div>`).join('');
+
+  // Top 10 largest individual docs.
+  const topRows = (res.topLargest || []).map((d) => {
+    const idShort = d.id.length > 50 ? d.id.slice(0, 47) + '…' : d.id;
+    return `
+      <div style="${rowStyle}" title="${esc(d.id)}">
+        <span style="color:#d1d5db;padding-left:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace;font-size:10px">${esc(idShort)}</span>
+        <span style="text-align:right;color:#9ca3af">${esc(d.type || '')}</span>
+        <span style="text-align:right">${fmtBytesShort(d.bytes)}</span>
+        <span></span>
+      </div>`;
+  }).join('');
+
+  const scanNote = res.scanCapped
+    ? `<span style="color:#fbbf24">⚠ Scan capped at ${res.scanned.toLocaleString()} of ${res.totalDocCount.toLocaleString()} docs — sizes are a representative sample.</span>`
+    : `Scanned ${res.scanned.toLocaleString()} docs (${res.elapsedMs}ms).`;
+
+  body.innerHTML = `
+    <div style="font-size:10px;color:#9ca3af;margin-bottom:6px">${scanNote}</div>
+    <div style="${headerStyle}">
+      <span>Doc type</span><span style="text-align:right">Count</span><span style="text-align:right">Total</span><span style="text-align:right">Avg</span>
+    </div>
+    ${byTypeRows || '<div class="settings-info">No documents found.</div>'}
+    ${platRows ? `
+      <div style="${sectionStyle}">
+        <div style="font-size:10px;color:#93c5fd;margin-bottom:3px">By platform</div>
+        ${platRows}
+      </div>` : ''}
+    ${topRows ? `
+      <div style="${sectionStyle}">
+        <div style="font-size:10px;color:#93c5fd;margin-bottom:3px">Top 10 largest individual docs</div>
+        ${topRows}
+      </div>` : ''}
+  `;
+  if (summary) {
+    summary.textContent = `${res.totalDocCount.toLocaleString()} docs · ${fmtBytesShort(res.totalBytesSampled)} sampled`;
+  }
+}
+document.getElementById('sp-db-stats-scan')?.addEventListener('click', loadDbStats);
+
 // Style guide
 async function loadStyleGuide() {
   try {

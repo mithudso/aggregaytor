@@ -739,6 +739,18 @@
         </div>
         <div id="sp-mem-body" style="font-size:11px"></div>
       </div>
+      <!-- v0.57.77: database breakdown — what's INSIDE PouchDB. Lazy-loaded
+           because a heavy DB takes 5-15s to scan; user clicks the button
+           when they want it. -->
+      <div class="settings-section">
+        <h3 class="settings-heading">Database Breakdown</h3>
+        <div class="settings-info">What's inside the PouchDB database — counts, sizes by document type and platform, plus the 10 largest individual documents. Useful when IndexedDB is bloated and you want to know whether messages, contacts, pictures, or dossiers are the dominant contributor.</div>
+        <div style="display:flex;gap:6px;margin:6px 0;align-items:center;flex-wrap:wrap">
+          <button class="settings-btn" id="sp-db-stats-scan" style="width:auto">Scan database</button>
+          <span id="sp-db-stats-summary" style="font-size:10px;color:#9ca3af;flex:1;text-align:right"></span>
+        </div>
+        <div id="sp-db-stats-body" style="font-size:11px;color:#9ca3af">Click <strong>Scan database</strong> to inventory the docs by type. Takes 5-15 seconds on a heavy DB.</div>
+      </div>
     </div>
   </div>
 
