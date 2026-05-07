@@ -5,7 +5,7 @@
 import type { UnifiedMessage, UnifiedContact, Platform } from '@aggregaytor/adapter-core';
 import {
   upsertMessages, upsertContact, upsertContacts, getUnreadCount, getThreadSummaries,
-  getMessagesByContact, markThreadRead,
+  getMessagesByContact, markThreadRead, purgeOldestMessages,
   getThreadMeta, upsertThreadMeta, getAllThreadMeta,
   createReminder, getReminders, markReminderNotified, deleteReminder,
   queueAutoRespond, getPendingAutoResponds, getDraftAutoResponds, getApprovedAutoResponds, updateAutoRespondStatus,
@@ -51,6 +51,13 @@ installGlobalErrorCapture('sw');
 // for PouchDB operations and message handling in the service worker.
 // Accessible via: chrome.runtime.sendMessage({type:'GET_SW_PERF'})
 const swPerf: Record<string, { calls: number; totalMs: number; maxMs: number }> = {};
+
+// v0.57.79: hard IDB cap. mem-gc runs the auto-purge when current usage
+// exceeds this; oldest non-protected messages are deleted until the cap
+// is back below the threshold. Protected = thread_meta archived /
+// hidden / blockedByThem / favorited / bookmarked (the "blocked list").
+const DB_PURGE_THRESHOLD_BYTES = 1 * 1024 * 1024 * 1024; // 1 GiB
+const PURGE_COOLDOWN_MS = 10 * 60_000; // don't re-purge within 10 min
 
 // v0.57.62: rough byte estimate for a JS value via JSON serialization length.
 // Used by GET_MEMORY_BREAKDOWN to surface order-of-magnitude offenders. We
@@ -1554,6 +1561,31 @@ async function handleMessage(msg: any): Promise<any> {
         topLargest: top,
         elapsedMs,
       };
+    }
+
+    // v0.57.79: manual purge trigger from the Memory tab. Same code path
+    // as the auto-purge that fires from mem-gc; the user gets a result
+    // summary returned synchronously.
+    case 'PURGE_OLDEST_NOW': {
+      try {
+        const threshold = Number(msg.thresholdBytes) || DB_PURGE_THRESHOLD_BYTES;
+        const result = await purgeOldestMessages(threshold);
+        invalidateThreadCache();
+        chatActivityCache = null;
+        try { await chrome.storage.local.set({ aggregaytor_last_purge: result }); } catch {}
+        console.log(`${LOG} PURGE_OLDEST_NOW: deleted ${result.deletedCount} messages, ${Math.round(result.beforeBytes / 1048576)} → ${Math.round(result.afterBytes / 1048576)} MB`);
+        return { ok: true, ...result };
+      } catch (err) {
+        console.error(`${LOG} PURGE_OLDEST_NOW failed:`, err);
+        return { ok: false, error: (err as Error).message };
+      }
+    }
+
+    case 'GET_LAST_PURGE': {
+      try {
+        const got = await chrome.storage.local.get('aggregaytor_last_purge');
+        return { ok: true, lastPurge: got?.aggregaytor_last_purge || null };
+      } catch { return { ok: true, lastPurge: null }; }
     }
 
     // v0.57.33: one-shot recovery for users whose inbox lost threads to
@@ -3842,6 +3874,45 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
         // thresholds are exceeded. Adds free + compact when warranted
         // without the user clicking anything.
         await runAutoMaintenance().catch(e => console.warn(`${LOG} runAutoMaintenance error:`, e));
+
+        // v0.57.79: auto-purge when IDB usage exceeds the hard cap.
+        // Deletes oldest non-protected messages until usage drops below
+        // the threshold. Protected = blocked / archived / hidden /
+        // favorited / bookmarked thread_meta — the user's "blocked list"
+        // is preserved. Cooldown prevents successive mem-gc ticks from
+        // re-running the purge while compact() is still releasing space
+        // from the prior run.
+        try {
+          if ((navigator as any).storage?.estimate) {
+            const est = await (navigator as any).storage.estimate();
+            const usage = est?.usage || 0;
+            if (usage > DB_PURGE_THRESHOLD_BYTES) {
+              const lastPurge = await chrome.storage.local.get('aggregaytor_last_purge');
+              const lp: any = lastPurge?.aggregaytor_last_purge;
+              const lastTs = lp?.ranAt ? new Date(lp.ranAt).getTime() : 0;
+              if (Date.now() - lastTs > PURGE_COOLDOWN_MS) {
+                console.warn(`${LOG} IDB usage ${Math.round(usage / 1048576)}MB > 1GB cap — running auto-purge`);
+                const result = await purgeOldestMessages(DB_PURGE_THRESHOLD_BYTES);
+                invalidateThreadCache();
+                chatActivityCache = null;
+                try { await chrome.storage.local.set({ aggregaytor_last_purge: result }); } catch {}
+                console.log(`${LOG} auto-purge: ${result.deletedCount} msgs deleted, ${Math.round(result.beforeBytes / 1048576)}→${Math.round(result.afterBytes / 1048576)}MB, ${result.iterations} iterations, ${result.elapsedMs}ms${result.hitSafetyCap ? ' (HIT SAFETY CAP)' : ''}`);
+                if (result.deletedCount > 0) {
+                  try {
+                    chrome.notifications?.create('agg-auto-purge', {
+                      type: 'basic',
+                      iconUrl: 'icons/icon-128.png',
+                      title: 'Aggregaytor: database trimmed',
+                      message: `Database exceeded 1 GB cap; deleted ${result.deletedCount.toLocaleString()} oldest messages (${Math.round(result.beforeBytes / 1048576)} → ${Math.round(result.afterBytes / 1048576)} MB). Blocked / archived / favorited contacts were preserved.`,
+                    });
+                  } catch {}
+                }
+              }
+            }
+          }
+        } catch (err) {
+          console.warn(`${LOG} auto-purge check failed:`, err);
+        }
 
         // v0.57.72: scheduled SW recycle. Research confirmed
         // performance.measureUserAgentSpecificMemory() is unavailable to

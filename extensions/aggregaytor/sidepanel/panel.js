@@ -2840,6 +2840,58 @@ async function loadDbStats() {
 }
 document.getElementById('sp-db-stats-scan')?.addEventListener('click', loadDbStats);
 
+// ── Auto-purge controls ────────────────────────────────────────────────────
+// v0.57.79: 1 GB cap. The mem-gc alarm runs the purge automatically when
+// IDB usage exceeds the threshold; here we let the user trigger it
+// manually and surface the last-run summary. Status string format
+// matches what the SW logs to console.
+function fmtMb(bytes) {
+  if (!bytes) return '0 MB';
+  return `${(bytes / 1048576).toFixed(0)} MB`;
+}
+async function loadLastPurge() {
+  const summary = document.getElementById('sp-purge-summary');
+  if (!summary) return;
+  const res = await spSend({ type: 'GET_LAST_PURGE' }, { silent: true });
+  const lp = res?.lastPurge;
+  if (!lp) {
+    summary.textContent = 'never run';
+    return;
+  }
+  const when = new Date(lp.ranAt).toLocaleString();
+  summary.textContent = `last: ${when} — ${lp.deletedCount} msgs, ${fmtMb(lp.beforeBytes)}→${fmtMb(lp.afterBytes)}`;
+}
+document.getElementById('sp-purge-now')?.addEventListener('click', async () => {
+  const status = document.getElementById('sp-purge-status');
+  const btn = document.getElementById('sp-purge-now');
+  if (status) { status.textContent = 'Purging oldest non-protected messages…'; status.style.color = ''; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Purging…'; }
+  // Generous timeout — purge can take 30-90s on a bloated DB.
+  const res = await spSend({ type: 'PURGE_OLDEST_NOW' }, { timeoutMs: 120000 });
+  if (btn) { btn.disabled = false; btn.textContent = 'Purge oldest now'; }
+  if (!res?.ok) {
+    if (status) { status.textContent = `Purge failed: ${res?.error || 'unknown'}`; status.style.color = '#f87171'; }
+    return;
+  }
+  if (status) {
+    const detail = res.deletedCount === 0
+      ? `No purge needed — DB at ${fmtMb(res.beforeBytes)} is below the 1 GB cap.${res.reason ? ` (${esc(res.reason)})` : ''}`
+      : `✓ Deleted ${res.deletedCount.toLocaleString()} messages · ${fmtMb(res.beforeBytes)} → ${fmtMb(res.afterBytes)} · ${res.iterations} iterations · ${res.elapsedMs}ms${res.hitSafetyCap ? ' · safety cap hit' : ''}. ${res.protectedCount} contacts protected.`;
+    status.textContent = detail;
+    status.style.color = res.deletedCount === 0 ? '#9ca3af' : '#22c55e';
+  }
+  showSpToast(res.deletedCount > 0 ? `Purged ${res.deletedCount} oldest messages` : 'Already under 1 GB cap', res.deletedCount > 0 ? 'success' : 'info');
+  loadLastPurge();
+  // Re-trigger the memory breakdown so the new IDB usage is reflected.
+  loadMemoryBreakdown();
+});
+// Refresh the last-purge summary whenever the Memory tab opens.
+const _origStartMemoryAutoRefresh = startMemoryAutoRefresh;
+startMemoryAutoRefresh = function() {
+  loadLastPurge();
+  return _origStartMemoryAutoRefresh.apply(this, arguments);
+};
+
 // Style guide
 async function loadStyleGuide() {
   try {

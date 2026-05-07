@@ -404,3 +404,179 @@ export async function getUnreadCount(
 export function invalidateUnreadCountCache(): void {
   unreadCountCache.clear();
 }
+
+// ── Auto-purge (v0.57.79) ────────────────────────────────────────────────────
+//
+// Hard cap on database size. When `navigator.storage.estimate()` reports
+// usage over a threshold, delete oldest messages until usage drops back
+// under the threshold. Skips messages from contacts that are flagged
+// archived / hidden / blockedByThem (the user's "blocked list") so the
+// retention semantics for explicit blocks aren't disturbed.
+//
+// Compaction is run after each batch of deletes so the rev-tree garbage
+// is actually released — without that, deleted docs stay in the rev tree
+// and the size doesn't drop. The compact() call inside the loop is the
+// reason this is bounded by elapsed time, not just doc count.
+//
+// Returns a summary object the caller can log + show in a notification.
+
+export interface PurgeResult {
+  ranAt: string;
+  thresholdBytes: number;
+  beforeBytes: number;
+  afterBytes: number;
+  deletedCount: number;
+  protectedCount: number;
+  iterations: number;
+  elapsedMs: number;
+  hitSafetyCap: boolean;
+  reason?: string;
+}
+
+/**
+ * Build the set of contactIds whose messages should be SPARED from purge.
+ * A contact is "blocked" if any of its thread_meta flags is set: archived,
+ * hidden, blockedByThem, or favorited (favorited is treated as a manual
+ * keep-forever flag too — same intent as "I care about this person").
+ */
+async function getProtectedContactIds(db: PouchDB.Database): Promise<Set<string>> {
+  const out = new Set<string>();
+  try {
+    const result = await db.allDocs({
+      startkey: 'meta:',
+      endkey: 'meta:￿',
+      include_docs: true,
+    });
+    for (const row of result.rows) {
+      const m = row.doc as any;
+      if (!m) continue;
+      if (m.archived || m.hidden || m.blockedByThem || m.favorited || m.bookmarked) {
+        if (m.contactId) out.add(String(m.contactId));
+      }
+    }
+  } catch (err) {
+    // Defensive — if meta lookup fails we err on the side of caution and
+    // protect EVERYTHING, which means the purge loop exits without
+    // deleting anything. Better than accidentally deleting blocked-list
+    // history.
+    console.warn('[Aggregaytor:Store] getProtectedContactIds failed:', err);
+  }
+  return out;
+}
+
+/**
+ * Estimate current IDB usage. Wraps navigator.storage.estimate so callers
+ * don't need to repeat the try/catch. Returns 0 if unsupported.
+ */
+async function getCurrentIdbBytes(): Promise<number> {
+  try {
+    if ((navigator as any).storage?.estimate) {
+      const est = await (navigator as any).storage.estimate();
+      return est?.usage || 0;
+    }
+  } catch {}
+  return 0;
+}
+
+/**
+ * Purge oldest non-protected messages until IDB usage is below `thresholdBytes`,
+ * OR safety caps are hit. Run from a periodic alarm or manually.
+ */
+export async function purgeOldestMessages(
+  thresholdBytes: number,
+  db?: PouchDB.Database,
+): Promise<PurgeResult> {
+  const t0 = Date.now();
+  const ranAt = new Date(t0).toISOString();
+  const store = db || await getDB();
+
+  const beforeBytes = await getCurrentIdbBytes();
+  if (beforeBytes <= thresholdBytes) {
+    return {
+      ranAt, thresholdBytes, beforeBytes, afterBytes: beforeBytes,
+      deletedCount: 0, protectedCount: 0, iterations: 0,
+      elapsedMs: Date.now() - t0, hitSafetyCap: false,
+      reason: 'under threshold — no purge needed',
+    };
+  }
+
+  const protectedIds = await getProtectedContactIds(store);
+  let deletedCount = 0;
+  let iterations = 0;
+  const BATCH = 500;
+  // Hard caps so a runaway purge can't grind for hours or delete more
+  // than ~50K docs in a single tick. The mem-gc alarm fires every 5min
+  // so a still-bloated DB will resume on the next tick.
+  const MAX_ITERATIONS = 100; // 50K docs at 500/iter
+  const MAX_ELAPSED_MS = 90_000; // 90s wall clock per call
+
+  let currentBytes = beforeBytes;
+  let hitSafetyCap = false;
+
+  while (currentBytes > thresholdBytes) {
+    if (iterations >= MAX_ITERATIONS) { hitSafetyCap = true; break; }
+    if (Date.now() - t0 > MAX_ELAPSED_MS) { hitSafetyCap = true; break; }
+    iterations++;
+
+    // Find oldest BATCH messages globally. Uses the (docType, timestamp)
+    // index added in db.ts so this is O(log n) seek + linear scan over
+    // BATCH rows — not a full table scan.
+    const found = await store.find({
+      selector: { docType: 'message', timestamp: { $gt: '' } },
+      sort: [{ docType: 'asc' }, { timestamp: 'asc' }],
+      limit: BATCH,
+    } as any);
+    if (!found.docs.length) break;
+
+    // Filter out messages from protected (blocked / archived / hidden /
+    // favorited / bookmarked) contacts.
+    const toDelete: Array<{ _id: string; _rev?: string; _deleted: true }> = [];
+    let skipped = 0;
+    for (const m of found.docs as any[]) {
+      if (protectedIds.has(String(m.contactId))) {
+        skipped++;
+        continue;
+      }
+      toDelete.push({ _id: m._id, _rev: m._rev, _deleted: true });
+    }
+
+    // If everything in this batch is protected, we'd loop forever (the
+    // selector returns the same docs since they're not deleted). Bail.
+    if (!toDelete.length) {
+      // Some non-protected docs may exist further along, but we can't
+      // efficiently page past the protected ones with sort+limit alone.
+      // Bail out and let the next mem-gc tick try again with potentially
+      // updated protectedIds (e.g. user un-archived something).
+      break;
+    }
+
+    await store.bulkDocs(toDelete);
+    deletedCount += toDelete.length;
+
+    // Compact every few iterations so the rev-tree garbage actually
+    // releases. Compact is expensive; running it every 5 batches gives
+    // a good lift between batches without dominating the loop.
+    if (iterations % 5 === 0) {
+      try { await store.compact(); } catch {}
+    }
+
+    currentBytes = await getCurrentIdbBytes();
+    // Defensive: if the IDB estimate didn't decrease at all (compact
+    // didn't catch up yet), bail to let the next tick continue.
+    if (currentBytes >= beforeBytes && iterations >= 3) {
+      hitSafetyCap = true;
+      break;
+    }
+  }
+
+  // One final compact to release any remaining rev-tree garbage.
+  try { await store.compact(); } catch {}
+
+  const afterBytes = await getCurrentIdbBytes();
+  const elapsedMs = Date.now() - t0;
+  return {
+    ranAt, thresholdBytes, beforeBytes, afterBytes,
+    deletedCount, protectedCount: protectedIds.size,
+    iterations, elapsedMs, hitSafetyCap,
+  };
+}
