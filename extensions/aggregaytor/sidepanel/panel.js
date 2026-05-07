@@ -470,6 +470,12 @@ function renderInboxLoadError(reason) {
         <button class="empty-action-btn" id="inbox-err-rebuild" style="border-color:rgba(239,68,68,0.5);color:#f87171${stepIdx === 3 ? ';box-shadow:0 0 0 1px rgba(239,68,68,0.6)' : ''}">Rebuild Database (when Compact won't finish)${stepIdx === 3 ? ' — will auto-fire' : ''}</button>
         <button class="empty-action-btn" id="inbox-err-reload" style="border-color:rgba(239,68,68,0.3);color:#f87171${stepIdx === 4 ? ';box-shadow:0 0 0 1px rgba(239,68,68,0.6)' : ''}">Reload Extension${stepIdx === 4 ? ' — will auto-fire' : ''}</button>
         <button class="empty-action-btn" id="inbox-err-cancel-auto" style="border-color:rgba(255,255,255,0.2);color:#9ca3af;font-size:10px">Cancel auto-recovery</button>
+        <!-- v0.57.75: opt-out path. If the database is too bloated for the
+             usual ladder to recover quickly, the user can just turn off
+             the unified inbox entirely. The setting persists; no further
+             attempts to load thread summaries until they re-enable. -->
+        <div style="border-top:1px solid rgba(255,255,255,0.06);margin-top:6px;padding-top:6px;color:#9ca3af;font-size:10px">Or skip the inbox load entirely:</div>
+        <button class="empty-action-btn" id="inbox-err-disable" style="border-color:rgba(59,130,246,0.55);color:#bfdbfe;background:rgba(59,130,246,0.18)">📭 Disable Unified Inbox (skip thread-list queries)</button>
       </div>
     </div>
   `;
@@ -589,6 +595,20 @@ function renderInboxLoadError(reason) {
   });
   container.querySelector('#inbox-err-reload')?.addEventListener('click', () => {
     chrome.runtime.reload();
+  });
+  // v0.57.75: opt-out — disable the unified inbox entirely. The user
+  // ends up at the same placeholder as toggling the Settings checkbox,
+  // but reachable directly from the failure card so they don't have to
+  // navigate elsewhere mid-recovery.
+  container.querySelector('#inbox-err-disable')?.addEventListener('click', () => {
+    cancelled = true; clearInterval(tick);
+    prefInboxDisabled = true;
+    try { chrome.storage.local.set({ aggregaytor_inbox_disabled: true }); } catch {}
+    // Reset failure counter so the next re-enable starts at attempt #1.
+    _inboxFailureCount = 0;
+    delete container.dataset.inboxDisabled;
+    renderInboxDisabledPlaceholder();
+    showSpToast('Unified inbox disabled — re-enable in Settings → Data', 'success', 4000);
   });
 }
 
