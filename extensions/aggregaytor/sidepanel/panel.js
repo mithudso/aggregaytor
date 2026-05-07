@@ -3234,18 +3234,35 @@ document.getElementById('sp-export-all')?.addEventListener('click', async () => 
 });
 
 document.getElementById('sp-export-blocked')?.addEventListener('click', async () => {
+  // v0.57.78: surface every failure mode. Previously the handler did
+  // nothing if res?.ok was false — no toast, no status update — so the
+  // button looked broken on any SW error. Now uses spSend (toast on
+  // failure) AND writes the status div explicitly on every branch.
   const status = document.getElementById('sp-export-status');
+  if (status) { status.textContent = 'Exporting blocked list…'; status.style.color = ''; }
+  const res = await spSend({ type: 'EXPORT_BLOCKED' });
+  if (!res?.ok) {
+    if (status) { status.textContent = `Export failed: ${res?.error || 'unknown'}`; status.style.color = '#f87171'; }
+    return;
+  }
+  if (typeof res.data !== 'string' || !res.data.length) {
+    if (status) { status.textContent = 'Export returned no data — nothing to download.'; status.style.color = '#fbbf24'; }
+    return;
+  }
   try {
-    const res = await chrome.runtime.sendMessage({ type: 'EXPORT_BLOCKED' });
-    if (res?.ok) {
-      const blob = new Blob([res.data], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = `aggregaytor-blocked-${new Date().toISOString().slice(0,10)}.json`;
-      a.click(); URL.revokeObjectURL(url);
-      status.textContent = 'Blocked list exported!'; status.style.color = '#22c55e';
-    }
-  } catch (err) { status.textContent = 'Error: ' + err.message; }
+    const blob = new Blob([res.data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `aggregaytor-blocked-${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(a); // ensure click() fires in all browsers
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    if (status) { status.textContent = `✓ Blocked list exported (${(res.data.length / 1024).toFixed(1)} KB)`; status.style.color = '#22c55e'; }
+    showSpToast('Blocked list exported', 'success');
+  } catch (err) {
+    if (status) { status.textContent = `Download failed: ${err?.message || err}`; status.style.color = '#f87171'; }
+  }
 });
 
 let importMode = 'all'; // 'all' or 'blocked'
