@@ -1474,93 +1474,190 @@ async function handleMessage(msg: any): Promise<any> {
     // The scan can take 5-15s on a heavy DB; the panel calls this lazily
     // on a button click, not on every Memory tab open.
     case 'GET_DB_STATS': {
-      // v0.57.78: rewritten — the prior pagination broke after page 2
-      // ("if (result.rows.length < PAGE + skip) break" was always true
-      // because allDocs with startkey returns AT MOST `limit` rows, and
-      // we were comparing against limit+1). Replaced with a single
-      // bounded allDocs call. The 30K-doc result set is ~30-60MB
-      // temporarily allocated during the scan; we walk it in one pass
-      // accumulating stats, then drop the rows reference so it's
-      // GC-eligible before we return.
+      // v0.57.80: rewritten with two-phase ID-only + sampling strategy.
+      // The previous v0.57.78 implementation called allDocs with
+      // include_docs:true on up to 30K rows — on a multi-GB bloated DB
+      // that took >90s and timed out, exactly the case this feature is
+      // meant to diagnose.
+      //
+      // New approach completes in 1-5s even on multi-GB DBs:
+      //   1. allDocs WITHOUT include_docs → fast list of every _id
+      //      (no doc body load; PouchDB just walks the rev tree
+      //      surface). Up to 100K ids.
+      //   2. Categorize each _id by prefix into the docType. Our id
+      //      schema is consistent: `msg:platform:...`, `contact:...`,
+      //      `meta:...`, `dossier:...`, `reminder:...`, `task:...`,
+      //      `auto_respond:...`, `picture:...`, `block_rule:...`,
+      //      `pref_feedback:...`, `sentiment:...`, `calendar_event:...`.
+      //   3. For each category, sample up to 30 docs (random spread)
+      //      to estimate average bytes; multiply by category count for
+      //      an extrapolated total. Same approach for top-N largest:
+      //      track the sample's biggest individuals and report them.
+      //
+      // The sampled byte estimates are inherently approximate — the
+      // panel surfaces this as "estimated" so the user knows. Trade-
+      // accuracy-for-completing-at-all is the right move here.
       const t0 = performance.now();
-      const SCAN_CAP = 30_000;
-      const byType: Record<string, { count: number; bytes: number }> = {};
-      const byTypePlatform: Record<string, { type: string; platform: string; count: number; bytes: number }> = {};
+      const ID_LIMIT = 100_000;
+      const SAMPLE_PER_CATEGORY = 30;
       const TOP_N = 10;
-      const top: Array<{ id: string; bytes: number; type: string; platform: string }> = [];
-      let scanned = 0;
-      let totalBytes = 0;
       let totalDocCount = 0;
 
       try {
         const db = await getDB();
         try { totalDocCount = ((await db.info()) as any).doc_count || 0; } catch {}
-        const result = await db.allDocs({
-          include_docs: true,
-          limit: SCAN_CAP,
-        });
-        for (const row of result.rows) {
-          const doc: any = row.doc;
-          if (!doc) continue;
-          const type = String(doc.docType || 'unknown');
-          const platform = String(doc.platform || '');
-          let bytes = 0;
-          try { bytes = (JSON.stringify(doc) || '').length * 2; } catch {}
-          totalBytes += bytes;
 
-          if (!byType[type]) byType[type] = { count: 0, bytes: 0 };
-          byType[type].count++;
-          byType[type].bytes += bytes;
-
-          if (platform) {
-            const k = `${type}:${platform}`;
-            if (!byTypePlatform[k]) byTypePlatform[k] = { type, platform, count: 0, bytes: 0 };
-            byTypePlatform[k].count++;
-            byTypePlatform[k].bytes += bytes;
-          }
-
-          // Top-N by serialized doc size. Sliding-min: keep top sorted asc
-          // by bytes so top[0] is always the smallest member. Insert when
-          // the new doc beats top[0]; resort.
-          if (top.length < TOP_N) {
-            top.push({ id: String(row.id), bytes, type, platform });
-            if (top.length === TOP_N) top.sort((a, b) => a.bytes - b.bytes);
-          } else if (bytes > top[0].bytes) {
-            top[0] = { id: String(row.id), bytes, type, platform };
-            top.sort((a, b) => a.bytes - b.bytes);
-          }
-          scanned++;
+        // ─ Phase 1: fast id-only scan ─
+        const idsResult = await db.allDocs({ limit: ID_LIMIT });
+        const idsByCategory: Record<string, string[]> = {};
+        for (const row of idsResult.rows) {
+          const id = String(row.id);
+          // Extract category from the id prefix. Our schema uses ':'
+          // as the namespace separator, e.g. 'msg:sniffies:abc123'.
+          // Anything we don't recognise falls into 'unknown'.
+          const colonIdx = id.indexOf(':');
+          const category = colonIdx > 0 ? id.slice(0, colonIdx) : 'unknown';
+          if (!idsByCategory[category]) idsByCategory[category] = [];
+          idsByCategory[category].push(id);
         }
-        // Drop the rows reference so the 30K-doc array is GC-eligible
-        // before we serialize the response.
-        (result as any).rows = null;
+        // Drop the rows reference; each id we keep is just a string,
+        // so this freeing isn't huge but every bit helps on a tight SW.
+        (idsResult as any).rows = null;
+
+        // Map id-prefix to docType. Most are 1:1 but a few don't match
+        // the docType field exactly (e.g. id 'meta:contact:sniffies:abc'
+        // → docType 'thread_meta'). The mapping is what the user
+        // actually sees in the panel; we keep it explicit so the table
+        // labels are familiar.
+        const PREFIX_TO_TYPE: Record<string, string> = {
+          msg: 'message',
+          contact: 'contact',
+          meta: 'thread_meta',
+          dossier: 'dossier',
+          reminder: 'reminder',
+          task: 'task',
+          auto_respond: 'auto_respond',
+          picture: 'picture',
+          blockrule: 'block_rule',
+          pref_feedback: 'preference_feedback',
+          pref_model: 'preference_model',
+          sentiment: 'sentiment',
+          calendar_event: 'calendar_event',
+          unknown: 'unknown',
+        };
+
+        // ─ Phase 2: per-category sampling for byte estimates ─
+        const byType: Record<string, { count: number; bytes: number; sampled: number; estimated: boolean }> = {};
+        const byTypePlatform: Record<string, { type: string; platform: string; count: number; bytes: number }> = {};
+        const top: Array<{ id: string; bytes: number; type: string; platform: string }> = [];
+        let totalBytes = 0;
+
+        for (const [category, ids] of Object.entries(idsByCategory)) {
+          const type = PREFIX_TO_TYPE[category] || category;
+          // Pick up to SAMPLE_PER_CATEGORY ids — evenly spaced across
+          // the array so we get a representative spread (catches large
+          // outliers in the middle / end of the list, not just the
+          // newest). For small categories we just take all of them.
+          const sampleSize = Math.min(SAMPLE_PER_CATEGORY, ids.length);
+          const sampleIds: string[] = [];
+          if (ids.length <= SAMPLE_PER_CATEGORY) {
+            sampleIds.push(...ids);
+          } else {
+            const stride = ids.length / sampleSize;
+            for (let i = 0; i < sampleSize; i++) {
+              sampleIds.push(ids[Math.floor(i * stride)]);
+            }
+          }
+          // Fetch the sample with include_docs. Bounded — 30 docs per
+          // category × ~13 categories = ~400 doc loads max, fast.
+          let sampleBytesSum = 0;
+          let sampleCount = 0;
+          // Per-platform within this category (only meaningful when the
+          // doc has a platform field, i.e. message / contact / meta /
+          // dossier / picture).
+          const platCounts: Record<string, { count: number; bytesSum: number; sampleCount: number }> = {};
+          try {
+            const sampleResult = await db.allDocs({ keys: sampleIds, include_docs: true });
+            for (const row of sampleResult.rows) {
+              const doc: any = (row as any).doc;
+              if (!doc) continue;
+              let bytes = 0;
+              try { bytes = (JSON.stringify(doc) || '').length * 2; } catch {}
+              sampleBytesSum += bytes;
+              sampleCount++;
+              const platform = String(doc.platform || '');
+              if (platform) {
+                if (!platCounts[platform]) platCounts[platform] = { count: 0, bytesSum: 0, sampleCount: 0 };
+                platCounts[platform].sampleCount++;
+                platCounts[platform].bytesSum += bytes;
+              }
+              // Track top-N from each category's sample. Sliding min.
+              if (top.length < TOP_N) {
+                top.push({ id: String(row.id), bytes, type, platform });
+                if (top.length === TOP_N) top.sort((a, b) => a.bytes - b.bytes);
+              } else if (bytes > top[0].bytes) {
+                top[0] = { id: String(row.id), bytes, type, platform };
+                top.sort((a, b) => a.bytes - b.bytes);
+              }
+            }
+          } catch (err) {
+            console.warn(`${LOG} GET_DB_STATS sampling for ${category} failed:`, err);
+          }
+
+          const avgBytes = sampleCount > 0 ? sampleBytesSum / sampleCount : 0;
+          const estimatedBytes = Math.round(avgBytes * ids.length);
+          totalBytes += estimatedBytes;
+          byType[type] = {
+            count: ids.length,
+            bytes: estimatedBytes,
+            sampled: sampleCount,
+            estimated: ids.length > sampleCount,
+          };
+
+          // Per-platform within category. Each platform's count comes
+          // from the sample-fraction × total: if 28/30 sampled docs
+          // are on 'sniffies', extrapolate that fraction to the full
+          // category count.
+          for (const [platform, p] of Object.entries(platCounts)) {
+            const fraction = p.sampleCount / sampleCount;
+            const estCount = Math.round(fraction * ids.length);
+            const platAvg = p.bytesSum / p.sampleCount;
+            const k = `${type}:${platform}`;
+            byTypePlatform[k] = {
+              type, platform,
+              count: estCount,
+              bytes: Math.round(platAvg * estCount),
+            };
+          }
+        }
+
+        const byTypeArr = Object.entries(byType)
+          .map(([type, v]) => ({ type, ...v }))
+          .sort((a, b) => b.bytes - a.bytes);
+        const byTypePlatformArr = Object.values(byTypePlatform).sort((a, b) => b.bytes - a.bytes);
+        top.sort((a, b) => b.bytes - a.bytes);
+
+        const elapsedMs = Math.round(performance.now() - t0);
+        const idsScanned = idsResult.rows ? idsResult.rows.length : Object.values(idsByCategory).reduce((s, l) => s + l.length, 0);
+        console.log(`${LOG} GET_DB_STATS: ${idsScanned} ids + ${byTypeArr.reduce((s, t) => s + t.sampled, 0)} samples in ${elapsedMs}ms (${Math.round(totalBytes / 1048576)}MB est)`);
+        return {
+          ok: true,
+          scanned: idsScanned,
+          totalDocCount,
+          scanCapped: idsScanned >= ID_LIMIT && totalDocCount > ID_LIMIT,
+          totalBytesSampled: totalBytes,
+          estimated: true, // counts are exact, byte values are extrapolated from samples
+          byType: byTypeArr,
+          byTypePlatform: byTypePlatformArr,
+          topLargest: top,
+          elapsedMs,
+        };
       } catch (err) {
         const elapsedMs = Math.round(performance.now() - t0);
         const message = (err as Error)?.message || String(err);
         console.error(`${LOG} GET_DB_STATS failed after ${elapsedMs}ms:`, err);
-        return { ok: false, error: message, elapsedMs, scanned };
+        return { ok: false, error: message, elapsedMs };
       }
-
-      // Sort outputs by bytes desc for display.
-      const byTypeArr = Object.entries(byType)
-        .map(([type, v]) => ({ type, ...v }))
-        .sort((a, b) => b.bytes - a.bytes);
-      const byTypePlatformArr = Object.values(byTypePlatform).sort((a, b) => b.bytes - a.bytes);
-      top.sort((a, b) => b.bytes - a.bytes);
-
-      const elapsedMs = Math.round(performance.now() - t0);
-      console.log(`${LOG} GET_DB_STATS: scanned ${scanned}/${totalDocCount} docs in ${elapsedMs}ms (${Math.round(totalBytes / 1048576)}MB sampled)`);
-      return {
-        ok: true,
-        scanned,
-        totalDocCount,
-        scanCapped: scanned >= SCAN_CAP && totalDocCount > SCAN_CAP,
-        totalBytesSampled: totalBytes,
-        byType: byTypeArr,
-        byTypePlatform: byTypePlatformArr,
-        topLargest: top,
-        elapsedMs,
-      };
     }
 
     // v0.57.79: manual purge trigger from the Memory tab. Same code path
