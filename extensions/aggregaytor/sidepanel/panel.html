@@ -751,6 +751,19 @@
         </div>
         <div id="sp-db-stats-body" style="font-size:11px;color:#9ca3af">Click <strong>Scan database</strong> to inventory the docs by type. Takes 5-15 seconds on a heavy DB.</div>
       </div>
+      <!-- v0.57.79: hard 1 GB cap. mem-gc auto-purges oldest non-protected
+           messages when IDB usage exceeds the threshold; the user can also
+           trigger it manually here. Protected = blocked/archived/hidden/
+           favorited/bookmarked thread_meta. -->
+      <div class="settings-section">
+        <h3 class="settings-heading">Auto-purge (1 GB cap)</h3>
+        <div class="settings-info">When the database grows past 1 GB, the extension automatically deletes oldest non-protected messages until usage is back under the cap. <strong>Blocked, archived, hidden, favorited, and bookmarked contacts are protected</strong> — their messages are never purged. Auto-purge runs on the 5-minute mem-gc tick.</div>
+        <div style="display:flex;gap:6px;margin:6px 0;align-items:center;flex-wrap:wrap">
+          <button class="settings-btn" id="sp-purge-now" style="width:auto;border-color:rgba(251,191,36,0.5);color:#fbbf24" title="Run the auto-purge now instead of waiting for the next mem-gc tick. Same logic — drops oldest non-protected messages until usage is below 1 GB.">Purge oldest now</button>
+          <span id="sp-purge-summary" style="font-size:10px;color:#9ca3af;flex:1;text-align:right"></span>
+        </div>
+        <div id="sp-purge-status" style="font-size:11px;color:#9ca3af"></div>
+      </div>
     </div>
   </div>
 

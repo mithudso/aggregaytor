@@ -40,6 +40,10 @@ async function ensureIndexes(db: PouchDB.Database): Promise<void> {
   await Promise.all([
     db.createIndex({ index: { fields: ['docType', 'platform', 'timestamp'] } }),
     db.createIndex({ index: { fields: ['docType', 'contactId', 'timestamp'] } }),
+    // v0.57.79: global oldest-first scan support. Used by the auto-purge
+    // job which sorts ALL messages by timestamp asc to find the oldest
+    // ones to delete when IDB usage exceeds the threshold.
+    db.createIndex({ index: { fields: ['docType', 'timestamp'] } }),
     db.createIndex({ index: { fields: ['docType', 'threadId'] } }),
     db.createIndex({ index: { fields: ['docType', 'platform'] } }),
     db.createIndex({ index: { fields: ['docType', 'read', 'timestamp'] } }),
