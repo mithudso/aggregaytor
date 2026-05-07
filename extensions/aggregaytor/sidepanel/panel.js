@@ -2759,7 +2759,10 @@ async function loadDbStats() {
   if (summary) summary.textContent = 'scanning…';
   if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
   // Generous timeout — full scan can take >30s on heavy DBs.
-  const res = await spSend({ type: 'GET_DB_STATS' }, { timeoutMs: 90000 });
+  // v0.57.80: SW handler now uses ID-only scan + sampling, completes in
+  // 1-5s on multi-GB DBs. Bumped timeout to 60s as a safety floor;
+  // shouldn't be needed in practice.
+  const res = await spSend({ type: 'GET_DB_STATS' }, { timeoutMs: 60000 });
   if (btn) { btn.disabled = false; btn.textContent = 'Scan database'; }
   if (!res?.ok) {
     body.innerHTML = `<div class="settings-info" style="color:#f87171">Scan failed: ${esc(res?.error || 'unknown')}</div>`;
@@ -2813,9 +2816,16 @@ async function loadDbStats() {
       </div>`;
   }).join('');
 
+  // v0.57.80: SW handler now does ID-only scan + per-category sampling
+  // for byte estimates. Counts are exact; byte values are extrapolated
+  // from samples. Surface that the byte values are estimates so the
+  // user reads them as ballpark rather than precise.
+  const estimateNote = res.estimated
+    ? ` <span style="color:#9ca3af">(byte values are estimated from a per-category sample of up to 30 docs each)</span>`
+    : '';
   const scanNote = res.scanCapped
-    ? `<span style="color:#fbbf24">⚠ Scan capped at ${res.scanned.toLocaleString()} of ${res.totalDocCount.toLocaleString()} docs — sizes are a representative sample.</span>`
-    : `Scanned ${res.scanned.toLocaleString()} docs (${res.elapsedMs}ms).`;
+    ? `<span style="color:#fbbf24">⚠ Scan capped at ${res.scanned.toLocaleString()} of ${res.totalDocCount.toLocaleString()} docs — sizes are a representative sample.</span>${estimateNote}`
+    : `Scanned ${res.scanned.toLocaleString()} doc ids (${res.elapsedMs}ms).${estimateNote}`;
 
   body.innerHTML = `
     <div style="font-size:10px;color:#9ca3af;margin-bottom:6px">${scanNote}</div>
@@ -2835,7 +2845,7 @@ async function loadDbStats() {
       </div>` : ''}
   `;
   if (summary) {
-    summary.textContent = `${res.totalDocCount.toLocaleString()} docs · ${fmtBytesShort(res.totalBytesSampled)} sampled`;
+    summary.textContent = `${res.totalDocCount.toLocaleString()} docs · ${fmtBytesShort(res.totalBytesSampled)} ${res.estimated ? 'estimated' : 'sampled'}`;
   }
 }
 document.getElementById('sp-db-stats-scan')?.addEventListener('click', loadDbStats);
@@ -3292,7 +3302,9 @@ document.getElementById('sp-export-blocked')?.addEventListener('click', async ()
   // failure) AND writes the status div explicitly on every branch.
   const status = document.getElementById('sp-export-status');
   if (status) { status.textContent = 'Exporting blocked list…'; status.style.color = ''; }
-  const res = await spSend({ type: 'EXPORT_BLOCKED' });
+  // v0.57.80: bumped from 15s default → 60s. exportBlocked walks all
+  // thread_meta docs which can take 20-40s on a heavy DB.
+  const res = await spSend({ type: 'EXPORT_BLOCKED' }, { timeoutMs: 60000 });
   if (!res?.ok) {
     if (status) { status.textContent = `Export failed: ${res?.error || 'unknown'}`; status.style.color = '#f87171'; }
     return;
