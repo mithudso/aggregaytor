@@ -159,15 +159,27 @@ async function spSend(msg, { silent = false, timeoutMs = 15000 } = {}) {
 let prefTimestampAbsolute = false; // true = "11:42 PM", false = "5m" (relative)
 let prefAutoNavigate = true;       // true = open platform tab on thread click
 let prefToolbarMode = 'icon';      // 'icon', 'icon-text', 'text'
+// v0.57.74: when true, loadThreads() short-circuits with a placeholder
+// instead of running GET_THREAD_SUMMARIES (which scans up to 5000
+// messages on cold start). For users who use Aggregaytor only for
+// platform-side filters, the Memory tab, settings, etc — and don't
+// need the unified inbox — disabling avoids the heaviest single SW
+// query in the codebase.
+let prefInboxDisabled = false;
 let selectedThreadIndex = -1;      // keyboard navigation: currently highlighted thread
 
 // Load preferences from storage at startup
-chrome.storage.local.get(['aggregaytor_timestamp_format', 'aggregaytor_auto_navigate', 'aggregaytor_toolbar_mode'], (result) => {
-  prefTimestampAbsolute = result.aggregaytor_timestamp_format === 'absolute';
-  prefAutoNavigate = result.aggregaytor_auto_navigate !== false;
-  prefToolbarMode = result.aggregaytor_toolbar_mode || 'icon';
-  applyInboxToolbarMode();
-});
+chrome.storage.local.get(
+  ['aggregaytor_timestamp_format', 'aggregaytor_auto_navigate', 'aggregaytor_toolbar_mode', 'aggregaytor_inbox_disabled'],
+  (result) => {
+    prefTimestampAbsolute = result.aggregaytor_timestamp_format === 'absolute';
+    prefAutoNavigate = result.aggregaytor_auto_navigate !== false;
+    prefToolbarMode = result.aggregaytor_toolbar_mode || 'icon';
+    prefInboxDisabled = !!result.aggregaytor_inbox_disabled;
+    applyInboxToolbarMode();
+    if (prefInboxDisabled) renderInboxDisabledPlaceholder();
+  },
+);
 
 /**
  * Rewrite the inbox top-bar buttons (⚡⧉☑📷🖼🔄⚙) according to the current
@@ -236,7 +248,58 @@ let _apcDebounceTarget = '';
 
 // ── Inbox ───────────────────────────────────────────────────────────────────
 
+/**
+ * v0.57.74: render the "Inbox disabled" state. Replaces the thread list with
+ * a static card explaining the inbox is off and how to re-enable it. The rest
+ * of the panel (header buttons, settings, Memory tab, Reminders viewer) stays
+ * fully functional — only the thread-list view is suppressed.
+ *
+ * Idempotent: safe to call repeatedly. Sets a flag on the container so the
+ * card isn't re-rendered every refresh tick.
+ */
+function renderInboxDisabledPlaceholder() {
+  const container = document.getElementById('thread-list');
+  if (!container) return;
+  if (container.dataset.inboxDisabled === '1') return;
+  container.dataset.inboxDisabled = '1';
+  container.innerHTML = `
+    <div class="empty-state" style="padding:20px 16px">
+      <div style="font-size:32px;margin-bottom:6px">📭</div>
+      <h2 style="font-size:14px;margin:6px 0">Unified inbox is disabled</h2>
+      <p style="color:#9ca3af;font-size:11px;line-height:1.5;max-width:300px;margin:8px auto 12px">
+        The thread-list view is off. Aggregaytor is still tracking messages
+        in the background and persisting them to local storage; this just
+        skips the heaviest SW query (<code>GET_THREAD_SUMMARIES</code>) on
+        every panel open. Settings, Memory, Reminders, and platform-side
+        filters all still work.
+      </p>
+      <button class="empty-action-btn" id="enable-inbox-btn" style="border-color:rgba(59,130,246,0.55);color:#bfdbfe;background:rgba(59,130,246,0.18)">Re-enable unified inbox</button>
+    </div>`;
+  // Wire the re-enable button so the user doesn't have to dig into Settings
+  // to flip back on.
+  const btn = document.getElementById('enable-inbox-btn');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      prefInboxDisabled = false;
+      try { chrome.storage.local.set({ aggregaytor_inbox_disabled: false }); } catch {}
+      // Sync the settings checkbox if it's already loaded.
+      const cb = document.getElementById('sp-inbox-disabled');
+      if (cb) cb.checked = false;
+      delete container.dataset.inboxDisabled;
+      loadThreads();
+    });
+  }
+}
+
 async function loadThreads() {
+  // v0.57.74: respect the "disable unified inbox" preference. Skips the
+  // GET_THREAD_SUMMARIES + GET_ALL_THREAD_META queries entirely (the two
+  // heaviest SW reads we issue) and renders a placeholder so the panel
+  // is still usable for settings / Memory tab / Reminders viewer.
+  if (prefInboxDisabled) {
+    renderInboxDisabledPlaceholder();
+    return;
+  }
   // Always fetch ALL summaries (no platform filter) so unread badge counts
   // are correct across all platforms. Filter client-side for display.
   const container = document.getElementById('thread-list');
@@ -2360,10 +2423,12 @@ async function loadInlineSettings() {
   } catch {}
   // Load display preferences
   try {
-    const prefs = await chrome.storage.local.get(['aggregaytor_timestamp_format', 'aggregaytor_auto_navigate', 'aggregaytor_toolbar_mode']);
+    const prefs = await chrome.storage.local.get(['aggregaytor_timestamp_format', 'aggregaytor_auto_navigate', 'aggregaytor_toolbar_mode', 'aggregaytor_inbox_disabled']);
     document.getElementById('sp-timestamp-absolute').checked = prefs.aggregaytor_timestamp_format === 'absolute';
     document.getElementById('sp-auto-navigate').checked = prefs.aggregaytor_auto_navigate !== false;
     document.getElementById('sp-toolbar-mode').value = prefs.aggregaytor_toolbar_mode || 'icon';
+    const inboxCb = document.getElementById('sp-inbox-disabled');
+    if (inboxCb) inboxCb.checked = !!prefs.aggregaytor_inbox_disabled;
   } catch {}
 }
 
@@ -2426,6 +2491,17 @@ document.getElementById('sp-timestamp-absolute').addEventListener('change', (e) 
 document.getElementById('sp-auto-navigate').addEventListener('change', (e) => {
   prefAutoNavigate = e.target.checked;
   chrome.storage.local.set({ aggregaytor_auto_navigate: e.target.checked });
+});
+// v0.57.74: disable / re-enable the unified inbox. On enable we clear the
+// "inboxDisabled" marker on the thread-list container and trigger a fresh
+// loadThreads() so the user sees their inbox immediately. On disable we
+// just call loadThreads() which short-circuits to the placeholder.
+document.getElementById('sp-inbox-disabled')?.addEventListener('change', (e) => {
+  prefInboxDisabled = e.target.checked;
+  chrome.storage.local.set({ aggregaytor_inbox_disabled: prefInboxDisabled });
+  const container = document.getElementById('thread-list');
+  if (container) delete container.dataset.inboxDisabled;
+  if (document.body.classList.contains('view-inbox')) loadThreads();
 });
 document.getElementById('sp-toolbar-mode')?.addEventListener('change', (e) => {
   const mode = e.target.value;

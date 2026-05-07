@@ -880,62 +880,207 @@ function hideFloatingPanel(): void {
 const PROFILE_ACTIONS_ID = 'aggregaytor-profile-actions';
 const PROFILE_ACTIONS_CSS_ID = 'aggregaytor-profile-actions-css';
 
+// ── Local Storage for Notes + Reminders ────────────────────────────────────
+// v0.57.70: ported from the userscript v0.7.46 pattern. Notes and reminders
+// are now mirrored to localStorage SYNCHRONOUSLY on every save — the SW
+// PouchDB write is best-effort secondary. This is what made the userscript
+// version bulletproof: no IPC race, no debounce-then-navigate-loses-data,
+// no silent SW handler errors. The next page load reads localStorage first
+// (instant) then reconciles with whatever the SW returns from PouchDB.
+//
+// Schema:
+//   aggregaytor_sniffies_notes_v1 = { [profileId]: noteText }
+//   aggregaytor_sniffies_reminders_v1 = LocalReminder[]
+//
+// LocalReminder mirrors what the SW persists, plus a snapshot for offline
+// rendering (the Reminders panel doesn't have to wait for the SW to load).
+
+const SNIFFIES_NOTES_KEY = 'aggregaytor_sniffies_notes_v1';
+const SNIFFIES_REMINDERS_KEY = 'aggregaytor_sniffies_reminders_v1';
+
+interface LocalReminder {
+  id: string;            // matches SW reminder._id when round-tripped
+  profileId: string;
+  contactId: string;     // 'sniffies:abc123'
+  platform: string;
+  note: string;
+  dueAt: string;         // ISO 8601
+  createdAt: string;     // ISO 8601
+  contactSnapshot?: {
+    displayName?: string;
+    avatarUrl?: string;
+    metadata?: Record<string, unknown>;
+  };
+}
+
+function loadLocalNotes(): Record<string, string> {
+  try { return JSON.parse(localStorage.getItem(SNIFFIES_NOTES_KEY) || '{}') || {}; } catch { return {}; }
+}
+function saveLocalNotes(notes: Record<string, string>): void {
+  try { localStorage.setItem(SNIFFIES_NOTES_KEY, JSON.stringify(notes)); } catch {}
+}
+function setLocalNote(profileId: string, note: string): void {
+  const all = loadLocalNotes();
+  if (note.trim()) all[profileId] = note;
+  else delete all[profileId];
+  saveLocalNotes(all);
+}
+function getLocalNote(profileId: string): string {
+  return loadLocalNotes()[profileId] || '';
+}
+function loadLocalReminders(): LocalReminder[] {
+  try {
+    const arr = JSON.parse(localStorage.getItem(SNIFFIES_REMINDERS_KEY) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+function saveLocalReminders(arr: LocalReminder[]): void {
+  try { localStorage.setItem(SNIFFIES_REMINDERS_KEY, JSON.stringify(arr.slice(-200))); } catch {}
+}
+function addLocalReminder(r: LocalReminder): void {
+  const arr = loadLocalReminders();
+  arr.push(r);
+  saveLocalReminders(arr);
+}
+function removeLocalReminder(id: string): void {
+  saveLocalReminders(loadLocalReminders().filter((r) => r.id !== id));
+}
+function getLocalRemindersForProfile(profileId: string): LocalReminder[] {
+  return loadLocalReminders()
+    .filter((r) => r.profileId === profileId)
+    .sort((a, b) => a.dueAt.localeCompare(b.dueAt));
+}
+/** Earliest still-pending (or recently overdue) reminder for a profile, or null. */
+function getNextReminderForProfile(profileId: string): LocalReminder | null {
+  const now = Date.now();
+  const list = getLocalRemindersForProfile(profileId).filter((r) => {
+    const t = new Date(r.dueAt).getTime();
+    // Show overdue ones from the last 7 days too — they're still actionable
+    return t >= now - 7 * 86_400_000;
+  });
+  return list[0] || null;
+}
+function escHtml(s: string): string {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function fmtRelativeReminder(iso: string): string {
+  const ms = new Date(iso).getTime() - Date.now();
+  const past = ms < 0;
+  const abs = Math.abs(ms);
+  const mins = Math.round(abs / 60_000);
+  if (mins < 60) return past ? `${mins}m ago` : `in ${mins}m`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return past ? `${hours}h ago` : `in ${hours}h`;
+  const days = Math.round(hours / 24);
+  return past ? `${days}d ago` : `in ${days}d`;
+}
+
 function injectProfileActionsCSS(): void {
   if (document.getElementById(PROFILE_ACTIONS_CSS_ID)) return;
   const s = document.createElement('style');
   s.id = PROFILE_ACTIONS_CSS_ID;
   s.textContent = `
+    /* v0.57.69: vertical column layout. Bar is a narrow column placed to
+       the LEFT of the chat window. Buttons stack vertically and stretch to
+       full column width; stars stay horizontal as a single row inside the
+       column. Width is fixed (140px) so the anchor follower can compute
+       left = chat.left - barWidth - 4 deterministically. The notes and
+       reminder collapse panels fit naturally inside the column since they
+       were already width:100%. */
     #${PROFILE_ACTIONS_ID} {
-      display:flex; flex-wrap:wrap; gap:6px; align-items:center;
-      padding:8px 12px; margin:6px 0;
+      display:flex; flex-direction:column; gap:5px; align-items:stretch;
+      padding:8px 7px; margin:0;
+      width:140px; box-sizing:border-box;
       background:rgba(15,20,25,0.92); border:1px solid rgba(59,130,246,0.35);
       border-radius:8px; font-family:system-ui,sans-serif; font-size:12px; color:#e7e9ea;
       backdrop-filter:blur(6px);
+      max-height:calc(100vh - 16px); overflow-y:auto;
     }
-    /* Fallback: when no profile container is found, anchor the bar to the
-       top of the viewport so it's always visible while a Sniffies chat or
-       profile is open. The user can drag it via the grip dot.
-       v0.57.40: z-index bumped to ~max-int because Sniffies' chat/profile
-       overlay renders at a higher index than our previous 99997 and was
-       visually covering the bar. The new value is well above any plausible
-       overlay stack. */
+    /* Floating fallback when no chat container is detected. Pinned to the
+       LEFT side of the viewport, vertically centered, since the bar is a
+       column now. Saved-drag positions still win via the restore code. */
     #${PROFILE_ACTIONS_ID}.pa-floating {
-      position:fixed; top:50px; left:50%; transform:translateX(-50%);
-      z-index:2147483646; max-width:calc(100vw - 24px); margin:0;
+      position:fixed; top:50%; left:8px; transform:translateY(-50%);
+      z-index:2147483646; margin:0;
       box-shadow:0 4px 16px rgba(0,0,0,0.5);
     }
-    /* v0.57.66: anchored mode — pinned to the bottom of the active
-       chat/profile window. left/bottom/width are set inline by the
-       follower loop, so we leave them blank here. The drag grip is
-       hidden because the bar isn't movable when anchored. */
+    /* Anchored mode — pinned to the left of the active chat/profile
+       window. left/top set inline by the follower; height is bounded by
+       the chat's own height (set inline) so the column never overflows. */
     #${PROFILE_ACTIONS_ID}.pa-anchored {
       position:fixed; z-index:2147483646; margin:0;
-      box-shadow:0 -2px 16px rgba(0,0,0,0.5);
-      border-top-left-radius:8px; border-top-right-radius:8px;
-      border-bottom-left-radius:0; border-bottom-right-radius:0;
-      border-bottom:none;
+      box-shadow:0 4px 16px rgba(0,0,0,0.5);
+      border-radius:8px;
     }
     #${PROFILE_ACTIONS_ID} .pa-grip {
       cursor:move; color:#6b7280; font-size:14px; user-select:none;
-      padding:0 4px; display:none;
+      padding:2px 0; display:none; text-align:center; letter-spacing:2px;
     }
-    #${PROFILE_ACTIONS_ID}.pa-floating .pa-grip { display:inline; }
+    #${PROFILE_ACTIONS_ID}.pa-floating .pa-grip { display:block; }
     #${PROFILE_ACTIONS_ID}.pa-anchored .pa-grip { display:none; }
+    /* v0.57.71: collapse toggle. Visible when expanded as a small ◀
+       button at the top of the column. When the column is collapsed
+       (.pa-collapsed) every other child is hidden and the toggle is the
+       only visible thing — it grows to a vertical handle the user can
+       click to re-expand. */
+    #${PROFILE_ACTIONS_ID} .pa-collapse-btn {
+      align-self:flex-end; background:rgba(255,255,255,0.04);
+      border:1px solid rgba(255,255,255,0.1); color:#9ca3af;
+      border-radius:4px; cursor:pointer; padding:2px 6px;
+      font-size:11px; line-height:1; transition:background 0.15s;
+      width:auto;
+    }
+    #${PROFILE_ACTIONS_ID} .pa-collapse-btn:hover { background:rgba(59,130,246,0.18); color:#bfdbfe; border-color:rgba(59,130,246,0.4); }
+    #${PROFILE_ACTIONS_ID}.pa-collapsed {
+      width:30px; padding:6px 4px; gap:0;
+      align-items:center; cursor:pointer;
+    }
+    #${PROFILE_ACTIONS_ID}.pa-collapsed .pa-collapse-btn {
+      align-self:center; padding:6px 4px; font-size:13px;
+      width:100%; box-sizing:border-box;
+      background:rgba(59,130,246,0.15); border-color:rgba(59,130,246,0.4);
+      color:#bfdbfe;
+    }
+    /* Hide everything else inside the collapsed column. The bar becomes
+       a vertical sliver with just the ▶ expand button visible. */
+    #${PROFILE_ACTIONS_ID}.pa-collapsed .pa-btn:not(.pa-collapse-btn),
+    #${PROFILE_ACTIONS_ID}.pa-collapsed .pa-stars,
+    #${PROFILE_ACTIONS_ID}.pa-collapsed .pa-notes-wrap,
+    #${PROFILE_ACTIONS_ID}.pa-collapsed .pa-reminder-wrap,
+    #${PROFILE_ACTIONS_ID}.pa-collapsed .pa-reminder-badge,
+    #${PROFILE_ACTIONS_ID}.pa-collapsed .pa-grip {
+      display:none !important;
+    }
+    /* Buttons fill the column width; tighter padding suits the narrower
+       footprint than the previous wide-row layout. text-align:left so the
+       emoji + label read as natural action items. */
     #${PROFILE_ACTIONS_ID} .pa-btn {
       background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12);
-      border-radius:6px; padding:4px 10px; color:#e7e9ea; cursor:pointer;
+      border-radius:6px; padding:5px 8px; color:#e7e9ea; cursor:pointer;
       font-size:11px; font-family:inherit; transition:background 0.15s;
+      width:100%; box-sizing:border-box; text-align:left; white-space:nowrap;
+      overflow:hidden; text-overflow:ellipsis;
     }
     #${PROFILE_ACTIONS_ID} .pa-btn:hover { background:rgba(59,130,246,0.2); border-color:rgba(59,130,246,0.4); }
     #${PROFILE_ACTIONS_ID} .pa-btn.danger { border-color:rgba(239,68,68,0.3); color:#f87171; }
     #${PROFILE_ACTIONS_ID} .pa-btn.danger:hover { background:rgba(239,68,68,0.15); }
     #${PROFILE_ACTIONS_ID} .pa-btn:disabled { opacity:0.5; cursor:default; }
-    #${PROFILE_ACTIONS_ID} .pa-stars { display:flex; gap:1px; margin-left:auto; }
+    /* Stars row stays horizontal — 5 stars in one line, centered inside
+       the column. margin-left:auto from the old wide layout would push
+       them off the right edge of a 140px column, so we drop it. */
+    #${PROFILE_ACTIONS_ID} .pa-stars {
+      display:flex; gap:1px; justify-content:center;
+      padding:2px 0; border-top:1px solid rgba(255,255,255,0.06);
+    }
     #${PROFILE_ACTIONS_ID} .pa-star { font-size:15px; cursor:pointer; color:#4b5563; user-select:none; background:none; border:none; padding:0 1px; }
     #${PROFILE_ACTIONS_ID} .pa-star.active { color:#fbbf24; }
     #${PROFILE_ACTIONS_ID} .pa-star:hover { color:#f59e0b; }
+    /* Reminder + notes wraps already had width:100% which works fine in
+       the vertical column. The preset row inside reminder-wrap wraps to
+       multiple lines because 5 chips don't fit one row at 140px wide. */
+    #${PROFILE_ACTIONS_ID} .pa-reminder-wrap,
     #${PROFILE_ACTIONS_ID} .pa-notes-wrap {
-      width:100%; margin-top:4px;
+      width:100%; box-sizing:border-box;
     }
     #${PROFILE_ACTIONS_ID} .pa-notes-input {
       width:100%; box-sizing:border-box; background:rgba(255,255,255,0.05);
@@ -1057,6 +1202,11 @@ function injectProfileActions(contactId: string, platform: string): void {
 
   el.innerHTML = `
     <span class="pa-grip" title="Drag to reposition">⋮⋮</span>
+    <!-- v0.57.71: collapse toggle at top of column. ◀ collapses to a thin
+         strip; the strip shows ▶ to expand back. State persists in
+         localStorage so the bar starts in the user's preferred mode every
+         reload. -->
+    <button class="pa-collapse-btn" title="Collapse the action bar (click again to expand)" type="button">◀</button>
     <button class="pa-btn danger pa-hide-btn" ${isBlocked ? 'disabled' : ''}>${isBlocked ? '🚫 Hidden' : '🚫 Hide'}</button>
     <button class="pa-btn pa-notes-btn" title="Toggle notes editor">📝 Notes</button>
     <button class="pa-btn pa-reminder-btn" title="Set a reminder to follow up with this person">⏰ Remind</button>
@@ -1068,6 +1218,11 @@ function injectProfileActions(contactId: string, platform: string): void {
       <button class="pa-star" data-star="4">★</button>
       <button class="pa-star" data-star="5">★</button>
     </div>
+    <!-- v0.57.70: profile-level reminder badge. Surfaces the next pending
+         reminder for this profile right inside the action bar so the user
+         sees "Reminder: in 2h" the moment they open the profile, not only
+         in the global Reminders viewer. Hidden when no reminder exists. -->
+    <div class="pa-reminder-badge" style="display:none;font-size:10px;color:#fbbf24;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.3);border-radius:5px;padding:4px 6px;line-height:1.3"></div>
     <div class="pa-reminder-wrap" style="display:none;width:100%;margin-top:4px">
       <input type="text" class="pa-notes-input pa-reminder-note" placeholder="Reminder note..." maxlength="200">
       <!-- v0.57.65: replaced preset dropdown with a datetime-local input so
@@ -1084,7 +1239,12 @@ function injectProfileActions(contactId: string, platform: string): void {
       <button class="pa-btn pa-reminder-save" style="margin-top:4px">Save reminder</button>
       <div class="pa-status pa-reminder-status"></div>
     </div>
-    <div class="pa-notes-wrap" style="display:none">
+    <!-- v0.57.70: notes wrap is now always visible. The userscript v0.7.46
+         showed notes inline at the top of the profile container; we mirror
+         that idea here by keeping the textarea expanded under the buttons.
+         Click 📝 Notes to FOCUS the textarea (toggling visibility is no
+         longer necessary since it's always shown). -->
+    <div class="pa-notes-wrap" style="display:block">
       <textarea class="pa-notes-input pa-notes-textarea" placeholder="Notes about this person..." maxlength="10000"></textarea>
       <div class="pa-status pa-notes-status"></div>
     </div>
@@ -1107,29 +1267,85 @@ function injectProfileActions(contactId: string, platform: string): void {
       if (!anchorContainer.isConnected) {
         el.classList.remove('pa-anchored');
         el.classList.add('pa-floating');
+        // Clear every inline coordinate so the .pa-floating CSS defaults
+        // (top:50% / left:8px / translateY(-50%)) take over. Width is
+        // driven by the column rule too, so explicit clear is fine.
         el.style.left = ''; el.style.bottom = ''; el.style.width = '';
-        el.style.top = ''; el.style.transform = '';
+        el.style.top = ''; el.style.transform = ''; el.style.height = '';
         return;
       }
       const rect = anchorContainer.getBoundingClientRect();
       if (rect.width < 50 || rect.height < 50) {
         el.classList.remove('pa-anchored');
         el.classList.add('pa-floating');
+        // Clear every inline coordinate so the .pa-floating CSS defaults
+        // (top:50% / left:8px / translateY(-50%)) take over. Width is
+        // driven by the column rule too, so explicit clear is fine.
         el.style.left = ''; el.style.bottom = ''; el.style.width = '';
-        el.style.top = ''; el.style.transform = '';
+        el.style.top = ''; el.style.transform = ''; el.style.height = '';
         return;
       }
-      // Pin the bar inside the container's footprint with a 4px inset, and
-      // sit it just above the container's bottom edge so it reads as
-      // attached to the chat window without obscuring its own scroll bar.
-      const left = Math.round(Math.max(4, rect.left + 4));
-      const width = Math.round(Math.max(180, Math.min(rect.width - 8, window.innerWidth - 8)));
-      const bottom = Math.round(Math.max(4, window.innerHeight - rect.bottom));
-      if (left !== lastL || bottom !== lastB || width !== lastW) {
+      // v0.57.69: vertical column placed to the LEFT of the chat container.
+      // The bar is a fixed-width column (matched in CSS); we just compute
+      // left = chat.left - barWidth - 4 each frame so it tracks the chat
+      // panel as Sniffies animates it open/closed. Two fallbacks:
+      //   - If gapLeft is too small (chat hugs the viewport's left edge),
+      //     try the RIGHT side (left = rect.right + 4)
+      //   - If neither side has room, give up the anchor and dock to the
+      //     viewport's top-left corner (free-floating column with grip).
+      const barW = el.offsetWidth || 140;
+      const gapLeft = rect.left;
+      const gapRight = window.innerWidth - rect.right;
+      let left: number;
+      let mode: string;
+      if (gapLeft >= barW + 8) {
+        left = Math.round(rect.left - barW - 4);
+        mode = 'left';
+      } else if (gapRight >= barW + 8) {
+        left = Math.round(rect.right + 4);
+        mode = 'right';
+      } else {
+        // No room either side — detach to floating top-left. The column
+        // doesn't fit alongside the chat, so we let the user drag it.
+        el.classList.remove('pa-anchored');
+        el.classList.add('pa-floating');
+        el.style.left = '8px';
+        el.style.top = '8px';
+        el.style.bottom = 'auto';
+        el.style.transform = 'none';
+        el.style.width = '';
+        el.style.height = '';
+        return;
+      }
+      // Vertical alignment: pin the column's top to the chat's top edge,
+      // then cap its height at the chat's height so it never extends
+      // past the bottom of the chat (and never grows taller than the
+      // viewport with the max-height in CSS).
+      const top = Math.round(Math.max(8, rect.top));
+      const height = Math.round(Math.max(120, Math.min(rect.height, window.innerHeight - 16)));
+      if (left !== lastL || top !== lastB || height !== lastW) {
         el.style.left = `${left}px`;
-        el.style.bottom = `${bottom}px`;
-        el.style.width = `${width}px`;
-        lastL = left; lastB = bottom; lastW = width;
+        el.style.top = `${top}px`;
+        el.style.bottom = 'auto';
+        el.style.height = `${height}px`;
+        // Width stays driven by the CSS rule (140px); clear any inline
+        // width set by an earlier-version build.
+        el.style.width = '';
+        lastL = left; lastB = top; lastW = height;
+      }
+      // One-shot diagnostic when placement shape changes — useful if the
+      // bar still ends up wrong on a layout we haven't seen, the log
+      // tells us the chat container's rect and which branch we picked.
+      if (!(el as any)._lastDiagSig || (el as any)._lastDiagSig !== `${mode}_${left}_${top}_${height}`) {
+        (el as any)._lastDiagSig = `${mode}_${left}_${top}_${height}`;
+        console.log('[Aggregaytor] anchor placement', {
+          containerRect: { top: Math.round(rect.top), bottom: Math.round(rect.bottom), left: Math.round(rect.left), right: Math.round(rect.right), width: Math.round(rect.width), height: Math.round(rect.height) },
+          gaps: { left: Math.round(gapLeft), right: Math.round(gapRight) },
+          barW,
+          placed: { top, left, height },
+          mode,
+          containerTag: anchorContainer.tagName + (anchorContainer.className ? '.' + String(anchorContainer.className).split(' ').slice(0, 2).join('.') : ''),
+        });
       }
       rafId = requestAnimationFrame(tick);
     };
@@ -1138,8 +1354,21 @@ function injectProfileActions(contactId: string, platform: string): void {
       if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
     };
   } else {
-    // Fallback: free-float at top-center, with a drag grip the user can
-    // pull to reposition. Last position is remembered across reloads.
+    // Fallback: free-float at bottom-center, with a drag grip the user
+    // can pull to reposition. Last position is remembered across reloads.
+    // v0.57.67: one-shot migration. Earlier versions saved x/y locations
+    // that the user had dragged to (often overlapping the chat composer
+    // when anchored mode wasn't picking up the right container). Clear
+    // any stale saved position once so the new bottom-center default
+    // takes effect for everyone. Future user drags re-save under the
+    // version-keyed scheme.
+    const POS_VERSION = 'v0.57.69';
+    try {
+      if (localStorage.getItem('aggregaytor_pa_floating_pos_version') !== POS_VERSION) {
+        localStorage.removeItem('aggregaytor_pa_floating_pos');
+        localStorage.setItem('aggregaytor_pa_floating_pos_version', POS_VERSION);
+      }
+    } catch {}
     try {
       const raw = localStorage.getItem('aggregaytor_pa_floating_pos');
       if (raw) {
@@ -1147,6 +1376,9 @@ function injectProfileActions(contactId: string, platform: string): void {
         if (typeof pos.x === 'number' && typeof pos.y === 'number') {
           el.style.left = `${Math.max(0, Math.min(pos.x, window.innerWidth - 100))}px`;
           el.style.top = `${Math.max(0, Math.min(pos.y, window.innerHeight - 40))}px`;
+          // The saved position is absolute — cancel both the bottom anchor
+          // AND the centering transform that .pa-floating defaults to.
+          el.style.bottom = 'auto';
           el.style.transform = 'none';
         }
       }
@@ -1165,6 +1397,8 @@ function injectProfileActions(contactId: string, platform: string): void {
         const y = Math.max(0, Math.min(ev.clientY - dy, window.innerHeight - 40));
         el.style.left = `${x}px`;
         el.style.top = `${y}px`;
+        // Drag overrides the bottom-anchor default — switch to absolute top.
+        el.style.bottom = 'auto';
         el.style.transform = 'none';
       };
       const end = (): void => {
@@ -1181,6 +1415,37 @@ function injectProfileActions(contactId: string, platform: string): void {
     }
   }
 
+  // ── Collapse / expand toggle ──
+  // v0.57.71: state persists in localStorage so the bar starts in the
+  // user's preferred mode every reload. Click anywhere on the collapsed
+  // strip (not just the button) expands it back, since the strip is
+  // tiny and "click anywhere on this thing" is the most discoverable
+  // re-expand interaction.
+  const COLLAPSED_KEY = 'aggregaytor_pa_collapsed';
+  const collapseBtn = el.querySelector('.pa-collapse-btn') as HTMLButtonElement;
+  function setCollapsed(collapsed: boolean): void {
+    el.classList.toggle('pa-collapsed', collapsed);
+    collapseBtn.textContent = collapsed ? '▶' : '◀';
+    collapseBtn.title = collapsed ? 'Expand the action bar' : 'Collapse the action bar';
+    try { localStorage.setItem(COLLAPSED_KEY, collapsed ? '1' : '0'); } catch {}
+  }
+  // Restore collapsed state from localStorage on inject.
+  try {
+    if (localStorage.getItem(COLLAPSED_KEY) === '1') setCollapsed(true);
+  } catch {}
+  collapseBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    setCollapsed(!el.classList.contains('pa-collapsed'));
+  });
+  // Click on the collapsed strip itself (anywhere) expands it. We bind
+  // to the whole element but only act when collapsed AND the click
+  // wasn't on the button (its handler already toggled).
+  el.addEventListener('click', (ev) => {
+    if (!el.classList.contains('pa-collapsed')) return;
+    if ((ev.target as HTMLElement).closest('.pa-collapse-btn')) return;
+    setCollapsed(false);
+  });
+
   // ── Hide button ──
   const hideBtn = el.querySelector('.pa-hide-btn') as HTMLButtonElement;
   hideBtn.addEventListener('click', () => {
@@ -1191,25 +1456,20 @@ function injectProfileActions(contactId: string, platform: string): void {
     showBlockToast(profileId);
   });
 
-  // ── Notes toggle + editor ──
-  // v0.57.63: notes were silently lost when users typed and switched profiles
-  // before the 800ms debounce fired. The userscript v0.7.46 had a Save button
-  // that made persistence explicit, but auto-save is friendlier — IF we
-  // actually flush before navigation. Three fixes:
-  //   1. Drop debounce 800 → 250ms so quick typing reliably saves
-  //   2. Flush immediately on `blur` (clicking away from the textarea)
-  //   3. Expose a flushNotes() on the panel element so the URL-change handler
-  //      can flush before removeProfileActions() detaches the textarea
+  // ── Notes always-visible editor with localStorage backing ──
+  // v0.57.70: ported the userscript v0.7.46 storage pattern. Notes are
+  // written to localStorage SYNCHRONOUSLY on every keystroke (debounced to
+  // 200ms) AND mirrored to PouchDB via the SW. localStorage save is the
+  // bulletproof fast path; the SW write is best-effort. Key insight from
+  // the userscript: never wait on IPC for the source of truth — write
+  // local first, then mirror.
   const notesWrap = el.querySelector('.pa-notes-wrap') as HTMLElement;
-  // v0.57.66: scope to .pa-notes-textarea — the .pa-notes-input class is also
-  // worn by the reminder text input + datetime-local input above this wrap, so
-  // querySelector('.pa-notes-input') was returning the reminder note field and
-  // notes typed into the actual textarea silently fell on the floor.
   const notesInput = el.querySelector('.pa-notes-textarea') as HTMLTextAreaElement;
   const notesStatus = el.querySelector('.pa-notes-status') as HTMLElement;
+  // 📝 Notes button focuses the textarea (the wrap is now always shown).
   el.querySelector('.pa-notes-btn')!.addEventListener('click', () => {
-    notesWrap.style.display = notesWrap.style.display === 'none' ? '' : 'none';
-    if (notesWrap.style.display !== 'none') notesInput.focus();
+    notesInput.focus();
+    notesInput.select();
   });
 
   let noteTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1217,13 +1477,24 @@ function injectProfileActions(contactId: string, platform: string): void {
   function flushNotes(): void {
     if (noteTimer) { clearTimeout(noteTimer); noteTimer = null; }
     const value = notesInput.value;
-    if (value === lastSavedValue) return; // nothing new to persist
+    if (value === lastSavedValue) return;
     lastSavedValue = value;
+    // 1. localStorage (synchronous, can't fail silently in a way that
+    //    loses data — at worst we hit the storage quota and throw, which
+    //    we'd see in the dev console).
+    try {
+      setLocalNote(profileId, value);
+    } catch (err) {
+      console.warn('[Aggregaytor] Notes localStorage save failed:', err);
+    }
+    // 2. SW mirror to PouchDB (async, best-effort, primarily for the
+    //    side-panel inbox view to see notes across reloads).
     safeSendMessage({
       type: 'UPSERT_THREAD_META', contactId, platform,
       updates: { notes: value },
     }).catch(() => {});
-    notesStatus.textContent = 'Saved';
+    notesStatus.style.color = '#22c55e';
+    notesStatus.textContent = '✓ Saved';
     setTimeout(() => { notesStatus.textContent = ''; }, 1500);
   }
   // Expose for URL-change handler to flush before the panel is removed.
@@ -1231,9 +1502,19 @@ function injectProfileActions(contactId: string, platform: string): void {
 
   notesInput.addEventListener('input', () => {
     if (noteTimer) clearTimeout(noteTimer);
-    noteTimer = setTimeout(flushNotes, 250);
+    noteTimer = setTimeout(flushNotes, 200);
   });
   notesInput.addEventListener('blur', flushNotes);
+
+  // Restore notes from localStorage IMMEDIATELY (instant, before any SW
+  // round-trip). The SW GET_THREAD_META below also runs and can override
+  // with a newer value if the user edited from a different surface
+  // (e.g. side panel) since this profile was last opened.
+  const localNote = getLocalNote(profileId);
+  if (localNote) {
+    notesInput.value = localNote;
+    lastSavedValue = localNote;
+  }
 
   // ── Star rating ──
   const stars = el.querySelectorAll('.pa-star');
@@ -1351,22 +1632,90 @@ function injectProfileActions(contactId: string, platform: string): void {
       // invalidation flips the global flag and surfaces a real error string
       // instead of an "Uncaught Error: Extension context invalidated" that
       // hits window.onerror and never updates the status line.
+      // v0.57.70: write to localStorage IMMEDIATELY so the reminder is
+      // persisted even if the SW round-trip fails. The SW write below
+      // is best-effort; localStorage is the source of truth for the
+      // Sniffies-page Reminders viewer + the in-bar reminder badge.
+      // Generate a stable id we'll use both locally and as the SW _id
+      // hint (the SW currently makes its own id but we keep ours for
+      // local matching by composite-key equality).
+      const localId = `local:${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const localReminder: LocalReminder = {
+        id: localId,
+        profileId,
+        contactId,
+        platform,
+        note,
+        dueAt,
+        createdAt: new Date().toISOString(),
+        contactSnapshot,
+      };
+      try { addLocalReminder(localReminder); } catch {}
+      // Refresh the in-bar badge right away — the user sees the
+      // reminder before the SW even responds.
+      updateReminderBadge();
+      // Notify the top filter bar so its Reminders chip can update
+      // its count without a refresh.
+      try { window.postMessage({ type: '__aggregaytor_reminders_changed' }, '*'); } catch {}
+
       const res: any = await safeSendMessage({
         type: 'CREATE_REMINDER', contactId, platform, note, dueAt, contactSnapshot,
       });
       if (res?.ok) {
+        // Promote the local reminder's id to the SW-issued id so future
+        // deletes (from the global Reminders viewer) match in localStorage.
+        if (res.reminder?._id) {
+          try {
+            const list = loadLocalReminders();
+            const idx = list.findIndex((r) => r.id === localId);
+            if (idx >= 0) {
+              list[idx].id = res.reminder._id;
+              saveLocalReminders(list);
+            }
+          } catch {}
+        }
         remStatus.style.color = '#34d399';
         remStatus.textContent = `✓ Reminder set for ${new Date(dueAt).toLocaleString()}`;
         setTimeout(() => { remStatus.textContent = ''; remWrap.style.display = 'none'; remInput.value = ''; remWhen.value = ''; }, 2500);
       } else {
-        remStatus.style.color = '#f87171';
-        remStatus.textContent = `Failed to save: ${res?.error || 'unknown error'}`;
+        // SW save failed but localStorage still has the reminder. Tell
+        // the user the local copy is safe so they don't think it was
+        // dropped entirely.
+        remStatus.style.color = '#fbbf24';
+        remStatus.textContent = `Saved locally (SW: ${res?.error || 'failed'})`;
       }
     } catch (err) {
-      remStatus.style.color = '#f87171';
-      remStatus.textContent = `Save threw: ${(err as Error)?.message || String(err)}`;
+      remStatus.style.color = '#fbbf24';
+      remStatus.textContent = `Saved locally (SW threw: ${(err as Error)?.message || String(err)})`;
     }
   });
+
+  // ── Reminder badge updater ──
+  // Reads from localStorage (no IPC) and renders the next-pending reminder
+  // for this profile inside the bar. Called on inject, after every save,
+  // and once per minute so "in 5h" ticks down to "in 4h" without a reload.
+  const reminderBadge = el.querySelector('.pa-reminder-badge') as HTMLElement;
+  function updateReminderBadge(): void {
+    const next = getNextReminderForProfile(profileId);
+    if (!next) {
+      reminderBadge.style.display = 'none';
+      reminderBadge.textContent = '';
+      return;
+    }
+    const due = new Date(next.dueAt);
+    const past = due.getTime() < Date.now();
+    reminderBadge.style.display = '';
+    reminderBadge.style.color = past ? '#f87171' : '#fbbf24';
+    reminderBadge.style.borderColor = past ? 'rgba(239,68,68,0.3)' : 'rgba(251,191,36,0.3)';
+    reminderBadge.style.background = past ? 'rgba(239,68,68,0.08)' : 'rgba(251,191,36,0.08)';
+    const noteSnippet = next.note && next.note !== 'Follow up with profile' ? ` — ${next.note}` : '';
+    reminderBadge.innerHTML = `🔔 <strong>${past ? 'Overdue' : 'Reminder'} ${escHtml(fmtRelativeReminder(next.dueAt))}</strong>${noteSnippet ? `<span style="color:#d1d5db">${escHtml(noteSnippet)}</span>` : ''}<div style="font-size:9px;color:#9ca3af;margin-top:1px">${escHtml(due.toLocaleString())}</div>`;
+  }
+  updateReminderBadge();
+  const badgeInterval = setInterval(() => {
+    if (!el.isConnected) { clearInterval(badgeInterval); return; }
+    updateReminderBadge();
+  }, 60_000);
 
   // ── Random Intro button ──
   // Fires SEND_GREETING which generates an LLM intro and queues it with a
@@ -1388,10 +1737,19 @@ function injectProfileActions(contactId: string, platform: string): void {
   });
 
   // ── Load existing data ──
+  // v0.57.70: localStorage notes were already restored above (synchronously).
+  // The SW lookup here only OVERRIDES the textarea if the SW value is newer
+  // OR present while local is empty (cross-device sync case). We never
+  // overwrite a non-empty local value with an empty SW value because that
+  // would erase a note the user just typed.
   chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId }).then((res: any) => {
     const m = res?.meta || {};
-    notesInput.value = m.notes || '';
-    if (m.notes) notesWrap.style.display = '';
+    if (m.notes && !notesInput.value) {
+      notesInput.value = m.notes;
+      lastSavedValue = m.notes;
+      // Mirror back to localStorage so future reads are local-fast.
+      try { setLocalNote(profileId, m.notes); } catch {}
+    }
     const rating = m.rating || 0;
     stars.forEach((s, i) => s.classList.toggle('active', i < rating));
   }).catch(() => {});
@@ -1506,6 +1864,10 @@ function showTopFilterBar(): void {
     <span class="fb-sep"></span>
     <button class="fb-undo" title="Undo last hide">Undo</button>
     <button class="fb-undo fb-settings" title="Open full filter settings (text terms, position highlights, save/restore)">⚙ Settings</button>
+    <!-- v0.57.70: Reminders chip — opens a popup with all upcoming + recently-
+         overdue reminders for this device. Reads from localStorage so it
+         works even when the SW is asleep. Click a row to open that profile. -->
+    <button class="fb-undo fb-reminders" title="Show reminders set on Sniffies profiles">⏰ <span class="fb-reminders-count"></span></button>
     <span class="fb-hide-count">${blockedCount} hidden</span>
     <button class="fb-close" title="Close filter bar">✕</button>
   `;
@@ -1596,6 +1958,30 @@ function showTopFilterBar(): void {
     }
   });
 
+  // v0.57.70: Reminders chip — opens a popup listing all upcoming +
+  // recently-overdue reminders. Reads from localStorage so the panel
+  // renders instantly (no SW round-trip needed). Each row is clickable
+  // to open the profile, with a ✕ delete that fires both locally and to
+  // the SW. The chip label shows the count of pending reminders.
+  function refreshRemindersChipCount(): void {
+    try {
+      const list = loadLocalReminders();
+      const now = Date.now();
+      const pending = list.filter((r) => new Date(r.dueAt).getTime() >= now - 7 * 86_400_000);
+      const countEl = bar.querySelector('.fb-reminders-count') as HTMLElement | null;
+      if (countEl) countEl.textContent = pending.length ? `(${pending.length})` : '';
+    } catch {}
+  }
+  refreshRemindersChipCount();
+  // Listen for reminder-changed events (e.g. when a profile saves a new
+  // reminder via the action bar) so the chip count stays in sync.
+  window.addEventListener('message', (ev: MessageEvent) => {
+    if (ev.data?.type === '__aggregaytor_reminders_changed') refreshRemindersChipCount();
+  });
+  bar.querySelector('.fb-reminders')!.addEventListener('click', () => {
+    showRemindersPanel();
+  });
+
   // Close bar
   bar.querySelector('.fb-close')!.addEventListener('click', () => {
     bar.remove();
@@ -1665,6 +2051,144 @@ function showBlockToast(profileId: string): void {
   document.body.appendChild(toast);
   setTimeout(() => { toast.style.opacity = '0'; }, 1600);
   setTimeout(() => toast.remove(), 2000);
+}
+
+// ── Reminders Panel ────────────────────────────────────────────────────────
+// v0.57.70: in-page reminders viewer triggered from the ⏰ chip in the top
+// filter bar. Reads from localStorage (instant) and renders a card per
+// reminder with the snapshotted profile photo + name + relative due time.
+// Click a card → navigate to the profile (Sniffies SPA pushState). Click ✕
+// → delete both locally and via SW.
+
+const REMINDERS_PANEL_ID = 'aggregaytor-reminders-panel';
+
+function showRemindersPanel(): void {
+  // Toggle: if already open, close.
+  const existing = document.getElementById(REMINDERS_PANEL_ID);
+  if (existing) { existing.remove(); return; }
+
+  const panel = document.createElement('div');
+  panel.id = REMINDERS_PANEL_ID;
+  panel.style.cssText = [
+    'position:fixed', 'top:36px', 'right:8px', 'z-index:2147483646',
+    'width:340px', 'max-height:calc(100vh - 60px)',
+    'background:rgba(15,20,25,0.97)',
+    'border:1px solid rgba(59,130,246,0.4)',
+    'border-radius:8px',
+    'box-shadow:0 8px 24px rgba(0,0,0,0.6)',
+    'font-family:system-ui,sans-serif', 'color:#e7e9ea', 'font-size:12px',
+    'overflow:hidden', 'display:flex', 'flex-direction:column',
+  ].join(';');
+
+  const list = loadLocalReminders().sort((a, b) => a.dueAt.localeCompare(b.dueAt));
+  const now = Date.now();
+  const upcoming = list.filter((r) => new Date(r.dueAt).getTime() >= now);
+  const overdue = list.filter((r) => {
+    const t = new Date(r.dueAt).getTime();
+    return t < now && t >= now - 7 * 86_400_000;
+  });
+
+  const header = `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:rgba(59,130,246,0.15);border-bottom:1px solid rgba(59,130,246,0.25)">
+      <strong style="color:#bfdbfe;font-size:13px">⏰ Reminders</strong>
+      <button class="aggregaytor-rp-close" style="background:none;border:none;color:#9ca3af;font-size:16px;cursor:pointer;padding:0 4px" title="Close">✕</button>
+    </div>
+  `;
+  const renderRow = (r: LocalReminder): string => {
+    const snap = r.contactSnapshot || {};
+    const meta = (snap.metadata as Record<string, unknown>) || {};
+    const avatar = snap.avatarUrl
+      ? `<img src="${escHtml(snap.avatarUrl)}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;flex:0 0 36px" alt="">`
+      : `<div style="width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;flex:0 0 36px;font-size:16px">👤</div>`;
+    const name = snap.displayName || r.profileId.slice(0, 10);
+    const summary = String((meta as { summary?: string }).summary || '').slice(0, 60);
+    const due = new Date(r.dueAt);
+    const past = due.getTime() < Date.now();
+    const relTime = fmtRelativeReminder(r.dueAt);
+    return `
+      <div class="aggregaytor-rp-card" data-id="${escHtml(r.id)}" data-profile-id="${escHtml(r.profileId)}" style="display:flex;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.05);cursor:pointer;align-items:center">
+        ${avatar}
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;justify-content:space-between;gap:6px;align-items:baseline">
+            <strong style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(name)}</strong>
+            <span style="color:${past ? '#f87171' : '#34d399'};font-size:10px;flex:0 0 auto" title="${escHtml(due.toLocaleString())}">${escHtml(relTime)}</span>
+          </div>
+          ${summary ? `<div style="font-size:9px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(summary)}</div>` : ''}
+          ${r.note && r.note !== 'Follow up with profile' ? `<div style="font-size:11px;color:#d1d5db;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.note)}</div>` : ''}
+          <div style="font-size:9px;color:#6b7280">${escHtml(due.toLocaleString())}</div>
+        </div>
+        <button class="aggregaytor-rp-del" data-id="${escHtml(r.id)}" title="Delete reminder" style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);color:#f87171;border-radius:4px;padding:3px 7px;font-size:11px;cursor:pointer;flex:0 0 auto">✕</button>
+      </div>
+    `;
+  };
+
+  let body = '<div style="flex:1;overflow-y:auto">';
+  if (overdue.length) {
+    body += `<div style="font-size:10px;color:#f87171;text-transform:uppercase;letter-spacing:0.5px;padding:8px 12px 4px">Overdue (${overdue.length})</div>`;
+    body += overdue.map(renderRow).join('');
+  }
+  if (upcoming.length) {
+    body += `<div style="font-size:10px;color:#9ca3af;text-transform:uppercase;letter-spacing:0.5px;padding:8px 12px 4px">Upcoming (${upcoming.length})</div>`;
+    body += upcoming.map(renderRow).join('');
+  }
+  if (!overdue.length && !upcoming.length) {
+    body += '<div style="padding:24px 12px;color:#9ca3af;font-size:11px;text-align:center;line-height:1.5">No reminders yet.<br>Open a profile and click <strong>⏰ Remind</strong> on the action bar to set one.</div>';
+  }
+  body += '</div>';
+
+  panel.innerHTML = header + body;
+  document.body.appendChild(panel);
+
+  panel.querySelector('.aggregaytor-rp-close')!.addEventListener('click', () => panel.remove());
+  // Click outside closes
+  setTimeout(() => {
+    const offClick = (ev: MouseEvent): void => {
+      if (!panel.contains(ev.target as Node)) {
+        panel.remove();
+        document.removeEventListener('mousedown', offClick, true);
+      }
+    };
+    document.addEventListener('mousedown', offClick, true);
+  }, 50);
+
+  // Card click → navigate to the profile (avoid clicks on the delete btn).
+  panel.querySelectorAll('.aggregaytor-rp-card').forEach((card) => {
+    card.addEventListener('click', (ev) => {
+      if ((ev.target as HTMLElement).closest('.aggregaytor-rp-del')) return;
+      const pid = (card as HTMLElement).dataset.profileId;
+      if (pid) {
+        // Navigate via SPA history pushState — Sniffies' Angular router
+        // listens for popstate and re-renders without a hard reload.
+        try {
+          history.pushState({}, '', `/profile/${pid}`);
+          window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+        } catch {
+          location.href = `/profile/${pid}`;
+        }
+        panel.remove();
+      }
+    });
+  });
+
+  // Delete button — drops localStorage entry + fires SW DELETE_REMINDER.
+  panel.querySelectorAll('.aggregaytor-rp-del').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const id = (btn as HTMLElement).dataset.id;
+      if (!id) return;
+      removeLocalReminder(id);
+      // SW delete is best-effort. If id starts with 'local:' the SW never
+      // saw it (failed initial save) so skip the IPC.
+      if (!id.startsWith('local:')) {
+        safeSendMessage({ type: 'DELETE_REMINDER', id }).catch(() => {});
+      }
+      // Re-render the panel to reflect the removal.
+      panel.remove();
+      showRemindersPanel();
+      // Bump the chip count.
+      try { window.postMessage({ type: '__aggregaytor_reminders_changed' }, '*'); } catch {}
+    });
+  });
 }
 
 // ── Map Filter Floating Panel ─────────────────────────────────────────────

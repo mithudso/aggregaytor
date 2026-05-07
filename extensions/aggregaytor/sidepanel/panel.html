@@ -621,6 +621,15 @@
           <input type="checkbox" id="sp-grindr-keepalive" checked>
           Keep Grindr session alive (prevent auto-logout)
         </label>
+        <!-- v0.57.74: skip the heaviest SW query (GET_THREAD_SUMMARIES +
+             GET_ALL_THREAD_META) on every panel open. For users who rely
+             on platform-side filters / Memory / Reminders / Settings and
+             don't need the unified inbox view. Background tracking still
+             runs; only the thread-list render is skipped. -->
+        <label class="settings-checkbox-label" title="Hide the unified thread list and skip the GET_THREAD_SUMMARIES + GET_ALL_THREAD_META queries on every panel open. Background message tracking continues; settings and other panel features stay fully functional.">
+          <input type="checkbox" id="sp-inbox-disabled">
+          Disable unified inbox (skip thread-list queries on open)
+        </label>
         <label class="settings-label" style="margin-top:6px">Toolbar display:
           <select id="sp-toolbar-mode" class="settings-select" style="width:auto;margin-left:6px">
             <option value="icon">Icon only</option>

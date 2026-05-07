@@ -8,7 +8,7 @@
  *   4. Local pattern matching fallback (no API key needed)
  */
 
-import { getDossier, getDossierSlice, formatDossierContext } from '@aggregaytor/store';
+import { getDossier, getDossierSlice, formatDossierContext, LruIdbCache } from '@aggregaytor/store';
 import type { DossierCategory } from '@aggregaytor/store';
 
 const LOG = '[Aggregaytor:LLM]';
@@ -772,10 +772,22 @@ async function buildSystemPromptWithContext(
 
 // ── Optimization layer ──────────────────────────────────────────────────────
 
-// 1. Response cache — cache LLM responses by prompt hash
-const responseCache = new Map<string, { response: string; timestamp: number; tokens: number }>();
+// 1. Response cache — cache LLM responses by prompt hash.
+//
+// v0.57.73: switched from a bare Map to LruIdbCache (mem 100 / cold 400 in
+// IDB, 5-min TTL). Win is twofold:
+//   1. Cold-tier survives SW restarts so a freshly-recycled SW serves
+//      cached responses instead of re-paying token cost on first burst.
+//   2. The mem tier still caps at 100 entries × ~1-2KB = ~100-200KB max
+//      heap; cold tier holds the older 400 entries in IDB without
+//      occupying SW heap.
 const CACHE_TTL_MS = 5 * 60_000; // 5 minutes
-const MAX_CACHE_SIZE = 100;
+const responseCache = new LruIdbCache<{ response: string; tokens: number }>({
+  storeName: 'llm-response',
+  maxItems: 100,
+  maxItemsTotal: 400,
+  ttlMs: CACHE_TTL_MS,
+});
 
 function getCacheKey(systemPrompt: string, userPrompt: string, feature: string): string {
   // Simple hash — same prompt = same response (within TTL)
@@ -787,34 +799,16 @@ function getCacheKey(systemPrompt: string, userPrompt: string, feature: string):
   return `c_${hash.toString(36)}`;
 }
 
-function getCachedResponse(key: string): string | null {
-  const entry = responseCache.get(key);
+async function getCachedResponse(key: string): Promise<string | null> {
+  const entry = await responseCache.get(key);
   if (!entry) return null;
-  if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
-    responseCache.delete(key);
-    return null;
-  }
   console.log(`${LOG} Cache hit (saved ${entry.tokens} tokens)`);
   return entry.response;
 }
 
-function setCachedResponse(key: string, response: string, estimatedTokens: number): void {
-  // FIFO eviction (v0.57.15): JS Map preserves insertion order, so iterating
-  // `keys()` gives us the oldest entry without a sort. Pre-fix this used
-  // `[...entries].sort(...)` which is O(N log N) on every set when full —
-  // a hot-path on bursty auto-respond traffic. Now O(1).
-  //
-  // Note: cache hits do NOT refresh insertion order (entry.timestamp tracks
-  // age for TTL purposes, not LRU). For our 5-min TTL + 100-entry cap that's
-  // fine — by the time a 100-entry cache fills, every entry is < 5 min old.
-  if (responseCache.size >= MAX_CACHE_SIZE) {
-    // Drop the oldest (insertion-order first) to make room.
-    // Defensive: if the map is somehow empty, the iter.next() returns done=true
-    // and we fall through with no eviction — which is harmless.
-    const next = responseCache.keys().next();
-    if (!next.done) responseCache.delete(next.value as string);
-  }
-  responseCache.set(key, { response, timestamp: Date.now(), tokens: estimatedTokens });
+async function setCachedResponse(key: string, response: string, estimatedTokens: number): Promise<void> {
+  // LruIdbCache handles its own LRU + cap eviction + TTL.
+  await responseCache.set(key, { response, tokens: estimatedTokens });
 }
 
 // 2. System prompt composition — driven by the modular cache below.
@@ -998,13 +992,17 @@ let totalCacheHits = 0;
 let totalApiCalls = 0;
 
 export function getLLMOptimizationStats() {
+  // v0.57.73: cacheSize / summaryCacheSize now report MEM-TIER size only
+  // (sync). Cold-tier counts would need a coldSize() async call which
+  // would change this function's signature; the panel can call those
+  // separately if it cares about the IDB-side count.
   return {
     totalTokensSaved, totalCacheHits, totalApiCalls,
-    cacheSize: responseCache.size,
+    cacheSize: responseCache.memSize(),
     coalescedRequests: totalCoalesced,
     // Surface the bounded-map sizes too so the settings UI can show the
     // user how much memory the LLM subsystem is holding on to.
-    summaryCacheSize: conversationSummaryCache.size,
+    summaryCacheSize: conversationSummaryCache.memSize(),
     dossierTimestampSize: lastDossierExtractTimestamp.size,
     providerTrackerSize: providerRequestCounts.size,
   };
@@ -1021,8 +1019,8 @@ export function getLLMOptimizationStats() {
  */
 export function clearLLMCaches(): { cleared: Record<string, number> } {
   const cleared = {
-    responseCache: responseCache.size,
-    summaryCache: conversationSummaryCache.size,
+    responseCache: responseCache.memSize(),
+    summaryCache: conversationSummaryCache.memSize(),
     dossierTimestamps: lastDossierExtractTimestamp.size,
     providerRequestCounts: providerRequestCounts.size,
     inflightRequests: inflightRequests.size,
@@ -1030,8 +1028,12 @@ export function clearLLMCaches(): { cleared: Record<string, number> } {
     storageCache: _storageCache.size,
     contextBuilderCache: _contextBuilderCache.size,
   };
-  responseCache.clear();
-  conversationSummaryCache.clear();
+  // v0.57.73: LruIdbCache .clear() drops BOTH mem AND cold tiers. The cold
+  // (IDB) drop is async — fire-and-forget so the SW handler returns
+  // promptly. Worst case the cold tier survives a moment longer; next read
+  // re-checks TTL anyway.
+  responseCache.clear().catch(() => {});
+  conversationSummaryCache.clear().catch(() => {});
   lastDossierExtractTimestamp.clear();
   providerRequestCounts.clear();
   clearPromptModules();
@@ -1070,27 +1072,18 @@ async function coalescedCallProvider(
 }
 
 // 9. Rolling conversation summary — compress old messages into a summary.
-//    Capped at SUMMARY_CACHE_CAP entries with FIFO eviction (same pattern as
-//    lastDossierExtractTimestamp above) so the SW memory stays bounded.
-const conversationSummaryCache = new Map<string, { summary: string; messageCount: number; timestamp: number }>();
+//
+// v0.57.73: switched from a 500-entry FIFO Map to LruIdbCache (mem 100 /
+// cold 600 in IDB, 10-min TTL). Same memory win as the response cache —
+// hot tier stays small while cold tier persists across SW restarts so a
+// freshly-recycled SW doesn't lose its accumulated summary cache.
 const SUMMARY_CACHE_TTL = 10 * 60_000; // 10 min
-const SUMMARY_CACHE_CAP = 500;
-
-function setSummaryCache(
-  contactId: string,
-  entry: { summary: string; messageCount: number; timestamp: number },
-): void {
-  conversationSummaryCache.set(contactId, entry);
-  if (conversationSummaryCache.size > SUMMARY_CACHE_CAP) {
-    const toDrop = Math.floor(SUMMARY_CACHE_CAP * 0.2);
-    const iter = conversationSummaryCache.keys();
-    for (let i = 0; i < toDrop; i++) {
-      const next = iter.next();
-      if (next.done) break;
-      conversationSummaryCache.delete(next.value);
-    }
-  }
-}
+const conversationSummaryCache = new LruIdbCache<{ summary: string; messageCount: number }>({
+  storeName: 'llm-summary',
+  maxItems: 100,
+  maxItemsTotal: 600,
+  ttlMs: SUMMARY_CACHE_TTL,
+});
 
 async function getCompactConversationContext(
   messages: Message[], contactName: string, contactId: string, feature: string,
@@ -1102,14 +1095,16 @@ async function getCompactConversationContext(
     return buildConversationContext(messages, contactName, feature);
   }
 
-  // Check if we have a cached summary for the older messages
-  const cached = conversationSummaryCache.get(contactId);
   const recentMessages = messages.slice(-windowSize);
   const olderMessages = messages.slice(0, -windowSize);
 
+  // Check if we have a cached summary for the older messages
+  const cached = await conversationSummaryCache.get(contactId);
+
   // Use cached summary if it covers roughly the same older messages
-  if (cached && Math.abs(cached.messageCount - olderMessages.length) < 5 &&
-      Date.now() - cached.timestamp < SUMMARY_CACHE_TTL) {
+  // (TTL is enforced inside LruIdbCache.get; we only need the message-count
+  //  proximity check here.)
+  if (cached && Math.abs(cached.messageCount - olderMessages.length) < 5) {
     const recentContext = recentMessages.map(m => {
       const body = m.body.length > 100 ? m.body.slice(0, 100) + '...' : m.body;
       return `${m.direction === 'out' ? 'You' : contactName}: ${body}`;
@@ -1123,9 +1118,10 @@ async function getCompactConversationContext(
   const topics = extractTopics(olderMessages);
   const summary = `${olderMessages.length} earlier messages (${inCount} from them, ${outCount} from you). Topics: ${topics || 'general chat'}.`;
 
-  setSummaryCache(contactId, {
-    summary, messageCount: olderMessages.length, timestamp: Date.now(),
-  });
+  // Fire-and-forget cache write — value is already returned below.
+  conversationSummaryCache.set(contactId, {
+    summary, messageCount: olderMessages.length,
+  }).catch(() => {});
 
   const recentContext = recentMessages.map(m => {
     const body = m.body.length > 100 ? m.body.slice(0, 100) + '...' : m.body;
@@ -1190,7 +1186,7 @@ async function callProvider(
   const temp = opts?.temperature ?? 0.9;
   if (temp < 0.5) { // deterministic tasks can be cached
     const cacheKey = getCacheKey(systemPrompt, userPrompt, feature);
-    const cached = getCachedResponse(cacheKey);
+    const cached = await getCachedResponse(cacheKey);
     if (cached) {
       totalCacheHits++;
       totalTokensSaved += estimateTokens(systemPrompt + userPrompt);
@@ -1370,10 +1366,11 @@ async function callProvider(
       result = data?.choices?.[0]?.message?.content || ''; break;
   }
 
-  // Cache deterministic responses
+  // Cache deterministic responses (fire-and-forget — IDB write is async
+  // but the response is already returned to the caller).
   if (temp < 0.5 && result) {
     const cacheKey = getCacheKey(systemPrompt, userPrompt, feature);
-    setCachedResponse(cacheKey, result, estimateTokens(systemPrompt + userPrompt));
+    setCachedResponse(cacheKey, result, estimateTokens(systemPrompt + userPrompt)).catch(() => {});
   }
 
   return result;

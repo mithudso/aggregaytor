@@ -17,7 +17,7 @@ import {
   createTask, getAllTasks, updateTask, deleteTask, getTasksByContact,
   createGoogleTask, updateGoogleTask, deleteGoogleTask, pullGoogleTasks, syncGoogleTasks, authenticateGoogle, isGoogleAuthenticated,
   backupToDrive, restoreFromDrive, getDriveBackupStatus,
-  getContact, getAllContacts, getContactsByPlatform, getDB, destroyDB,
+  getContact, getAllContacts, getContactsByPlatform, getDB, closeDB, destroyDB,
   exportAllData, importAllData, exportBlocked, importBlocked,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures, ReminderDoc } from '@aggregaytor/store';
@@ -1289,7 +1289,14 @@ async function handleMessage(msg: any): Promise<any> {
       try { clearIndex(); } catch {}
       // Clear LLM-side caches (response, summary, prompt module, dossier ts).
       try { clearLLMCaches(); } catch {}
-      console.log(`${LOG} FREE_SW_MEMORY: cleared all in-memory caches`, before);
+      // v0.57.72: close + null the PouchDB handle. PouchDB sits on top of
+      // LevelDB-IDB which keeps a block cache of recently-read doc bodies
+      // — on a multi-month database this can be hundreds of MB that never
+      // shrinks during a long-running SW. close() flushes + releases the
+      // cache; the next getDB() call re-opens cleanly. Brief latency hit
+      // on the next read but multi-hundred-MB heap drop in exchange.
+      try { await closeDB(); } catch (err) { console.warn(`${LOG} closeDB failed:`, err); }
+      console.log(`${LOG} FREE_SW_MEMORY: cleared all in-memory caches + closed PouchDB`, before);
       return { ok: true, before };
     }
 
@@ -3731,6 +3738,56 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
         // thresholds are exceeded. Adds free + compact when warranted
         // without the user clicking anything.
         await runAutoMaintenance().catch(e => console.warn(`${LOG} runAutoMaintenance error:`, e));
+
+        // v0.57.72: scheduled SW recycle. Research confirmed
+        // performance.measureUserAgentSpecificMemory() is unavailable to
+        // extension SW contexts (requires COOP+COEP), so we can't read
+        // the SW's actual heap size. Instead use UPTIME as the trigger:
+        // chrome.runtime.reload() the SW after it has been continuously
+        // running for >12h. This bounds the worst-case retained-closure
+        // accumulation regardless of cause (PouchDB block cache,
+        // unreleased timer closures, MutationObserver remnants reachable
+        // through SW message handlers, etc).
+        //
+        // Conservative gates:
+        //   - 12h minimum uptime
+        //   - 6h minimum since last auto-reload
+        //   - ANY in-flight compaction/rebuild aborts the recycle
+        //   - User notification before the bounce so they know it's us
+        //
+        // No data loss — IDB persists across reloads. Side panel + content
+        // scripts re-establish their SW connections automatically.
+        try {
+          const SW_RECYCLE_AFTER_MS = 12 * 60 * 60_000; // 12 hours uptime
+          const SW_RECYCLE_COOLDOWN_MS = 6 * 60 * 60_000; // 6h between recycles
+          const swUptimeMs = Date.now() - swPerfStart;
+          if (swUptimeMs < SW_RECYCLE_AFTER_MS) break;
+          const stored = await chrome.storage.local.get('aggregaytor_sw_last_auto_reload');
+          const lastReload = (stored && stored.aggregaytor_sw_last_auto_reload) || 0;
+          if (Date.now() - lastReload < SW_RECYCLE_COOLDOWN_MS) break;
+          // Don't recycle mid-compaction — that aborts the heavy IDB op
+          // halfway and users would have to redo it.
+          const compactStatus = await chrome.storage.session.get('aggregaytor_compact_status').catch(() => null);
+          const cs: any = compactStatus?.aggregaytor_compact_status;
+          if (cs?.state === 'running') {
+            console.log(`${LOG} SW recycle deferred — compaction in progress`);
+            break;
+          }
+          console.warn(`${LOG} SW uptime ${(swUptimeMs / 3_600_000).toFixed(1)}h — scheduled recycle`);
+          try { await chrome.storage.local.set({ aggregaytor_sw_last_auto_reload: Date.now() }); } catch {}
+          try {
+            chrome.notifications?.create('agg-sw-auto-reload', {
+              type: 'basic',
+              iconUrl: 'icons/icon-128.png',
+              title: 'Aggregaytor: background restarted',
+              message: `Background ran for ${(swUptimeMs / 3_600_000).toFixed(1)}h; recycled to release memory. No data lost.`,
+            });
+          } catch {}
+          // Tiny delay so chrome.storage.set has time to flush.
+          setTimeout(() => { try { chrome.runtime.reload(); } catch {} }, 100);
+        } catch (err) {
+          console.warn(`${LOG} mem-gc recycle check failed:`, err);
+        }
         break;
       }
       case 'grindr-login-check':
