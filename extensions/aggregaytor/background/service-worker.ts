@@ -1452,6 +1452,113 @@ async function handleMessage(msg: any): Promise<any> {
       return { ok: true, name, cleared };
     }
 
+    // v0.57.77: per-docType + per-platform breakdown of what's in PouchDB.
+    // Answers "what's bloating my database — messages, contacts, pictures?".
+    // Streams allDocs in 1000-row pages so a heavy DB doesn't allocate the
+    // whole result set at once; aggregates counts + JSON-byte estimates per
+    // docType, per (docType:platform) pair, plus the top 10 largest
+    // individual documents by serialized size.
+    //
+    // Caps: 30000 docs scanned (covers the vast majority of users; heavier
+    // DBs still get a representative sample). The IDB usage from
+    // navigator.storage.estimate is the source of truth for total size;
+    // this breakdown shows the SHAPE of what's inside.
+    //
+    // The scan can take 5-15s on a heavy DB; the panel calls this lazily
+    // on a button click, not on every Memory tab open.
+    case 'GET_DB_STATS': {
+      const t0 = performance.now();
+      const SCAN_CAP = 30_000;
+      const PAGE = 1000;
+      const byType: Record<string, { count: number; bytes: number }> = {};
+      const byTypePlatform: Record<string, { type: string; platform: string; count: number; bytes: number }> = {};
+      // Use a min-heap-style top-N by tracking the smallest in our top-10
+      // and only inserting when a doc beats it. Avoids growing an array of
+      // 30K refs and sorting at the end.
+      const TOP_N = 10;
+      const top: Array<{ id: string; bytes: number; type: string; platform: string }> = [];
+      let scanned = 0;
+      let totalBytes = 0;
+
+      let bookmark: string | undefined;
+      while (scanned < SCAN_CAP) {
+        const opts: PouchDB.Core.AllDocsWithKeysOptions = {
+          include_docs: true,
+          limit: PAGE,
+        } as any;
+        if (bookmark) (opts as any).startkey = bookmark;
+        // PouchDB allDocs with a startkey re-includes the bookmark row, so
+        // we skip the first row of every page after the first.
+        const skip = bookmark ? 1 : 0;
+        const result = await (await getDB()).allDocs(opts);
+        if (!result.rows.length) break;
+        for (let i = skip; i < result.rows.length; i++) {
+          const row = result.rows[i];
+          const doc: any = row.doc;
+          if (!doc) continue;
+          const type = String(doc.docType || 'unknown');
+          const platform = String(doc.platform || '');
+          // Cheap byte estimate via JSON.stringify length × 2 (UTF-16).
+          // We DO NOT keep the doc reference past this loop iteration so
+          // the scan stays bounded in heap.
+          let bytes = 0;
+          try { bytes = (JSON.stringify(doc) || '').length * 2; } catch {}
+          totalBytes += bytes;
+
+          if (!byType[type]) byType[type] = { count: 0, bytes: 0 };
+          byType[type].count++;
+          byType[type].bytes += bytes;
+
+          if (platform) {
+            const k = `${type}:${platform}`;
+            if (!byTypePlatform[k]) byTypePlatform[k] = { type, platform, count: 0, bytes: 0 };
+            byTypePlatform[k].count++;
+            byTypePlatform[k].bytes += bytes;
+          }
+
+          // Top-N by individual doc size. Insert if we haven't filled
+          // top yet, or if this doc beats the current smallest.
+          if (top.length < TOP_N) {
+            top.push({ id: String(row.id), bytes, type, platform });
+            if (top.length === TOP_N) top.sort((a, b) => a.bytes - b.bytes);
+          } else if (bytes > top[0].bytes) {
+            top[0] = { id: String(row.id), bytes, type, platform };
+            // Re-heapify: sort by bytes asc so top[0] is always the smallest.
+            top.sort((a, b) => a.bytes - b.bytes);
+          }
+          scanned++;
+          if (scanned >= SCAN_CAP) break;
+        }
+        if (result.rows.length < PAGE + skip) break; // last page
+        bookmark = result.rows[result.rows.length - 1].id;
+      }
+
+      // Sort outputs by bytes desc for display.
+      const byTypeArr = Object.entries(byType)
+        .map(([type, v]) => ({ type, ...v }))
+        .sort((a, b) => b.bytes - a.bytes);
+      const byTypePlatformArr = Object.values(byTypePlatform).sort((a, b) => b.bytes - a.bytes);
+      top.sort((a, b) => b.bytes - a.bytes);
+
+      // Database-level info from PouchDB itself for ground-truth doc count.
+      let totalDocCount = 0;
+      try { totalDocCount = ((await (await getDB()).info()) as any).doc_count || 0; } catch {}
+
+      const elapsedMs = Math.round(performance.now() - t0);
+      console.log(`${LOG} GET_DB_STATS: scanned ${scanned}/${totalDocCount} docs in ${elapsedMs}ms (${Math.round(totalBytes / 1048576)}MB sampled)`);
+      return {
+        ok: true,
+        scanned,
+        totalDocCount,
+        scanCapped: scanned >= SCAN_CAP,
+        totalBytesSampled: totalBytes,
+        byType: byTypeArr,
+        byTypePlatform: byTypePlatformArr,
+        topLargest: top,
+        elapsedMs,
+      };
+    }
+
     // v0.57.33: one-shot recovery for users whose inbox lost threads to
     // the old PROFILE_BLOCKED → archived:true coupling. Scans every
     // thread-meta whose archived flag was set BY a block (blockedByThem)
