@@ -1,0 +1,113 @@
+{
+  "manifest_version": 3,
+  "name": "Aggregaytor",
+  "version": "0.57.62",
+  "description": "Unified message inbox across platforms",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "sidePanel",
+    "tabs",
+    "alarms",
+    "notifications",
+    "identity",
+    "contextMenus",
+    "scripting",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://sniffies.com/*",
+    "https://web.grindr.com/*",
+    "https://doublelist.com/*",
+    "https://www.adam4adam.com/*",
+    "https://m.adam4adam.com/*",
+    "https://mail.google.com/*",
+    "https://mail.yahoo.com/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/panel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://sniffies.com/*"],
+      "js": ["content/sniffies-bridge.js", "content/sniffies-migrate.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://web.grindr.com/*"],
+      "js": ["content/grindr-bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://doublelist.com/*"],
+      "js": ["content/doublelist-bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://www.adam4adam.com/*", "https://m.adam4adam.com/*"],
+      "js": ["content/adam4adam-bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://mail.google.com/*"],
+      "js": ["content/gmail-bridge.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://mail.yahoo.com/*"],
+      "js": ["content/yahoo-bridge.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["content/sniffies.js"],
+      "matches": ["https://sniffies.com/*"]
+    },
+    {
+      "resources": ["content/grindr.js"],
+      "matches": ["https://web.grindr.com/*"]
+    },
+    {
+      "resources": ["content/doublelist.js"],
+      "matches": ["https://doublelist.com/*"]
+    },
+    {
+      "resources": ["content/adam4adam.js"],
+      "matches": ["https://www.adam4adam.com/*", "https://m.adam4adam.com/*"]
+    },
+    {
+      "resources": ["content/gmail.js"],
+      "matches": ["https://mail.google.com/*"]
+    },
+    {
+      "resources": ["content/yahoo.js"],
+      "matches": ["https://mail.yahoo.com/*"]
+    }
+  ],
+  "action": {
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "oauth2": {
+    "client_id": "948699843382-5tesf3h24gn87f8o4juh7j4mlvngtu80.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/calendar",
+      "https://www.googleapis.com/auth/tasks",
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/drive.file"
+    ]
+  }
+}

@@ -1,0 +1,73 @@
+[    6083ms] [LOG] 
+%c    ##                             ##
+   
+ #######################################
+
+########################################
+
+ #######################################
+
+ #######################################
+
+  ####           #######           #### 
+
+  ####            #####           *#### 
+
+   #####         #######         #####  
+
+    #################################   
+
+     ###############################    
+
+        #########################       
+
+           #################
+
+
+
+%cWelcome to Grindr Web!
+%cPasting anything in here could give attackers access to your Grindr account.
+ %c
+If someone asked you to copy/paste something here, there is a good chance you’re being scammed or someone is attempting to gain access to your account.
+
+
+If you’re a programmer here to look around, have you considered joining the Grindr team? Visit https://www.grindr.com/careers/ to learn more about working here and view our open roles. font-weight: normal;color: #ffcc00;font-family: monospace; font-weight: bold;color: black font-weight: bold;color: red font-weight: normal; color: black @ https://web.grindr.com/assets/index-BJoEZ8lS.js:125
+[    6424ms] [ERROR] Failed to load resource: the server responded with a status of 401 () @ https://web.grindr.com/v1/api-tokens/:0
+[   31466ms] [LOG] Braze initialization stubbed out @ https://web.grindr.com/assets/index-BJoEZ8lS.js:125
+[   44933ms] [LOG] 
+%c    ##                             ##
+   
+ #######################################
+
+########################################
+
+ #######################################
+
+ #######################################
+
+  ####           #######           #### 
+
+  ####            #####           *#### 
+
+   #####         #######         #####  
+
+    #################################   
+
+     ###############################    
+
+        #########################       
+
+           #################
+
+
+
+%cWelcome to Grindr Web!
+%cPasting anything in here could give attackers access to your Grindr account.
+ %c
+If someone asked you to copy/paste something here, there is a good chance you’re being scammed or someone is attempting to gain access to your account.
+
+
+If you’re a programmer here to look around, have you considered joining the Grindr team? Visit https://www.grindr.com/careers/ to learn more about working here and view our open roles. font-weight: normal;color: #ffcc00;font-family: monospace; font-weight: bold;color: black font-weight: bold;color: red font-weight: normal; color: black @ https://web.grindr.com/assets/index-BJoEZ8lS.js:125
+[   45136ms] [ERROR] Failed to load resource: the server responded with a status of 401 () @ https://web.grindr.com/v1/api-tokens/:0
+[   62860ms] [LOG] Braze initialization stubbed out @ https://web.grindr.com/assets/index-BJoEZ8lS.js:125
+[  320234ms] [WARNING] The map container element should be empty, otherwise the map's interactivity will be negatively impacted. If you want to display a message when WebGL is not supported, use the Mapbox GL Supported plugin instead. @ https://web.grindr.com/assets/index-BJoEZ8lS.js:125

@@ -1,0 +1,242 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - paragraph [ref=e4]: Connected!
+    - generic [ref=e57]:
+      - generic [ref=e59]:
+        - banner [ref=e60]:
+          - heading [level=1] [ref=e61]: Nearby
+          - generic [ref=e62]:
+            - button [ref=e63] [cursor=pointer]:
+              - img [ref=e64]
+            - button [ref=e68] [cursor=pointer]:
+              - img [ref=e69]
+              - text: Shuffle
+            - button [ref=e76] [cursor=pointer]:
+              - img [ref=e77]
+              - text: Explore
+            - button [ref=e82] [cursor=pointer]:
+              - img [ref=e83]
+              - text: Search
+            - button [ref=e87] [cursor=pointer]:
+              - img [ref=e88]
+              - text: Favorites
+        - banner [ref=e90]:
+          - button [ref=e91] [cursor=pointer]:
+            - generic [ref=e92]:
+              - img [ref=e93]
+              - paragraph [ref=e95]: Filters
+          - button [ref=e96] [cursor=pointer]:
+            - paragraph [ref=e97]: Online Now
+          - button [ref=e98] [cursor=pointer]:
+            - paragraph [ref=e99]: Age
+          - button [ref=e100] [cursor=pointer]:
+            - paragraph [ref=e101]: Position
+        - generic [ref=e105]:
+          - gridcell [ref=e106]
+          - gridcell [ref=e109]
+          - gridcell [ref=e112]
+          - gridcell [ref=e115]
+          - gridcell [ref=e118]
+          - gridcell [ref=e121]
+          - gridcell [ref=e124]
+          - gridcell [ref=e127]
+          - gridcell [ref=e130]
+          - gridcell [ref=e133]
+          - gridcell [ref=e136]
+          - gridcell [ref=e139]
+          - gridcell [ref=e142]
+          - gridcell [ref=e145]
+          - gridcell [ref=e148]
+          - gridcell [ref=e151]
+          - gridcell [ref=e154]
+          - gridcell [ref=e157]
+          - gridcell [ref=e160]
+          - gridcell [ref=e162]
+          - gridcell [ref=e164]
+          - gridcell [ref=e166]
+          - gridcell [ref=e168]
+          - gridcell [ref=e170]
+          - gridcell [ref=e172]
+          - gridcell [ref=e174]
+          - gridcell [ref=e176]
+          - gridcell [ref=e178]
+          - gridcell [ref=e180]
+          - gridcell [ref=e182]
+          - gridcell [ref=e184]
+          - gridcell [ref=e186]
+          - gridcell [ref=e188]
+          - gridcell [ref=e190]
+          - gridcell [ref=e192]
+          - gridcell [ref=e194]
+          - gridcell [ref=e196]
+          - gridcell [ref=e198]
+          - gridcell [ref=e200]
+          - gridcell [ref=e202]
+          - gridcell [ref=e204]
+          - gridcell [ref=e206]
+          - gridcell [ref=e208]
+          - gridcell [ref=e210]
+          - gridcell [ref=e212]
+          - gridcell [ref=e214]
+          - gridcell [ref=e216]
+          - gridcell [ref=e218]
+          - gridcell [ref=e220]
+          - gridcell [ref=e222]
+        - generic [ref=e227] [cursor=pointer]:
+          - paragraph [ref=e229]: Chats
+          - button [ref=e233]:
+            - img [ref=e234]
+      - banner [ref=e236]:
+        - generic [ref=e237]:
+          - link [ref=e238] [cursor=pointer]:
+            - /url: /
+            - img [ref=e239]
+          - link [ref=e241] [cursor=pointer]:
+            - /url: /chat
+            - generic [ref=e242]:
+              - img [ref=e243]
+              - generic [ref=e245]: "16"
+          - link [ref=e247] [cursor=pointer]:
+            - /url: /interest
+            - img [ref=e249]
+          - link [ref=e252] [cursor=pointer]:
+            - /url: /?myProfile=true
+            - img [ref=e255]
+          - generic [ref=e256]:
+            - link [ref=e257] [cursor=pointer]:
+              - /url: https://www.grindr.com/terms-of-service/
+              - text: Terms of Service
+            - link [ref=e258] [cursor=pointer]:
+              - /url: https://www.grindr.com/privacy-policy/
+              - text: Privacy Policy
+  - generic [ref=e321]:
+    - banner [ref=e322]:
+      - button "close" [ref=e323] [cursor=pointer]:
+        - img [ref=e324]
+      - paragraph [ref=e326]: Settings
+    - generic [ref=e327]:
+      - paragraph [ref=e328]: Account
+      - generic [ref=e329]:
+        - button "User ID 846429M1NC" [ref=e330] [cursor=pointer]:
+          - generic [ref=e332]:
+            - heading "User ID" [level=5] [ref=e333]
+            - paragraph [ref=e334]: 846429M1NC
+        - separator [ref=e335]
+      - paragraph [ref=e336]: App Settings
+      - generic [ref=e337]:
+        - button "Unit System Imperial (U.S.) caret right" [ref=e338] [cursor=pointer]:
+          - generic [ref=e340]:
+            - heading "Unit System" [level=5] [ref=e341]
+            - paragraph [ref=e342]: Imperial (U.S.)
+            - img "caret right" [ref=e344]
+        - separator [ref=e346]
+        - button "Sound Effects caret right" [ref=e347] [cursor=pointer]:
+          - generic [ref=e349]:
+            - heading "Sound Effects" [level=5] [ref=e350]
+            - img "caret right" [ref=e352]
+        - separator [ref=e354]
+        - button "Notifications caret right" [ref=e355] [cursor=pointer]:
+          - generic [ref=e357]:
+            - heading "Notifications" [level=5] [ref=e358]
+            - img "caret right" [ref=e360]
+        - separator [ref=e362]
+      - paragraph [ref=e363]: Security and Privacy
+      - generic [ref=e364]:
+        - button "Location and Visibility caret right" [ref=e365] [cursor=pointer]:
+          - generic [ref=e367]:
+            - heading "Location and Visibility" [level=5] [ref=e368]
+            - img "caret right" [ref=e370]
+        - separator [ref=e372]
+        - button "Unblock Users caret right" [ref=e373] [cursor=pointer]:
+          - generic [ref=e375]:
+            - heading "Unblock Users" [level=5] [ref=e376]
+            - img "caret right" [ref=e378]
+        - separator [ref=e380]
+        - button "Unhide Users caret right" [ref=e381] [cursor=pointer]:
+          - generic [ref=e383]:
+            - heading "Unhide Users" [level=5] [ref=e384]
+            - img "caret right" [ref=e386]
+        - separator [ref=e388]
+        - button "Consent Preference Center caret right" [ref=e389] [cursor=pointer]:
+          - generic [ref=e391]:
+            - heading "Consent Preference Center" [level=5] [ref=e392]
+            - img "caret right" [ref=e394]
+        - separator [ref=e396]
+        - button "Download Data caret right" [ref=e397] [cursor=pointer]:
+          - generic [ref=e399]:
+            - heading "Download Data" [level=5] [ref=e400]
+            - img "caret right" [ref=e402]
+        - separator [ref=e404]
+        - generic [ref=e405]:
+          - heading "Delete Profile" [level=5] [ref=e407]
+          - paragraph [ref=e408]:
+            - generic [ref=e409]:
+              - text: If you want to delete your profile, please initiate in the Grindr app. Review the
+              - link "\"Delete your profile\"" [ref=e410] [cursor=pointer]:
+                - /url: https://help.grindr.com/hc/en-us/articles/4402749200915-In-app-privacy-features#h_01F8ZS93QRT7WWTD8CZC6A9Q7V
+              - text: help center article for more information. Alternatively, you can submit a request
+              - link "here" [ref=e411] [cursor=pointer]:
+                - /url: https://help.grindr.com/hc/en-us/requests/new?ticket_form_id=360006692913
+              - text: .
+      - paragraph [ref=e412]: Follow Us
+      - generic [ref=e413]:
+        - button "Instagram" [ref=e414] [cursor=pointer]:
+          - generic [ref=e416]:
+            - img [ref=e418]
+            - heading "Instagram" [level=5] [ref=e420]
+        - separator [ref=e421]
+        - button "Facebook" [ref=e422] [cursor=pointer]:
+          - generic [ref=e424]:
+            - img [ref=e426]
+            - heading "Facebook" [level=5] [ref=e428]
+        - separator [ref=e429]
+        - button "Twitter" [ref=e430] [cursor=pointer]:
+          - generic [ref=e432]:
+            - img [ref=e434]
+            - heading "Twitter" [level=5] [ref=e436]
+        - separator [ref=e437]
+        - button "LinkedIn" [ref=e438] [cursor=pointer]:
+          - generic [ref=e440]:
+            - img [ref=e442]
+            - heading "LinkedIn" [level=5] [ref=e444]
+        - separator [ref=e445]
+        - button "TikTok" [ref=e446] [cursor=pointer]:
+          - generic [ref=e448]:
+            - img [ref=e450]
+            - heading "TikTok" [level=5] [ref=e452]
+        - separator [ref=e453]
+      - paragraph [ref=e454]: About
+      - generic [ref=e455]:
+        - button "Feature Requests" [ref=e456] [cursor=pointer]:
+          - heading "Feature Requests" [level=5] [ref=e459]
+        - separator [ref=e460]
+        - button "Support" [ref=e461] [cursor=pointer]:
+          - heading "Support" [level=5] [ref=e464]
+        - separator [ref=e465]
+        - button "Community Guidelines" [ref=e466] [cursor=pointer]:
+          - heading "Community Guidelines" [level=5] [ref=e469]
+        - separator [ref=e470]
+        - button "Careers" [ref=e471] [cursor=pointer]:
+          - heading "Careers" [level=5] [ref=e474]
+        - separator [ref=e475]
+        - button "Terms of Service" [ref=e476] [cursor=pointer]:
+          - heading "Terms of Service" [level=5] [ref=e479]
+        - separator [ref=e480]
+        - button "Privacy Policy" [ref=e481] [cursor=pointer]:
+          - heading "Privacy Policy" [level=5] [ref=e484]
+        - separator [ref=e485]
+        - button "Consumer Health Data Privacy Policy" [ref=e486] [cursor=pointer]:
+          - heading "Consumer Health Data Privacy Policy" [level=5] [ref=e489]
+        - separator [ref=e490]
+        - button "Frequently Asked Questions" [ref=e491] [cursor=pointer]:
+          - heading "Frequently Asked Questions" [level=5] [ref=e494]
+        - separator [ref=e495]
+        - button "Licenses caret right" [ref=e496] [cursor=pointer]:
+          - generic [ref=e498]:
+            - heading "Licenses" [level=5] [ref=e499]
+            - img "caret right" [ref=e501]
+        - separator [ref=e503]
+        - button "Patents" [ref=e504] [cursor=pointer]:
+          - heading "Patents" [level=5] [ref=e507]
+        - separator [ref=e508]
+      - paragraph [ref=e509]: v2.1.1-

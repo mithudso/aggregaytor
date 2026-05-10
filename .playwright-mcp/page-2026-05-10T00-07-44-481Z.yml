@@ -1,0 +1,47 @@
+- generic [ref=e3]:
+  - paragraph [ref=e4]: Connected!
+  - generic [ref=e5]:
+    - generic [ref=e1510]:
+      - button "Close" [ref=e1511] [cursor=pointer]:
+        - img [ref=e1512]
+      - generic [ref=e1514]:
+        - paragraph [ref=e1517] [cursor=pointer]: Explore Here
+        - region "Map" [ref=e1519]
+        - generic:
+          - generic [ref=e1520]:
+            - img [ref=e1521]
+            - textbox "Search" [ref=e1523]
+          - generic [ref=e1525]:
+            - link "Mapbox" [ref=e1526] [cursor=pointer]:
+              - /url: https://www.mapbox.com/about/maps
+              - text: © Mapbox
+            - link "OpenStreetMap" [ref=e1527] [cursor=pointer]:
+              - /url: https://www.openstreetmap.org/copyright/
+              - text: © OpenStreetMap
+            - link "Improve this map" [ref=e1528] [cursor=pointer]:
+              - /url: https://apps.mapbox.com/feedback/?owner=mapbox&id=dark-v10&access_token=pk.eyJ1Ijoiam9obnNvbnN1IiwiYSI6ImNsOHQ1djJ5OTAwZzY0MWs2NnA0MGVjN3IifQ.5nIUlcPPV7lW6MhauAKb0Q#/-97.735/30.502/12
+          - link "Mapbox homepage" [ref=e1530] [cursor=pointer]:
+            - /url: https://www.mapbox.com/
+    - banner "Tab selection menu" [ref=e1486]:
+      - generic [ref=e1487]:
+        - link "navigate to home" [ref=e1488] [cursor=pointer]:
+          - /url: /
+          - img [ref=e1489]
+        - link "navigate to chat" [ref=e1491] [cursor=pointer]:
+          - /url: /chat
+          - generic [ref=e1492]:
+            - img [ref=e1493]
+            - generic [ref=e1495]: "17"
+        - link "navigate to radar" [ref=e1497] [cursor=pointer]:
+          - /url: /interest
+          - generic [ref=e1498]:
+            - img [ref=e1499]
+            - generic [ref=e1502]: "1"
+        - link "open profile menu" [ref=e1503] [cursor=pointer]:
+          - /url: /map?myProfile=true
+          - img "Bottom Bunk" [ref=e1506]
+        - generic [ref=e1507]:
+          - link "Terms of Service" [ref=e1508] [cursor=pointer]:
+            - /url: https://www.grindr.com/terms-of-service/
+          - link "Privacy Policy" [ref=e1509] [cursor=pointer]:
+            - /url: https://www.grindr.com/privacy-policy/

@@ -1,0 +1,44 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e6]:
+        - button "Map Layers" [disabled] [ref=e8]:
+          - generic "Map Layers" [ref=e9]: 
+        - generic "Sitelinks" [ref=e11]:
+          - button "App Notifications" [ref=e12] [cursor=pointer]:
+            - generic "Sniffies" [ref=e13]: 
+            - generic [ref=e14]: 
+        - button "Settings" [ref=e16] [cursor=pointer]:
+          - generic "Settings" [ref=e17]: 
+      - generic [ref=e22]:
+        - generic:
+          - generic:
+            - generic:
+              - generic:
+                - generic "Your Profile Selected":
+                  - generic:
+                    - generic "This is you"
+                    - generic:
+                      - generic:
+                        - generic: 
+                      - generic:
+                        - generic: 
+                        - generic:
+                          - generic:
+                            - img "bottom"
+                        - generic: 
+                        - text: You
+      - generic [ref=e26]:
+        - button "Messages " [ref=e76] [cursor=pointer]:
+          - generic "Messages" [ref=e29]: 
+          - generic [ref=e77]: 
+        - button "Shop" [ref=e78] [cursor=pointer]:
+          - generic "Shop" [ref=e79]: 
+        - generic "Cruising Update" [ref=e33]:
+          - button "Cruising Update" [disabled] [ref=e34]:
+            - generic "Cruising Update" [ref=e35]:
+              - text: 
+              - generic [ref=e36]: 
+    - generic:    
+  - text: 
+  - img [ref=e74]

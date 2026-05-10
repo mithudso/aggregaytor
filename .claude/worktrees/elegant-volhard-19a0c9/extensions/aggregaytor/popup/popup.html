@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aggregaytor</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { width: 340px; max-height: 560px; overflow-y: auto; font-family: system-ui, -apple-system, sans-serif; background: #0f1419; color: #e7e9ea; font-size: 13px; padding: 14px; }
+    h1 { font-size: 16px; margin-bottom: 10px; }
+    h2 { font-size: 12px; font-weight: 600; color: #9ca3af; margin: 12px 0 6px; cursor: pointer; }
+    h2:hover { color: #d1d5db; }
+    .section { display: none; }
+    .section.open { display: block; }
+    .stat { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .stat-label { color: #9ca3af; } .stat-value { font-weight: 600; }
+    .btn { display: block; width: 100%; margin-top: 8px; padding: 7px; border-radius: 8px; border: 1px solid rgba(59,130,246,0.4); background: rgba(59,130,246,0.15); color: #93c5fd; font-size: 12px; cursor: pointer; text-align: center; }
+    .btn:hover { background: rgba(59,130,246,0.25); }
+    .btn-sm { display: inline-block; width: auto; margin: 0; padding: 3px 8px; font-size: 11px; }
+    .btn-danger { border-color: rgba(239,68,68,0.3); background: rgba(239,68,68,0.1); color: #f87171; }
+    label { display: block; font-size: 11px; color: #9ca3af; margin-bottom: 3px; }
+    select, input[type="password"], input[type="text"], input[type="number"], input[type="file"] {
+      width: 100%; padding: 5px 7px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15);
+      background: rgba(255,255,255,0.06); color: #e7e9ea; font-size: 11px; font-family: inherit; margin-bottom: 6px;
+    }
+    select:focus, input:focus { outline: none; border-color: rgba(59,130,246,0.5); }
+    .saved { color: #10b981; font-size: 11px; display: none; margin-top: 3px; }
+    .saved.show { display: block; }
+    .info { font-size: 10px; color: #6b7280; margin-bottom: 6px; line-height: 1.3; }
+    .pic-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 6px 0; }
+    .pic-item { position: relative; border-radius: 6px; overflow: hidden; aspect-ratio: 1; background: rgba(255,255,255,0.05); }
+    .pic-item img { width: 100%; height: 100%; object-fit: cover; }
+    .pic-item .pic-stats { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.7); font-size: 9px; padding: 2px 4px; color: #9ca3af; }
+    .pic-item .pic-tag { position: absolute; top: 2px; left: 2px; font-size: 9px; padding: 1px 4px; border-radius: 3px; background: rgba(59,130,246,0.5); color: white; }
+    .pic-item .pic-del { position: absolute; top: 2px; right: 2px; background: rgba(239,68,68,0.7); border: none; color: white; width: 16px; height: 16px; border-radius: 50%; font-size: 10px; cursor: pointer; display: none; }
+    .pic-item:hover .pic-del { display: block; }
+    .rule-item { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 11px; }
+    .rule-item .rule-name { flex: 1; }
+    .rule-item .rule-count { color: #6b7280; font-size: 10px; margin: 0 6px; }
+    .rule-actions { display: flex; gap: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Aggregaytor</h1>
+  <div id="stats"></div>
+  <button class="btn" id="open-panel">Open Inbox</button>
+
+  <h2 data-toggle="sync-section">Sync</h2>
+  <div id="sync-section" class="section">
+    <div class="info">Scrape profile pictures from open platform tabs.</div>
+    <button class="btn" id="sync-pics">Sync Profile Pictures</button>
+    <div id="sync-status" class="info" style="margin-top:6px"></div>
+  </div>
+
+  <h2 data-toggle="personality-section">Personality & Style</h2>
+  <div id="personality-section" class="section">
+    <label>Response personality</label>
+    <select id="personality-preset"></select>
+    <div id="preset-description" class="info"></div>
+
+    <label style="margin-top:8px">Custom instructions</label>
+    <textarea id="custom-instructions" rows="4" style="width:100%;padding:5px 7px;border-radius:6px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.06);color:#e7e9ea;font-size:11px;font-family:inherit;resize:vertical" placeholder="e.g., Always be closing. Never use emojis. Be direct and clear..."></textarea>
+
+    <label style="margin-top:8px">Writing style (auto-derived)</label>
+    <div id="style-guide-display" class="info" style="max-height:60px;overflow-y:auto">Not yet derived.</div>
+    <button class="btn" id="derive-style" style="margin-top:4px">Analyze my writing style</button>
+
+    <button class="btn" id="save-personality" style="margin-top:8px">Save Personality Settings</button>
+    <div class="saved" id="personality-saved">Saved</div>
+  </div>
+
+  <h2 data-toggle="llm-section">AI Settings</h2>
+  <div id="llm-section" class="section">
+    <label for="provider">Provider</label>
+    <select id="provider">
+      <option value="local">Local (no API key)</option>
+      <option value="anthropic">Claude (Anthropic)</option>
+      <option value="gemini">Gemini (Google)</option>
+      <option value="openai">OpenAI</option>
+      <option value="groq">Groq (fast, free tier)</option>
+      <option value="cerebras">Cerebras (1M tokens/day free)</option>
+      <option value="perplexity">Perplexity</option>
+      <option value="mistral">Mistral AI</option>
+      <option value="copilot">GitHub Copilot</option>
+    </select>
+    <div id="provider-info" class="info"></div>
+    <div id="api-key-section" style="display:none">
+      <label for="api-key">API Key</label>
+      <input type="password" id="api-key" placeholder="Enter your API key">
+    </div>
+    <div id="model-section" style="display:none">
+      <label for="model">Model (optional)</label>
+      <input type="text" id="model" placeholder="Leave blank for default">
+    </div>
+    <button class="btn" id="save-llm" style="display:none">Save AI Settings</button>
+    <div class="saved" id="llm-saved">Saved</div>
+    <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px">
+      <label style="font-weight:600;margin-bottom:6px">Rate Limiting</label>
+      <label><input type="checkbox" id="llm-enabled" checked> Enable LLM calls</label>
+      <div style="margin:4px 0"><label>Max requests/min</label>
+      <input type="number" id="llm-rpm" value="10" min="1" max="60" style="width:60px"></div>
+      <label style="font-weight:500;margin:6px 0 2px;display:block">Feature toggles</label>
+      <label><input type="checkbox" id="llm-feat-ar" checked> Auto-respond</label>
+      <label><input type="checkbox" id="llm-feat-suggest" checked> Suggestions</label>
+      <label><input type="checkbox" id="llm-feat-dossier" checked> Dossier extraction</label>
+      <label><input type="checkbox" id="llm-feat-nick" checked> Nicknames</label>
+      <label><input type="checkbox" id="llm-feat-summary" checked> Summaries</label>
+      <button class="btn" id="save-rate">Save Rate Settings</button>
+      <div id="llm-queue-status" class="info" style="margin-top:4px"></div>
+    </div>
+    <div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px">
+      <label>Log level</label>
+      <select id="log-level">
+        <option value="debug">Debug (verbose)</option>
+        <option value="info" selected>Info</option>
+        <option value="warn">Warn</option>
+        <option value="error">Error only</option>
+        <option value="off">Off</option>
+      </select>
+    </div>
+  </div>
+
+  <h2 data-toggle="cal-section">Google Calendar</h2>
+  <div id="cal-section" class="section">
+    <div class="info">Connect your calendar so auto-respond knows your availability.</div>
+    <button class="btn" id="cal-connect">Connect Google Calendar</button>
+    <div id="cal-status" class="info" style="margin-top:6px"></div>
+    <div id="cal-settings-fields" style="display:none">
+      <label>Prep time (minutes)</label>
+      <input type="number" id="cal-prep" value="30" min="0" max="120">
+      <label>Travel time (minutes)</label>
+      <input type="number" id="cal-travel" value="15" min="0" max="120">
+      <button class="btn" id="cal-save">Save Calendar Settings</button>
+    </div>
+  </div>
+
+  <h2 data-toggle="pic-section">Picture Library</h2>
+  <div id="pic-section" class="section">
+    <div class="info">Upload pictures to send in conversations. Tag them for smart auto-selection.</div>
+    <div style="display:flex;gap:6px;margin-bottom:6px">
+      <select id="pic-tag" style="width:auto;flex:0 0 80px">
+        <option value="face">Face</option><option value="body">Body</option>
+        <option value="explicit">Explicit</option><option value="other">Other</option>
+      </select>
+      <input type="text" id="pic-label" placeholder="Label..." style="flex:1;margin:0">
+      <label class="btn btn-sm" style="margin:0;cursor:pointer">Upload<input type="file" id="pic-upload" accept="image/*" style="display:none"></label>
+    </div>
+    <div id="pic-grid" class="pic-grid"></div>
+  </div>
+
+  <h2 data-toggle="rules-section">Block Rules</h2>
+  <div id="rules-section" class="section">
+    <div class="info">Auto-archive or hide profiles based on conversation patterns.</div>
+    <div id="rule-list"></div>
+    <div style="margin-top:6px">
+      <select id="rule-type" style="width:auto">
+        <option value="ignored_count">Ignored count</option>
+        <option value="no_response_days">No response (days)</option>
+        <option value="deleted_chat">Deleted chat count</option>
+        <option value="keyword">Keyword match</option>
+      </select>
+      <input type="number" id="rule-threshold" placeholder="Threshold" value="3" style="width:60px;display:inline-block">
+      <input type="text" id="rule-keywords" placeholder="Keywords (comma-sep)" style="display:none">
+      <select id="rule-action" style="width:auto">
+        <option value="archive">Archive</option><option value="hide">Hide</option><option value="block">Block</option>
+      </select>
+      <button class="btn btn-sm" id="add-rule" style="display:inline-block">Add Rule</button>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

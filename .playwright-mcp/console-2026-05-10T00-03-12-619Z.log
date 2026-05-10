@@ -1,0 +1,1 @@
+[     206ms] [VERBOSE] [DOM] Password field is not contained in a form: (More info: https://goo.gl/9p2vKq) %o @ https://appleid.apple.com/auth/authorize?client_id=com.grindrguy.grindrx.signin&redirect_uri=https%3A%2F%2Fweb.grindr.com%2Fapple-login&response_type=code%20id_token&scope=email&response_mode=web_message&frame_id=46a72a99-07c9-4ac9-a49a-2581f3484b5d&m=11&v=1.5.6:0
