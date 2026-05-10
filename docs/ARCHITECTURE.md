@@ -213,15 +213,14 @@ Per-platform, two scripts:
    - Built as an IIFE bundle (vite.config.ts's `buildContentScriptsIIFE`) — no ES modules, no shared chunks.
    - Intercepts `window.fetch` and WebSockets.
    - Instantiates the platform adapter and dispatches events to the bridge.
-   - Exposes helpers on `window` (e.g. `__aggregaytor_get_grindr_auth`) for SW-injected scripts.
+   - Keeps platform auth and other page-only state inside the MAIN-world closure; bridge-mediated requests ask the page script to perform specific authenticated operations instead of exposing raw credentials on `window`.
 
 ### MAIN world security notes
 
 The host page CAN read anything on `window.*`. We only expose:
 - `__aggregaytor_grindr_lookupProfileId(hash)` — looks up profileId from a photoHash we already saw (no new info leaked)
-- `__aggregaytor_get_grindr_auth()` — returns captured auth headers (the same headers Grindr itself is sending; no new info leaked)
 
-Do NOT expose anything that gives the page additional capabilities.
+Do NOT expose anything that gives the page additional capabilities. Prefer bridge events that trigger narrowly scoped MAIN-world work over exposing secrets or reusable privileged helpers on `window.*`.
 
 ## Preference ML
 

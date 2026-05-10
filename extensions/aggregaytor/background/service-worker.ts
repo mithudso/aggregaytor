@@ -2229,171 +2229,9 @@ async function handleMessage(msg: any): Promise<any> {
           const tabs = await chrome.tabs.query({});
           const grindrTab = tabs.find((t: any) => t.url?.includes('web.grindr.com'));
           if (grindrTab?.id) {
-            const [result] = await chrome.scripting.executeScript({
-              target: { tabId: grindrTab.id },
-              world: 'MAIN', // MAIN world so we can read React/Grindr's in-memory auth
-              func: async () => {
-                const results: Array<{ profileId: string; liked: boolean; source: string }> = [];
-                const debug: Array<{ url: string; status: number; keys: string[]; count: number; sample: any }> = [];
-
-                // PRIMARY auth source: the grindr.ts adapter captures live
-                // Authorization headers from Grindr's own network traffic
-                // and exposes them via window.__aggregaytor_get_grindr_auth().
-                // Using the adapter's cache means we always send the exact same
-                // header Grindr's own React app is sending right now — most
-                // reliable and avoids the "is localStorage stale?" problem.
-                //
-                // Fallback: scan localStorage for JWT-shaped values and common
-                // token keys. Used when the bulk import runs BEFORE the
-                // adapter has seen any authenticated traffic (rare — cascade
-                // loads fire auth calls on page open).
-                const authHeaders: Record<string, string> = {};
-                let authSource = 'none';
-                const captured = (window as any).__aggregaytor_get_grindr_auth?.();
-                if (captured && Object.keys(captured).length) {
-                  Object.assign(authHeaders, captured);
-                  authSource = 'adapter';
-                } else {
-                  const findTokenFromStorage = (): string => {
-                    const keys = ['authToken', 'auth-token', 'grindrAuthToken', 'session', 'grindrSession', 'access_token', 'accessToken', 'token'];
-                    for (const k of keys) {
-                      const v = localStorage.getItem(k);
-                      if (v && v.length > 20 && !v.startsWith('{')) return v;
-                    }
-                    for (let i = 0; i < localStorage.length; i++) {
-                      const k = localStorage.key(i) || '';
-                      const v = localStorage.getItem(k) || '';
-                      if (/^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$/.test(v)) return v;
-                      if (v.startsWith('{')) {
-                        try {
-                          const obj = JSON.parse(v);
-                          const t = obj.authToken || obj.accessToken || obj.token || obj.session?.authToken || obj.session?.accessToken;
-                          if (t && String(t).length > 20) return String(t);
-                        } catch {}
-                      }
-                    }
-                    return '';
-                  };
-                  const token = findTokenFromStorage();
-                  if (token) {
-                    authHeaders['Authorization'] = token.startsWith('Grindr3 ') || token.startsWith('Bearer ')
-                      ? token : `Grindr3 ${token}`;
-                    authSource = 'localStorage';
-                  }
-                }
-                console.log('[Aggregaytor:GrindrImport] Auth source:', authSource, 'headers:', Object.keys(authHeaders).join(','));
-
-                // Extract profile IDs from an arbitrary response shape. Grindr
-                // uses various envelope formats across endpoints (profiles[],
-                // items[], blocks[], list[], a bare array of ids, etc.).
-                const extractIds = (data: any): string[] => {
-                  if (!data) return [];
-                  const ids: string[] = [];
-                  const walk = (v: any) => {
-                    if (v == null) return;
-                    if (Array.isArray(v)) { for (const item of v) walk(item); return; }
-                    if (typeof v === 'string' || typeof v === 'number') {
-                      const s = String(v);
-                      if (/^\d{5,}$/.test(s)) ids.push(s);
-                      return;
-                    }
-                    if (typeof v !== 'object') return;
-                    for (const k of ['profileId', 'profile_id', 'id', 'userId', 'user_id', 'blockedProfileId', 'hiddenProfileId']) {
-                      const x = (v as any)[k];
-                      if (x != null) {
-                        const s = String(x);
-                        if (/^\d{5,}$/.test(s)) { ids.push(s); return; }
-                      }
-                    }
-                    // Recurse into container keys
-                    for (const k of ['profiles', 'items', 'data', 'list', 'blocks', 'hides', 'results', 'content']) {
-                      if ((v as any)[k]) walk((v as any)[k]);
-                    }
-                  };
-                  walk(data);
-                  return [...new Set(ids)];
-                };
-
-                // Paginate an endpoint until no more ids are returned or we hit
-                // a safety cap. Grindr endpoints accept ?page=, ?pageNumber=,
-                // or ?offset= / ?cursor= — we try the common ones.
-                const paginateEndpoint = async (baseUrl: string, liked: boolean, source: string): Promise<void> => {
-                  const seen = new Set<string>();
-                  // Strategy 1: page=1,2,3... until empty or unchanged
-                  for (let page = 1; page <= 40; page++) {
-                    const sep = baseUrl.includes('?') ? '&' : '?';
-                    const url = `${baseUrl}${sep}page=${page}&pageNumber=${page}&limit=100&pageSize=100`;
-                    try {
-                      const res = await fetch(url, {
-                        credentials: 'include',
-                        headers: { 'Accept': 'application/json', ...authHeaders },
-                      });
-                      if (!res.ok) {
-                        debug.push({ url, status: res.status, keys: [], count: 0, sample: null });
-                        break;
-                      }
-                      const data = await res.json();
-                      const ids = extractIds(data);
-                      const keys = (data && typeof data === 'object') ? Object.keys(data).slice(0, 10) : [];
-                      const sample = Array.isArray(data) ? data.slice(0, 1) :
-                                     (data?.profiles?.[0] || data?.items?.[0] || data?.data?.[0] || null);
-                      debug.push({ url, status: res.status, keys, count: ids.length, sample });
-                      let newIds = 0;
-                      for (const pid of ids) {
-                        if (seen.has(pid)) continue;
-                        seen.add(pid);
-                        newIds++;
-                        results.push({ profileId: pid, liked, source });
-                      }
-                      // Stop if this page added nothing new — we've exhausted
-                      // the list (or the endpoint doesn't support pagination)
-                      if (newIds === 0) break;
-                    } catch (e: any) {
-                      debug.push({ url, status: -1, keys: [], count: 0, sample: String(e?.message || e) });
-                      break;
-                    }
-                  }
-                };
-
-                // Real endpoints observed in Grindr web client traffic logs:
-                //   /api/v3.1/me/blocks  → blocks (confirmed 480 profiles)
-                //   /api/v5/favorites    → favorites (confirmed 222 profiles)
-                // Keep fallback variants for older accounts / regional differences.
-                const blockEndpoints = [
-                  'https://web.grindr.com/api/v3.1/me/blocks',
-                  'https://web.grindr.com/api/v4/me/blocks',
-                  'https://web.grindr.com/api/v3/me/blocks',
-                  'https://web.grindr.com/api/me/blocks',
-                  'https://web.grindr.com/api/v4/blocks',
-                  'https://web.grindr.com/api/v3/blocks',
-                  'https://web.grindr.com/api/blocks',
-                ];
-                const hideEndpoints = [
-                  'https://web.grindr.com/api/v3.1/me/hides',
-                  'https://web.grindr.com/api/v4/me/hides',
-                  'https://web.grindr.com/api/me/hides',
-                  'https://web.grindr.com/api/v4/hides',
-                  'https://web.grindr.com/api/v1/hides',
-                ];
-                const favoriteEndpoints = [
-                  'https://web.grindr.com/api/v5/favorites',
-                  'https://web.grindr.com/api/v4/favorites',
-                  'https://web.grindr.com/api/favorites',
-                  'https://web.grindr.com/api/v3/me/favorites',
-                ];
-                for (const e of blockEndpoints) await paginateEndpoint(e, false, 'block');
-                for (const e of hideEndpoints) await paginateEndpoint(e, false, 'hide');
-                for (const e of favoriteEndpoints) await paginateEndpoint(e, true, 'favorite');
-
-                // Surface full debug in console so the user can see exactly
-                // which endpoints worked and how many they returned.
-                console.log('[Aggregaytor:Grindr] Block/hide import debug:', debug);
-                console.log('[Aggregaytor:Grindr] Total unique ids captured:', results.length);
-                return { results, debug };
-              },
-            });
-
-            const payload = (result?.result as any) || { results: [], debug: [] };
+            const payload = await chrome.tabs.sendMessage(grindrTab.id, {
+              type: 'GRINDR_IMPORT_TRAINING_DATA',
+            }).catch((error: any) => ({ ok: false, error: String(error?.message || error), results: [], debug: [] }));
             const signals = payload.results || [];
             const seen = new Set<string>();
             let skippedEmpty = 0;
@@ -2752,99 +2590,19 @@ async function handleMessage(msg: any): Promise<any> {
         const BATCH_SIZE = 10;
         for (let i = 0; i < ids.length; i += BATCH_SIZE) {
           const chunk = ids.slice(i, i + BATCH_SIZE);
-          const [result] = await chrome.scripting.executeScript({
-            target: { tabId: grindrTab.id },
-            world: 'MAIN',
-            args: [chunk],
-            func: async (batch: string[]) => {
-              // PRIMARY auth source: the grindr.ts adapter already captures
-              // live Authorization headers from Grindr's own network traffic
-              // and exposes them via window.__aggregaytor_get_grindr_auth().
-              // This avoids re-discovering the token from scratch and always
-              // gives us the exact same header Grindr is using right now.
-              const captured = (window as any).__aggregaytor_get_grindr_auth?.() || null;
+          const payload = await chrome.tabs.sendMessage(grindrTab.id, {
+            type: 'GRINDR_FETCH_PROFILES',
+            batch: chunk,
+            delayMs: ENRICH_CALL_DELAY_MS,
+            jitterMs: ENRICH_CALL_JITTER_MS,
+          }).catch((error: any) => ({
+            ok: false,
+            noAuth: false,
+            error: String(error?.message || error),
+            results: chunk.map(id => ({ id, ok: false, status: 0, error: 'bridge-failed' })),
+          }));
 
-              // Fallback: scan localStorage (older code path — Grindr usually
-              // doesn't store the token there, but worth trying).
-              const findTokenFromStorage = (): string => {
-                try {
-                  const keys = ['authToken', 'auth-token', 'grindrAuthToken', 'session', 'grindrSession', 'accessToken', 'token'];
-                  for (const k of keys) {
-                    const v = localStorage.getItem(k);
-                    if (v && v.length > 20 && !v.startsWith('{')) return v;
-                  }
-                  for (let i = 0; i < localStorage.length; i++) {
-                    const k = localStorage.key(i) || '';
-                    const v = localStorage.getItem(k) || '';
-                    if (/^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$/.test(v)) return v;
-                    if (v.startsWith('{')) {
-                      try {
-                        const obj = JSON.parse(v);
-                        const t = obj.authToken || obj.accessToken || obj.token || obj.session?.authToken;
-                        if (t && String(t).length > 20) return String(t);
-                      } catch {}
-                    }
-                  }
-                } catch {}
-                return '';
-              };
-
-              const headers: Record<string, string> = { 'Accept': 'application/json' };
-              let authSource = 'none';
-              if (captured && Object.keys(captured).length) {
-                Object.assign(headers, captured);
-                authSource = 'adapter';
-              } else {
-                const token = findTokenFromStorage();
-                if (token) {
-                  headers['Authorization'] = token.startsWith('Grindr3 ') || token.startsWith('Bearer ')
-                    ? token : `Grindr3 ${token}`;
-                  authSource = 'localStorage';
-                }
-              }
-              console.log('[Aggregaytor:Enrich] Auth source:', authSource,
-                'headers:', Object.keys(headers).join(','),
-                'auth value prefix:', (headers.Authorization || headers.authorization || '').slice(0, 20));
-
-              const out: Array<{ id: string; ok: boolean; status: number; data?: any; error?: string }> = [];
-              if (authSource === 'none') {
-                // No auth — fail fast so the caller knows to browse Grindr
-                // a bit first to prime the adapter's auth cache.
-                console.warn('[Aggregaytor:Enrich] No auth headers available. Browse Grindr for a few seconds to let the adapter capture the JWT, then retry.');
-                return out.concat(batch.map(id => ({ id, ok: false, status: -1, error: 'no-auth' })));
-              }
-
-              for (const id of batch) {
-                try {
-                  const res = await fetch(`https://web.grindr.com/api/v4/profiles/${id}`, {
-                    credentials: 'include', headers,
-                  });
-                  if (res.status === 401 || res.status === 403) {
-                    let body = '';
-                    try { body = (await res.text()).slice(0, 200); } catch {}
-                    console.warn(`[Aggregaytor:Enrich] ${id} → ${res.status} (auth rejected). Body:`, body);
-                    out.push({ id, ok: false, status: res.status, error: body });
-                    break; // abort the rest of the batch
-                  }
-                  if (!res.ok) {
-                    let body = '';
-                    try { body = (await res.text()).slice(0, 120); } catch {}
-                    out.push({ id, ok: false, status: res.status, error: body });
-                  } else {
-                    const data = await res.json();
-                    out.push({ id, ok: true, status: 200, data });
-                  }
-                } catch (e: any) {
-                  out.push({ id, ok: false, status: 0, error: String(e?.message || e) });
-                }
-                const jittered = ENRICH_CALL_DELAY_MS + (Math.random() * 2 - 1) * ENRICH_CALL_JITTER_MS;
-                await new Promise(r => setTimeout(r, jittered));
-              }
-              return out;
-            },
-          });
-
-          const batchOut = (result?.result as any[]) || [];
+          const batchOut = payload.results || [];
           // If the first batch couldn't even find auth headers, surface a
           // distinct error so the user knows to browse Grindr (not re-login).
           if (batchOut.length && batchOut.every(r => r.error === 'no-auth')) {
@@ -4411,38 +4169,9 @@ async function setEnrichState(state: EnrichState): Promise<void> {
   try { chrome.runtime.sendMessage({ type: 'ENRICH_BLOCKED_PROGRESS', state }).catch(() => {}); } catch {}
 }
 
-// Platform-specific batch fetchers. These run in the platform tab's MAIN
-// world via chrome.scripting.executeScript, so they can't reference anything
-// from this service-worker module scope.
-
-/** Grindr: GET /api/v4/profiles/{id} with captured bearer token + cookies. */
-async function grindrBatchFetcher(batch: string[], delayMs: number, jitterMs: number): Promise<any> {
-  const captured = (window as any).__aggregaytor_get_grindr_auth?.() || null;
-  if (!captured || !Object.keys(captured).length) {
-    return { noAuth: true, results: [] };
-  }
-  const headers: Record<string, string> = { 'Accept': 'application/json', ...captured };
-  const out: Array<any> = [];
-  for (const id of batch) {
-    try {
-      const res = await fetch(`https://web.grindr.com/api/v4/profiles/${id}`, {
-        credentials: 'include', headers,
-      });
-      if (res.status === 401 || res.status === 403) {
-        let body = ''; try { body = (await res.text()).slice(0, 200); } catch {}
-        out.push({ id, ok: false, status: res.status, error: body });
-        break;
-      }
-      if (!res.ok) { out.push({ id, ok: false, status: res.status }); }
-      else { const data = await res.json(); out.push({ id, ok: true, status: 200, data }); }
-    } catch (e: any) {
-      out.push({ id, ok: false, status: 0, error: String(e?.message || e) });
-    }
-    const jittered = delayMs + (Math.random() * 2 - 1) * jitterMs;
-    await new Promise(r => setTimeout(r, jittered));
-  }
-  return { noAuth: false, results: out };
-}
+// Platform-specific MAIN-world batch fetchers. Sniffies still runs via
+// chrome.scripting.executeScript because it only needs page cookies. Grindr
+// uses the content-script bridge so auth headers stay inside MAIN-world state.
 
 /** Sniffies: POST /api/user/full with session cookies (no bearer token). */
 async function sniffiesBatchFetcher(batch: string[], delayMs: number, jitterMs: number): Promise<any> {
@@ -4644,18 +4373,24 @@ async function runEnrichTick(): Promise<void> {
     const chunk = needs.slice(0, ENRICH_BATCH_SIZE).map((c: any) =>
       (c._id || '').replace(platformCfg.contactPrefix, '')).filter(Boolean);
 
-    // Run the batch in the platform tab's MAIN world. Each platform has a
-    // different fetch signature — Grindr uses a bearer token captured by
-    // the adapter, Sniffies uses session cookies only (no Authorization).
-    const platformFn = platform === 'sniffies' ? sniffiesBatchFetcher : grindrBatchFetcher;
-    const [result] = await chrome.scripting.executeScript({
-      target: { tabId: platTab.id },
-      world: 'MAIN',
-      args: [chunk, ENRICH_CALL_DELAY_MS, ENRICH_CALL_JITTER_MS],
-      func: platformFn,
-    });
-
-    const payload = (result?.result as any) || { noAuth: false, results: [] };
+    const payload = platform === 'sniffies'
+      ? ((await chrome.scripting.executeScript({
+          target: { tabId: platTab.id },
+          world: 'MAIN',
+          args: [chunk, ENRICH_CALL_DELAY_MS, ENRICH_CALL_JITTER_MS],
+          func: sniffiesBatchFetcher,
+        }))[0]?.result as any) || { noAuth: false, results: [] }
+      : await chrome.tabs.sendMessage(platTab.id, {
+          type: 'GRINDR_FETCH_PROFILES',
+          batch: chunk,
+          delayMs: ENRICH_CALL_DELAY_MS,
+          jitterMs: ENRICH_CALL_JITTER_MS,
+        }).catch((error: any) => ({
+          ok: false,
+          noAuth: false,
+          error: String(error?.message || error),
+          results: chunk.map(id => ({ id, ok: false, status: 0, error: 'bridge-failed' })),
+        }));
     if (payload.noAuth) {
       await setEnrichState({ ...state, status: 'paused', pauseReason: 'no-auth', lastTickAt: Date.now(),
         total: correctedTotal, lastError: `Waiting for ${platform} to issue an authenticated API call…` });

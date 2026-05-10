@@ -6,6 +6,7 @@ import type { Platform } from '@aggregaytor/adapter-core';
 import type { ThreadMetaDoc } from './types.js';
 import { DEFAULT_AUTO_RESPOND_SETTINGS } from './types.js';
 import { getDB } from './db.js';
+import type { StoreDatabase } from './db.js';
 
 function metaId(contactId: string): string {
   return `meta:${contactId}`;
@@ -33,7 +34,7 @@ const DEFAULTS: Omit<ThreadMetaDoc, '_id' | '_rev' | 'contactId' | 'platform' | 
 
 export async function getThreadMeta(
   contactId: string,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<ThreadMetaDoc | null> {
   const store = db || await getDB();
   try {
@@ -61,7 +62,7 @@ export async function upsertThreadMeta(
   contactId: string,
   platform: Platform,
   updates: Partial<ThreadMetaDoc>,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<ThreadMetaDoc> {
   const store = db || await getDB();
   const now = new Date().toISOString();
@@ -117,7 +118,7 @@ export async function upsertThreadMeta(
 
 /** Fetch all thread metadata using allDocs key-range (meta: prefix). */
 export async function getAllThreadMeta(
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<ThreadMetaDoc[]> {
   const store = db || await getDB();
   const result = await store.allDocs({
@@ -132,7 +133,7 @@ export async function getAllThreadMeta(
 
 /** Fetch bookmarked threads. Uses allDocs range + client-side filter. */
 export async function getBookmarkedThreads(
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<ThreadMetaDoc[]> {
   const all = await getAllThreadMeta(db);
   return all.filter(m => m.bookmarked);
@@ -140,7 +141,7 @@ export async function getBookmarkedThreads(
 
 /** Fetch archived threads. Uses allDocs range + client-side filter. */
 export async function getArchivedThreads(
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<ThreadMetaDoc[]> {
   const all = await getAllThreadMeta(db);
   return all.filter(m => m.archived);

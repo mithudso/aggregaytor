@@ -12,19 +12,19 @@
     <h1 id="header-title"><span class="version-tag">v0.57</span></h1>
     <div id="header-actions" class="header-actions"></div>
     <span id="total-unread" class="unread-badge" style="display:none"></span>
-    <button class="header-settings" id="btn-show-floating" data-icon="⚡" data-label="Quick" title="Show Quick Actions panel on the platform page — block, notes, rate, and send phrases directly on Sniffies/Grindr">⚡</button>
-    <button class="header-settings" id="btn-popout" data-icon="⧉" data-label="Popout" title="Pop out this panel into its own window. Click again in the popup to close it and return to the side panel.">⧉</button>
-    <button class="header-settings" id="open-tasks" data-icon="☑" data-label="Tasks" title="Open task list — create and manage to-do items linked to contacts. Syncs with Google Tasks. (Shift+T)">☑</button>
-    <button class="header-settings" id="btn-camera" data-icon="📷" data-label="Photo" title="Take a photo to add to your picture library">📷</button>
-    <button class="header-settings" id="btn-gallery" data-icon="🖼" data-label="Gallery" title="Open photo gallery — view all synced profile pictures and your own uploads">🖼</button>
-    <button class="header-settings" id="sync-pics-header" data-icon="🔄" data-label="Sync" title="Sync profile pictures — scrape avatars from all open platform tabs and save to local cache">🔄</button>
-    <button class="header-settings" id="open-ai-query" data-icon="🔎" data-label="Ask AI" title="Ask AI — natural language search over your contacts using profile context, preferences, and conversation history">🔎</button>
-    <button class="header-settings" id="open-settings" data-icon="⚙" data-label="Settings" title="Open settings — AI providers, personality, map filters, export/import, text expansions, and more">⚙</button>
+    <button class="header-settings" id="btn-show-floating" data-icon="⚡" data-label="Quick" aria-label="Show Quick Actions panel" title="Show Quick Actions panel on the platform page — block, notes, rate, and send phrases directly on Sniffies/Grindr">⚡</button>
+    <button class="header-settings" id="btn-popout" data-icon="⧉" data-label="Popout" aria-label="Pop out panel" title="Pop out this panel into its own window. Click again in the popup to close it and return to the side panel.">⧉</button>
+    <button class="header-settings" id="open-tasks" data-icon="☑" data-label="Tasks" aria-label="Open tasks" title="Open task list — create and manage to-do items linked to contacts. Syncs with Google Tasks. (Shift+T)">☑</button>
+    <button class="header-settings" id="btn-camera" data-icon="📷" data-label="Photo" aria-label="Add photo" title="Take a photo to add to your picture library">📷</button>
+    <button class="header-settings" id="btn-gallery" data-icon="🖼" data-label="Gallery" aria-label="Open photo gallery" title="Open photo gallery — view all synced profile pictures and your own uploads">🖼</button>
+    <button class="header-settings" id="sync-pics-header" data-icon="🔄" data-label="Sync" aria-label="Sync profile pictures" title="Sync profile pictures — scrape avatars from all open platform tabs and save to local cache">🔄</button>
+    <button class="header-settings" id="open-ai-query" data-icon="🔎" data-label="Ask AI" aria-label="Open AI query" title="Ask AI — natural language search over your contacts using profile context, preferences, and conversation history">🔎</button>
+    <button class="header-settings" id="open-settings" data-icon="⚙" data-label="Settings" aria-label="Open settings" title="Open settings — AI providers, personality, map filters, export/import, text expansions, and more">⚙</button>
   </div>
   <!-- Global search -->
   <div class="search-bar" id="search-bar" style="display:none">
-    <input type="text" id="search-input" class="search-input" placeholder="Search all messages...">
-    <button class="search-close" id="search-close">✕</button>
+    <input type="text" id="search-input" class="search-input" placeholder="Search all messages..." aria-label="Search all messages">
+    <button class="search-close" id="search-close" aria-label="Close search">✕</button>
   </div>
   <div id="search-results" class="search-results" style="display:none"></div>
 
@@ -47,15 +47,15 @@
   <!-- Global controls bar -->
   <div class="global-controls">
     <div class="platform-filters">
-      <span class="platform-chip active" data-platform="all" title="Show all platforms. Right-click to open all sites.">All</span>
-      <span class="platform-chip" data-platform="sniffies" title="Toggle Sniffies messages. Click multiple chips to combine. Right-click to open Sniffies.">Sniffies</span>
-      <span class="platform-chip" data-platform="grindr" title="Toggle Grindr messages. Right-click to open Grindr.">Grindr</span>
-      <span class="platform-chip" data-platform="doublelist" title="Toggle DoubleList messages. Right-click to open DoubleList.">DList</span>
-      <span class="platform-chip" data-platform="adam4adam" title="Toggle Adam4Adam messages. Right-click to open A4A.">A4A</span>
-      <span class="platform-chip" data-platform="gmail" title="Toggle Gmail messages. Right-click to open Gmail.">Gmail</span>
-      <span class="platform-chip" data-platform="yahoo" title="Toggle Yahoo Mail messages. Right-click to open Yahoo Mail.">Yahoo</span>
-      <span class="platform-chip archive-chip" data-platform="archived" title="Show archived/hidden conversations">📦</span>
-      <span class="platform-chip reminders-chip" id="open-reminders" title="Open reminders — see all upcoming follow-ups across every contact. Each reminder keeps a snapshot of the profile (name, photo, prefs) at the time it was set.">⏰</span>
+      <button type="button" class="platform-chip active" data-platform="all" aria-pressed="true" title="Show all platforms. Right-click to open all sites.">All</button>
+      <button type="button" class="platform-chip" data-platform="sniffies" aria-pressed="false" title="Toggle Sniffies messages. Click multiple chips to combine. Right-click to open Sniffies.">Sniffies</button>
+      <button type="button" class="platform-chip" data-platform="grindr" aria-pressed="false" title="Toggle Grindr messages. Right-click to open Grindr.">Grindr</button>
+      <button type="button" class="platform-chip" data-platform="doublelist" aria-pressed="false" title="Toggle DoubleList messages. Right-click to open DoubleList.">DList</button>
+      <button type="button" class="platform-chip" data-platform="adam4adam" aria-pressed="false" title="Toggle Adam4Adam messages. Right-click to open A4A.">A4A</button>
+      <button type="button" class="platform-chip" data-platform="gmail" aria-pressed="false" title="Toggle Gmail messages. Right-click to open Gmail.">Gmail</button>
+      <button type="button" class="platform-chip" data-platform="yahoo" aria-pressed="false" title="Toggle Yahoo Mail messages. Right-click to open Yahoo Mail.">Yahoo</button>
+      <button type="button" class="platform-chip archive-chip" data-platform="archived" aria-label="Show archived conversations" aria-pressed="false" title="Show archived/hidden conversations">📦</button>
+      <button type="button" class="platform-chip reminders-chip" id="open-reminders" aria-label="Open reminders" title="Open reminders — see all upcoming follow-ups across every contact. Each reminder keeps a snapshot of the profile (name, photo, prefs) at the time it was set.">⏰</button>
     </div>
     <div class="controls-row">
       <div class="sort-control">
@@ -69,7 +69,7 @@
           <option value="name">Name</option>
         </select>
       </div>
-      <div class="filter-toggle-inline" id="filter-toggle" title="Toggle advanced filters — body type, position, distance, unread, bookmarked, and more">⫸ <span id="filter-count"></span></div>
+      <button type="button" class="filter-toggle-inline" id="filter-toggle" aria-controls="filter-panel" aria-expanded="false" title="Toggle advanced filters — body type, position, distance, unread, bookmarked, and more">⫸ <span id="filter-count"></span></button>
       <label class="fav-filter" title="Show only favorited/bookmarked contacts">
         <input type="checkbox" id="filter-favorites"> ⭐
       </label>

@@ -11,6 +11,7 @@ export type {
 } from './types.js';
 export { DEFAULT_AUTO_RESPOND_SETTINGS } from './types.js';
 export { getDB, closeDB, destroyDB, createDB } from './db.js';
+export type { StoreDatabase, StoreDoc, StoreFindRequest, StoreFindResult } from './db.js';
 export { LruIdbCache } from './lru-idb-cache.js';
 export type { LruIdbCacheOptions } from './lru-idb-cache.js';
 export { upsertMessage, upsertMessages, getMessagesByThread, getMessagesByContact, getRecentMessages, markThreadRead, getUnreadCount, invalidateUnreadCountCache, purgeOldestMessages } from './messages.js';

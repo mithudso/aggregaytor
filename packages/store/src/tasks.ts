@@ -8,6 +8,7 @@
 import type { Platform } from '@aggregaytor/adapter-core';
 import type { TaskDoc } from './types.js';
 import { getDB } from './db.js';
+import type { StoreDatabase } from './db.js';
 
 /**
  * Create a new task and persist it to PouchDB.
@@ -24,7 +25,7 @@ export async function createTask(
     dueAt?: string;
     priority?: 'low' | 'medium' | 'high';
   },
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<TaskDoc> {
   const store = db || await getDB();
   const now = new Date().toISOString();
@@ -59,7 +60,7 @@ export async function createTask(
  */
 export async function getAllTasks(
   opts?: { completed?: boolean; contactId?: string },
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<TaskDoc[]> {
   const store = db || await getDB();
   const result = await store.allDocs({
@@ -104,7 +105,7 @@ export async function getAllTasks(
 export async function updateTask(
   id: string,
   updates: Partial<TaskDoc>,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<TaskDoc> {
   const store = db || await getDB();
   const existing = await store.get(id) as TaskDoc;
@@ -127,7 +128,7 @@ export async function updateTask(
  */
 export async function deleteTask(
   id: string,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<void> {
   const store = db || await getDB();
   const doc = await store.get(id);
@@ -140,7 +141,7 @@ export async function deleteTask(
  */
 export async function getTasksByContact(
   contactId: string,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<TaskDoc[]> {
   return getAllTasks({ contactId }, db);
 }

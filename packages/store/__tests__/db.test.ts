@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { destroyDB, getDB } from '../src/db.js';
 import { exportAllData, importAllData } from '../src/export-import.js';
+import { getThreadSummaries } from '../src/threads.js';
 
 describe('Dexie store compatibility', () => {
   beforeEach(async () => {
@@ -78,5 +79,49 @@ describe('Dexie store compatibility', () => {
     const reopened = await getDB();
     const doc = await reopened.get('meta:contact-1');
     expect(doc.archived).toBe(true);
+  });
+
+  it('builds thread summaries from timestamps instead of lexicographic message ids', async () => {
+    const db = await getDB();
+    const docs: Array<Record<string, unknown>> = [
+      {
+        _id: 'contact:sniffies:latest-contact',
+        docType: 'contact',
+        platform: 'sniffies',
+        platformUserId: 'latest-contact',
+        displayName: 'Latest Contact',
+      },
+      {
+        _id: 'msg:a-latest',
+        docType: 'message',
+        contactId: 'sniffies:latest-contact',
+        threadId: 'sniffies:latest-contact',
+        platform: 'sniffies',
+        timestamp: '2026-12-31T23:59:59.000Z',
+        direction: 'in',
+        read: false,
+      },
+    ];
+
+    for (let i = 0; i < 2000; i++) {
+      docs.push({
+        _id: `msg:z-${String(i).padStart(4, '0')}`,
+        docType: 'message',
+        contactId: `sniffies:older-${i}`,
+        threadId: `sniffies:older-${i}`,
+        platform: 'sniffies',
+        timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+        direction: 'in',
+        read: true,
+      });
+    }
+
+    await db.bulkDocs(docs);
+
+    const summaries = await getThreadSummaries({ limit: 1 }, db);
+
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.contactId).toBe('sniffies:latest-contact');
+    expect(summaries[0]?.lastMessage._id).toBe('msg:a-latest');
   });
 });

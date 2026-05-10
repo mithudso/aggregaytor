@@ -4,10 +4,11 @@
 
 import type { PictureDoc } from './types.js';
 import { getDB } from './db.js';
+import type { StoreDatabase } from './db.js';
 
 export async function addPicture(
   input: { tag: string; label: string; dataUrl?: string; filePath?: string; thumbnail?: string },
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<PictureDoc> {
   const store = db || await getDB();
   const now = new Date().toISOString();
@@ -33,7 +34,7 @@ export async function addPicture(
 
 export async function getAllPictures(
   tag?: string,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<PictureDoc[]> {
   const store = db || await getDB();
   const selector: Record<string, unknown> = { docType: 'picture' };
@@ -44,7 +45,7 @@ export async function getAllPictures(
 
 export async function getPicture(
   id: string,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<PictureDoc | null> {
   const store = db || await getDB();
   try {
@@ -58,7 +59,7 @@ export async function getPicture(
 export async function incrementPictureStat(
   id: string,
   stat: 'sentCount' | 'responseCount' | 'likeCount',
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<void> {
   const store = db || await getDB();
   const doc = await store.get(id) as PictureDoc;
@@ -69,7 +70,7 @@ export async function incrementPictureStat(
 
 export async function deletePicture(
   id: string,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<void> {
   const store = db || await getDB();
   const doc = await store.get(id);
@@ -78,7 +79,7 @@ export async function deletePicture(
 
 export async function getPictureByTag(
   tag: string,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<PictureDoc | null> {
   const pics = await getAllPictures(tag, db);
   if (!pics.length) return null;

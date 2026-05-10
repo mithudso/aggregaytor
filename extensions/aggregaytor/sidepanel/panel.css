@@ -225,7 +225,7 @@ body {
 .platform-chip {
   padding: 3px 10px; border-radius: 16px; font-size: 11px;
   border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05);
-  color: #9ca3af; cursor: pointer; white-space: nowrap;
+  color: #9ca3af; cursor: pointer; white-space: nowrap; appearance: none; font-family: inherit;
 }
 .platform-chip.active { background: rgba(59,130,246,0.2); border-color: rgba(59,130,246,0.5); color: #93c5fd; }
 .platform-chip.archive-chip { border-color: rgba(107,114,128,0.3); color: #6b7280; }
@@ -982,7 +982,7 @@ body {
 /* ── Inline filter toggle ──────────────────────────────────────────────── */
 .filter-toggle-inline {
   font-size: 11px; color: #6b7280; cursor: pointer; padding: 2px 6px;
-  border-radius: 4px; transition: background 0.15s;
+  border-radius: 4px; transition: background 0.15s; background: none; border: none; font-family: inherit;
 }
 .filter-toggle-inline:hover { background: rgba(255,255,255,0.06); color: #9ca3af; }
 
