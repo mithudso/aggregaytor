@@ -21,6 +21,7 @@ import type { Platform } from '@aggregaytor/adapter-core';
 import type { ContactDossierDoc } from './types.js';
 import { DEFAULT_DOSSIER } from './types.js';
 import { getDB } from './db.js';
+import type { StoreDatabase } from './db.js';
 
 /** Category → field-name list. Categories match the TypeScript doc's
  *  section headers so the data model is self-documenting. */
@@ -42,7 +43,7 @@ function dossierId(contactId: string): string {
 
 export async function getDossier(
   contactId: string,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<ContactDossierDoc | null> {
   const store = db || await getDB();
   try {
@@ -57,7 +58,7 @@ export async function upsertDossier(
   contactId: string,
   platform: Platform,
   updates: Partial<ContactDossierDoc>,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<ContactDossierDoc> {
   const store = db || await getDB();
   const now = new Date().toISOString();
@@ -118,7 +119,7 @@ export async function upsertDossier(
 export async function getDossierSlice(
   contactId: string,
   categories: DossierCategory[],
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<Partial<ContactDossierDoc>> {
   const full = await getDossier(contactId, db);
   if (!full) return {};
@@ -169,7 +170,7 @@ export async function setAutoExtractedField(
   field: string,
   value: string,
   source: string,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<void> {
   const dossier = await getDossier(contactId, db) || { ...DEFAULT_DOSSIER, contactId, platform } as any;
   const autoExtracted = dossier.autoExtracted || {};

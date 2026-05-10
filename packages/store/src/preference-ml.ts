@@ -11,6 +11,7 @@
 import type { PreferenceFeedbackDoc, PreferenceModelDoc, ProfileFeatures } from './types.js';
 import type { Platform } from '@aggregaytor/adapter-core';
 import { getDB } from './db.js';
+import type { StoreDatabase } from './db.js';
 
 const MODEL_ID = 'prefmodel:latest';
 
@@ -94,7 +95,7 @@ export async function recordFeedback(
   platform: Platform,
   liked: boolean,
   features: ProfileFeatures,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<void> {
   const store = db || await getDB();
   const now = Date.now();
@@ -116,7 +117,7 @@ export async function recordFeedback(
 async function updateModel(
   rawFeatures: ProfileFeatures,
   liked: boolean,
-  store: PouchDB.Database,
+  store: StoreDatabase,
 ): Promise<void> {
   let model: PreferenceModelDoc;
   try {
@@ -149,7 +150,7 @@ async function updateModel(
 
 export async function predictPreference(
   rawFeatures: ProfileFeatures,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<{ score: number; confidence: number }> {
   const store = db || await getDB();
   try {
@@ -163,7 +164,7 @@ export async function predictPreference(
   }
 }
 
-export async function getModelStats(db?: PouchDB.Database): Promise<{
+export async function getModelStats(db?: StoreDatabase): Promise<{
   trainingCount: number;
   accuracy: number;
   topFeatures: Array<{ feature: string; weight: number }>;
@@ -182,7 +183,7 @@ export async function getModelStats(db?: PouchDB.Database): Promise<{
   }
 }
 
-export async function getAllFeedback(db?: PouchDB.Database): Promise<PreferenceFeedbackDoc[]> {
+export async function getAllFeedback(db?: StoreDatabase): Promise<PreferenceFeedbackDoc[]> {
   const store = db || await getDB();
   const result = await store.find({ selector: { docType: 'preference_feedback' } });
   return result.docs as PreferenceFeedbackDoc[];
@@ -192,7 +193,7 @@ export async function getAllFeedback(db?: PouchDB.Database): Promise<PreferenceF
  * Retrain the model from scratch using all feedback data.
  * Call periodically for more accurate weights.
  */
-export async function retrainModel(db?: PouchDB.Database): Promise<void> {
+export async function retrainModel(db?: StoreDatabase): Promise<void> {
   const store = db || await getDB();
   const feedback = await getAllFeedback(store);
   if (!feedback.length) return;

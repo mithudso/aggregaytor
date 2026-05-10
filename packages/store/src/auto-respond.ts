@@ -5,6 +5,7 @@
 import type { Platform } from '@aggregaytor/adapter-core';
 import type { AutoRespondDoc, AutoRespondTier, AutoRespondStatus } from './types.js';
 import { getDB } from './db.js';
+import type { StoreDatabase } from './db.js';
 
 const MIN_DELAY_MS = 20_000;
 const MAX_DELAY_MS = 120_000;
@@ -19,7 +20,7 @@ export async function queueAutoRespond(
   platform: Platform,
   triggerMessageId: string,
   delayMs?: number,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<AutoRespondDoc | null> {
   const store = db || await getDB();
   const now = Date.now();
@@ -49,20 +50,23 @@ export async function queueAutoRespond(
   return doc;
 }
 
-export async function getPendingAutoResponds(db?: PouchDB.Database): Promise<AutoRespondDoc[]> {
+export async function getPendingAutoResponds(db?: StoreDatabase): Promise<AutoRespondDoc[]> {
   const store = db || await getDB();
   const now = new Date().toISOString();
-  const result = await store.find({ selector: { docType: 'auto_respond', status: 'pending' } });
-  return (result.docs as AutoRespondDoc[]).filter(d => d.scheduledAt <= now);
+  const result = await store.find({
+    selector: { docType: 'auto_respond', status: 'pending', scheduledAt: { $lte: now } },
+    sort: [{ docType: 'asc' }, { scheduledAt: 'asc' }],
+  });
+  return result.docs as AutoRespondDoc[];
 }
 
-export async function getDraftAutoResponds(db?: PouchDB.Database): Promise<AutoRespondDoc[]> {
+export async function getDraftAutoResponds(db?: StoreDatabase): Promise<AutoRespondDoc[]> {
   const store = db || await getDB();
   const result = await store.find({ selector: { docType: 'auto_respond', status: 'draft' } });
   return result.docs as AutoRespondDoc[];
 }
 
-export async function getApprovedAutoResponds(db?: PouchDB.Database): Promise<AutoRespondDoc[]> {
+export async function getApprovedAutoResponds(db?: StoreDatabase): Promise<AutoRespondDoc[]> {
   const store = db || await getDB();
   const result = await store.find({ selector: { docType: 'auto_respond', status: 'approved' } });
   return result.docs as AutoRespondDoc[];
@@ -72,7 +76,7 @@ export async function updateAutoRespondStatus(
   id: string,
   status: AutoRespondStatus,
   fields?: { generatedResponse?: string; tier?: AutoRespondTier; suggestedPictureTag?: string; error?: string },
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<void> {
   const store = db || await getDB();
   const doc = await store.get(id) as AutoRespondDoc;

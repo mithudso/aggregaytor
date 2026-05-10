@@ -16,6 +16,7 @@
 import type { BlockRuleDoc, BlockRuleCondition, ThreadMetaDoc, MessageDoc } from './types.js';
 import type { Platform } from '@aggregaytor/adapter-core';
 import { getDB } from './db.js';
+import type { StoreDatabase } from './db.js';
 import { upsertThreadMeta } from './thread-meta.js';
 
 let _rulesCache: BlockRuleDoc[] | null = null;
@@ -27,7 +28,7 @@ export function invalidateBlockRulesCache(): void {
 
 export async function createBlockRule(
   input: { name: string; condition: BlockRuleCondition; action: 'block' | 'archive' | 'hide' },
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<BlockRuleDoc> {
   const store = db || await getDB();
   const id = `blockrule:${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -47,7 +48,7 @@ export async function createBlockRule(
 }
 
 export async function getAllBlockRules(
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<BlockRuleDoc[]> {
   // Tests inject their own DB and must not share the module-level cache
   if (db) {
@@ -64,7 +65,7 @@ export async function getAllBlockRules(
 export async function updateBlockRule(
   id: string,
   updates: Partial<BlockRuleDoc>,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<void> {
   const store = db || await getDB();
   const doc = await store.get(id) as BlockRuleDoc;
@@ -75,7 +76,7 @@ export async function updateBlockRule(
 
 export async function deleteBlockRule(
   id: string,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<void> {
   const store = db || await getDB();
   const doc = await store.get(id);
@@ -149,7 +150,7 @@ export async function executeAction(
   platform: Platform,
   action: 'block' | 'archive' | 'hide',
   ruleId: string,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<void> {
   const store = db || await getDB();
 

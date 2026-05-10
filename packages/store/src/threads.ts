@@ -6,28 +6,26 @@
  * corresponding ContactDoc. This keeps the database simple (messages are the
  * source of truth) while giving the UI the denormalized ThreadSummary it needs.
  *
- * ## Performance (v0.40.0)
- * Uses allDocs() with key-range queries instead of Mango find(). This bypasses
- * PouchDB's JS-level query planner and uses IndexedDB's native B-tree index
- * directly, reducing getThreadSummaries from ~235ms to ~30-50ms.
- *
- * Also fixes a long-standing bug where contact lookups always returned null
- * because the `contact:` _id prefix was not prepended.
+ * ## Performance
+ * Uses indexed store queries to pull the newest messages by real timestamp,
+ * then batches contact lookups in a single allDocs() call. This keeps inbox
+ * ordering correct across adapters whose message IDs are not chronological.
  */
 
 import type { Platform } from '@aggregaytor/adapter-core';
 import type { MessageDoc, ContactDoc, ThreadSummary } from './types.js';
 import { getDB } from './db.js';
+import type { StoreDatabase } from './db.js';
 
 /**
  * Build the thread list for the main UI inbox.
  *
- * Uses allDocs key-range queries for both messages and contacts:
- *   1. Fetch messages via allDocs({startkey:'msg:', endkey:'msg:\uffff'})
- *      — native IndexedDB key scan, ~5-10x faster than Mango find()
+ * Uses indexed message queries plus batched contact lookups:
+ *   1. Fetch recent messages via find({ selector, sort:[timestamp desc] })
+ *      so recency follows `timestamp`, not `_id`
  *   2. Group messages by contactId, counting unreads
  *   3. Batch-fetch all contacts in ONE allDocs call using their known IDs
- *      — eliminates the previous N+1 getContact() loop
+ *      — eliminates per-contact lookups
  *   4. Inject pinned contacts (Global Chat) that may have no messages
  *   5. Sort by most recent message and apply limit
  *
@@ -36,37 +34,21 @@ import { getDB } from './db.js';
  */
 export async function getThreadSummaries(
   opts?: { platform?: Platform; limit?: number },
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<ThreadSummary[]> {
   const store = db || await getDB();
 
-  // Step 1: Fetch messages using allDocs key-range instead of Mango find().
-  // Message IDs are `msg:{platform}:{messageId}`, so we can use the platform
-  // as a key-range filter when specified.
-  //
-  // v0.57.15: bumped the scan limit from 1000 to 5000. The previous cap
-  // silently truncated heavy-user inboxes — once you crossed 1000 messages
-  // across all threads, older conversations dropped off the list because
-  // their last message wasn't in the scanned window. 5000 covers ~250
-  // active threads at 20 msgs/thread; the SW cache still memoizes the
-  // result for 5s so this only fires a few times per minute.
-  // v0.57.42: descending + smaller limit. We only need the latest message
-  // per contact, so iterate from the high end of the key range and stop at
-  // 2000 docs. With ~lex-sorted msg ids (msg:{platform}:{messageId} where
-  // messageId typically encodes a timestamp) the newest 2000 messages
-  // cover the most-recent ~250 active conversations comfortably. The
-  // previous 5000-doc scan was returning 5-10MB of message bodies and
-  // taking >8s on heavy DBs, hitting the new panel-side timeout. Cap
-  // halved AND descending order means we get useful data with way less
-  // work \u2014 a heavy user's "active in the last week" inbox finishes in
-  // ~1s instead of timing out.
-  const startkey = opts?.platform ? `msg:${opts.platform}:\uffff` : 'msg:\uffff';
-  const endkey = opts?.platform ? `msg:${opts.platform}:` : 'msg:';
-  const result = await store.allDocs({
-    startkey,
-    endkey,
-    include_docs: true,
-    descending: true,
+  // Step 1: Fetch the newest messages by actual timestamp instead of `_id`.
+  // Adapter message IDs are not reliably chronological across platforms, so
+  // `_id` order can silently hide active conversations in large inboxes.
+  const selector: Record<string, unknown> = {
+    docType: 'message',
+    timestamp: { $gt: '' },
+  };
+  if (opts?.platform) selector.platform = opts.platform;
+  const result = await store.find<MessageDoc>({
+    selector,
+    sort: [{ docType: 'asc' }, { timestamp: 'desc' }],
     limit: 2000,
   });
 
@@ -77,9 +59,7 @@ export async function getThreadSummaries(
   // never escapes this loop, so the 5-10MB transient stays scoped to the
   // function and is GC-eligible the moment we return.
   const contactMap = new Map<string, { lastMessage: MessageDoc; unread: number }>();
-  for (const row of result.rows) {
-    const m = row.doc as MessageDoc | undefined;
-    if (!m || (m as any).docType !== 'message') continue;
+  for (const m of result.docs) {
     const existing = contactMap.get(m.contactId);
     if (!existing) {
       contactMap.set(m.contactId, {
@@ -95,14 +75,10 @@ export async function getThreadSummaries(
       if (bTs > aTs) existing.lastMessage = m;
     }
   }
-  // Drop the rows reference so the 5000-doc allDocs buffer becomes GC-eligible
-  // before the contact lookup runs (which itself can allocate megabytes).
-  (result as any).rows = null;
 
   // Step 3: Batch-fetch all contacts in ONE allDocs call.
-  // Contact IDs in PouchDB are `contact:{platform}:{userId}`, but message
-  // contactId fields are `{platform}:{userId}` (no prefix). We prepend
-  // `contact:` to build the correct PouchDB _id for each.
+  // Contact docs are stored as `contact:{platform}:{userId}` while message
+  // contactId fields omit the `contact:` prefix, so we add it here.
   const uniqueContactIds = [...contactMap.keys()];
   const pinnedIds = ['sniffies:global-chat'];
   // Include pinned contacts in the batch fetch too
@@ -166,7 +142,7 @@ export async function getThreadSummaries(
  * Used by the UI to render badge counts without the heavier getThreadSummaries.
  */
 export async function getThreadUnreadCounts(
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<Map<string, number>> {
   const store = db || await getDB();
   const result = await store.allDocs({

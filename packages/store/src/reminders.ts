@@ -5,6 +5,7 @@
 import type { Platform } from '@aggregaytor/adapter-core';
 import type { ReminderDoc } from './types.js';
 import { getDB } from './db.js';
+import type { StoreDatabase } from './db.js';
 
 export async function createReminder(
   contactId: string,
@@ -12,7 +13,7 @@ export async function createReminder(
   note: string,
   dueAt: string,
   contactSnapshot?: ReminderDoc['contactSnapshot'],
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<ReminderDoc> {
   const store = db || await getDB();
   const now = new Date().toISOString();
@@ -36,7 +37,7 @@ export async function createReminder(
 
 export async function getReminders(
   opts?: { contactId?: string; upcoming?: boolean },
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<ReminderDoc[]> {
   const store = db || await getDB();
   const selector: Record<string, unknown> = { docType: 'reminder' };
@@ -56,7 +57,7 @@ export async function getReminders(
 export async function markReminderNotified(
   id: string,
   type: 'approach' | 'due',
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<void> {
   const store = db || await getDB();
   const doc = await store.get(id) as ReminderDoc;
@@ -67,7 +68,7 @@ export async function markReminderNotified(
 
 export async function deleteReminder(
   id: string,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<void> {
   const store = db || await getDB();
   const doc = await store.get(id);

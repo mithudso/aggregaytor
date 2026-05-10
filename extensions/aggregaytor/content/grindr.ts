@@ -73,15 +73,6 @@ function indexProfileFromPayload(obj: Record<string, unknown>): void {
   return photoHashToProfileId.get(photoHash) || '';
 };
 
-// Expose the captured Grindr auth headers on window so the service worker
-// (running chrome.scripting.executeScript in world: 'MAIN') can read them
-// when it needs to make an authenticated API call (e.g. enrichment pass).
-// The adapter populates this via captureAuthHeaders() whenever Grindr's
-// own requests fly past our network interceptor.
-(window as any).__aggregaytor_get_grindr_auth = function(): Record<string, string> | null {
-  return getCapturedAuth('grindr.com') || null;
-};
-
 function sendToBridge(message: Record<string, unknown>): void {
   try {
     window.dispatchEvent(
@@ -93,6 +84,237 @@ function sendToBridge(message: Record<string, unknown>): void {
     // silently ignore
   }
 }
+
+const GRINDR_BRIDGE_RESPONSE_EVENT = '__aggregaytor_grindr_bridge_response';
+
+function sendBridgeResponse(requestId: string, payload: Record<string, unknown>): void {
+  try {
+    window.dispatchEvent(new CustomEvent(GRINDR_BRIDGE_RESPONSE_EVENT, {
+      detail: JSON.parse(JSON.stringify({ requestId, payload })),
+    }));
+  } catch {}
+}
+
+function findTokenFromStorage(): string {
+  const keys = ['authToken', 'auth-token', 'grindrAuthToken', 'session', 'grindrSession', 'access_token', 'accessToken', 'token'];
+  for (const key of keys) {
+    const value = localStorage.getItem(key);
+    if (value && value.length > 20 && !value.startsWith('{')) return value;
+  }
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i) || '';
+    const value = localStorage.getItem(key) || '';
+    if (/^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$/.test(value)) return value;
+    if (!value.startsWith('{')) continue;
+    try {
+      const obj = JSON.parse(value);
+      const token = obj.authToken || obj.accessToken || obj.token || obj.session?.authToken || obj.session?.accessToken;
+      if (token && String(token).length > 20) return String(token);
+    } catch {}
+  }
+  return '';
+}
+
+function resolveGrindrAuthHeaders(): { authHeaders: Record<string, string>; authSource: string } {
+  const authHeaders: Record<string, string> = {};
+  const captured = getCapturedAuth('grindr.com');
+  if (captured && Object.keys(captured).length) {
+    Object.assign(authHeaders, captured);
+    return { authHeaders, authSource: 'adapter' };
+  }
+
+  const token = findTokenFromStorage();
+  if (token) {
+    authHeaders.Authorization = token.startsWith('Grindr3 ') || token.startsWith('Bearer ')
+      ? token
+      : `Grindr3 ${token}`;
+    return { authHeaders, authSource: 'localStorage' };
+  }
+
+  return { authHeaders, authSource: 'none' };
+}
+
+function extractProfileIds(data: unknown): string[] {
+  if (!data) return [];
+  const ids: string[] = [];
+  const walk = (value: unknown): void => {
+    if (value == null) return;
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item);
+      return;
+    }
+    if (typeof value === 'string' || typeof value === 'number') {
+      const normalized = String(value);
+      if (/^\d{5,}$/.test(normalized)) ids.push(normalized);
+      return;
+    }
+    if (typeof value !== 'object') return;
+    for (const key of ['profileId', 'profile_id', 'id', 'userId', 'user_id', 'blockedProfileId', 'hiddenProfileId']) {
+      const maybeId = (value as Record<string, unknown>)[key];
+      if (maybeId == null) continue;
+      const normalized = String(maybeId);
+      if (/^\d{5,}$/.test(normalized)) {
+        ids.push(normalized);
+        return;
+      }
+    }
+    for (const key of ['profiles', 'items', 'data', 'list', 'blocks', 'hides', 'results', 'content']) {
+      walk((value as Record<string, unknown>)[key]);
+    }
+  };
+  walk(data);
+  return [...new Set(ids)];
+}
+
+async function fetchGrindrTrainingImport(): Promise<{
+  results: Array<{ profileId: string; liked: boolean; source: string }>;
+  debug: Array<{ url: string; status: number; keys: string[]; count: number; sample: unknown }>;
+  authSource: string;
+}> {
+  const { authHeaders, authSource } = resolveGrindrAuthHeaders();
+  const results: Array<{ profileId: string; liked: boolean; source: string }> = [];
+  const debug: Array<{ url: string; status: number; keys: string[]; count: number; sample: unknown }> = [];
+
+  const paginateEndpoint = async (baseUrl: string, liked: boolean, source: string): Promise<void> => {
+    const seen = new Set<string>();
+    for (let page = 1; page <= 40; page++) {
+      const sep = baseUrl.includes('?') ? '&' : '?';
+      const url = `${baseUrl}${sep}page=${page}&pageNumber=${page}&limit=100&pageSize=100`;
+      try {
+        const res = await fetch(url, {
+          credentials: 'include',
+          headers: { Accept: 'application/json', ...authHeaders },
+        });
+        if (!res.ok) {
+          debug.push({ url, status: res.status, keys: [], count: 0, sample: null });
+          break;
+        }
+        const data = await res.json();
+        const ids = extractProfileIds(data);
+        const keys = (data && typeof data === 'object') ? Object.keys(data).slice(0, 10) : [];
+        const sample = Array.isArray(data)
+          ? data.slice(0, 1)
+          : (data?.profiles?.[0] || data?.items?.[0] || data?.data?.[0] || null);
+        debug.push({ url, status: res.status, keys, count: ids.length, sample });
+        let newIds = 0;
+        for (const profileId of ids) {
+          if (seen.has(profileId)) continue;
+          seen.add(profileId);
+          newIds++;
+          results.push({ profileId, liked, source });
+        }
+        if (newIds === 0) break;
+      } catch (error: any) {
+        debug.push({ url, status: -1, keys: [], count: 0, sample: String(error?.message || error) });
+        break;
+      }
+    }
+  };
+
+  const blockEndpoints = [
+    'https://web.grindr.com/api/v3.1/me/blocks',
+    'https://web.grindr.com/api/v4/me/blocks',
+    'https://web.grindr.com/api/v3/me/blocks',
+    'https://web.grindr.com/api/me/blocks',
+    'https://web.grindr.com/api/v4/blocks',
+    'https://web.grindr.com/api/v3/blocks',
+    'https://web.grindr.com/api/blocks',
+  ];
+  const hideEndpoints = [
+    'https://web.grindr.com/api/v3.1/me/hides',
+    'https://web.grindr.com/api/v4/me/hides',
+    'https://web.grindr.com/api/me/hides',
+    'https://web.grindr.com/api/v4/hides',
+    'https://web.grindr.com/api/v1/hides',
+  ];
+  const favoriteEndpoints = [
+    'https://web.grindr.com/api/v5/favorites',
+    'https://web.grindr.com/api/v4/favorites',
+    'https://web.grindr.com/api/favorites',
+    'https://web.grindr.com/api/v3/me/favorites',
+  ];
+
+  for (const endpoint of blockEndpoints) await paginateEndpoint(endpoint, false, 'block');
+  for (const endpoint of hideEndpoints) await paginateEndpoint(endpoint, false, 'hide');
+  for (const endpoint of favoriteEndpoints) await paginateEndpoint(endpoint, true, 'favorite');
+
+  console.log('[Aggregaytor:Grindr] Block/hide import debug:', debug);
+  console.log('[Aggregaytor:Grindr] Total unique ids captured:', results.length);
+  return { results, debug, authSource };
+}
+
+async function fetchGrindrProfiles(
+  batch: string[],
+  delayMs: number,
+  jitterMs: number,
+): Promise<{ noAuth: boolean; results: Array<{ id: string; ok: boolean; status: number; data?: unknown; error?: string }> }> {
+  const { authHeaders } = resolveGrindrAuthHeaders();
+  if (!Object.keys(authHeaders).length) {
+    return {
+      noAuth: true,
+      results: batch.map(id => ({ id, ok: false, status: -1, error: 'no-auth' })),
+    };
+  }
+
+  const headers: Record<string, string> = { Accept: 'application/json', ...authHeaders };
+  const results: Array<{ id: string; ok: boolean; status: number; data?: unknown; error?: string }> = [];
+  for (const id of batch) {
+    try {
+      const res = await fetch(`https://web.grindr.com/api/v4/profiles/${id}`, {
+        credentials: 'include',
+        headers,
+      });
+      if (res.status === 401 || res.status === 403) {
+        let body = '';
+        try { body = (await res.text()).slice(0, 200); } catch {}
+        results.push({ id, ok: false, status: res.status, error: body });
+        break;
+      }
+      if (!res.ok) {
+        results.push({ id, ok: false, status: res.status });
+      } else {
+        const data = await res.json();
+        results.push({ id, ok: true, status: 200, data });
+      }
+    } catch (error: any) {
+      results.push({ id, ok: false, status: 0, error: String(error?.message || error) });
+    }
+    const jittered = delayMs + (Math.random() * 2 - 1) * jitterMs;
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, jittered)));
+  }
+  return { noAuth: false, results };
+}
+
+window.addEventListener('__aggregaytor_grindr_import_request', ((event: CustomEvent) => {
+  const { requestId } = event.detail || {};
+  if (!requestId) return;
+  void fetchGrindrTrainingImport()
+    .then(payload => sendBridgeResponse(requestId, { ok: true, ...payload }))
+    .catch((error: any) => {
+      sendBridgeResponse(requestId, {
+        ok: false,
+        error: String(error?.message || error),
+        results: [],
+        debug: [],
+        authSource: 'none',
+      });
+    });
+}) as EventListener);
+
+window.addEventListener('__aggregaytor_grindr_profile_fetch_request', ((event: CustomEvent) => {
+  const { requestId, batch = [], delayMs = 0, jitterMs = 0 } = event.detail || {};
+  if (!requestId) return;
+  void fetchGrindrProfiles(batch, delayMs, jitterMs)
+    .then(payload => sendBridgeResponse(requestId, { ok: true, ...payload }))
+    .catch((error: any) => {
+      sendBridgeResponse(requestId, {
+        ok: false,
+        error: String(error?.message || error),
+        noAuth: false,
+        results: [],
+      });
+    });
+}) as EventListener);
 
 const adapter = new GrindrAdapter({ platform: 'grindr' });
 

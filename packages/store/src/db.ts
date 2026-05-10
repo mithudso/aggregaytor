@@ -61,6 +61,8 @@ type SelectorOperatorValue = {
   $ne?: unknown;
 };
 
+type SortDirection = 'asc' | 'desc';
+
 export interface StoreFindRequest {
   selector: Record<string, unknown>;
   sort?: Array<Record<string, 'asc' | 'desc'>>;
@@ -196,6 +198,50 @@ function sortDocs<T extends StoreDoc>(docs: T[], sort?: Array<Record<string, 'as
     }
     return left._id.localeCompare(right._id);
   });
+}
+
+function getSortDirection(
+  sort: Array<Record<string, SortDirection>> | undefined,
+  field: string,
+): SortDirection | null {
+  if (!sort?.length) return null;
+  for (const clause of sort) {
+    const [clauseField, direction] = Object.entries(clause)[0];
+    if (clauseField === field) return direction;
+  }
+  return null;
+}
+
+function getSelectorOperatorValue(
+  selector: Record<string, unknown>,
+  field: string,
+): SelectorOperatorValue | null {
+  const value = selector[field];
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    !Object.keys(value).some(key => key.startsWith('$'))
+  ) {
+    return null;
+  }
+  return value as SelectorOperatorValue;
+}
+
+function getRangeBounds(operator: SelectorOperatorValue): {
+  lower: unknown;
+  upper: unknown;
+  lowerOpen: boolean;
+  upperOpen: boolean;
+} {
+  const lower = operator.$gt ?? operator.$gte ?? Dexie.minKey;
+  const upper = operator.$lt ?? operator.$lte ?? Dexie.maxKey;
+  return {
+    lower,
+    upper,
+    lowerOpen: operator.$gt !== undefined,
+    upperOpen: operator.$lt !== undefined,
+  };
 }
 
 async function maybeReadMigrationFlag(key: string): Promise<boolean> {
@@ -337,16 +383,94 @@ class DexieStoreDatabase implements StoreDatabase {
     };
   }
 
+  private async findFastPath(request: StoreFindRequest): Promise<StoreDoc[] | null> {
+    const selector = request.selector;
+    const docType = typeof selector.docType === 'string' ? selector.docType : undefined;
+    if (!docType) return null;
+
+    const timestampDirection = getSortDirection(request.sort, 'timestamp');
+    const scheduledAtDirection = getSortDirection(request.sort, 'scheduledAt');
+    const platform = typeof selector.platform === 'string' ? selector.platform : undefined;
+    const contactId = typeof selector.contactId === 'string' ? selector.contactId : undefined;
+    const status = typeof selector.status === 'string' ? selector.status : undefined;
+    const timestampRange = getSelectorOperatorValue(selector, 'timestamp');
+    const scheduledAtRange = getSelectorOperatorValue(selector, 'scheduledAt');
+
+    if (platform && timestampDirection) {
+      const range = getRangeBounds(timestampRange || {});
+      let collection = this.db.docs.where('[docType+platform+timestamp]').between(
+        [docType, platform, range.lower],
+        [docType, platform, range.upper],
+        !range.lowerOpen,
+        !range.upperOpen,
+      );
+      if (timestampDirection === 'desc') collection = collection.reverse();
+      return request.limit ? collection.limit(request.limit).toArray() : collection.toArray();
+    }
+
+    if (contactId && timestampDirection) {
+      const range = getRangeBounds(timestampRange || {});
+      let collection = this.db.docs.where('[docType+contactId+timestamp]').between(
+        [docType, contactId, range.lower],
+        [docType, contactId, range.upper],
+        !range.lowerOpen,
+        !range.upperOpen,
+      );
+      if (timestampDirection === 'desc') collection = collection.reverse();
+      return request.limit ? collection.limit(request.limit).toArray() : collection.toArray();
+    }
+
+    if (status && scheduledAtDirection) {
+      const range = getRangeBounds(scheduledAtRange || {});
+      let collection = this.db.docs.where('[docType+status+scheduledAt]').between(
+        [docType, status, range.lower],
+        [docType, status, range.upper],
+        !range.lowerOpen,
+        !range.upperOpen,
+      );
+      if (scheduledAtDirection === 'desc') collection = collection.reverse();
+      return request.limit ? collection.limit(request.limit).toArray() : collection.toArray();
+    }
+
+    if (timestampDirection) {
+      const range = getRangeBounds(timestampRange || {});
+      let collection = this.db.docs.where('[docType+timestamp]').between(
+        [docType, range.lower],
+        [docType, range.upper],
+        !range.lowerOpen,
+        !range.upperOpen,
+      );
+      if (timestampDirection === 'desc') collection = collection.reverse();
+      return request.limit ? collection.limit(request.limit).toArray() : collection.toArray();
+    }
+
+    return null;
+  }
+
   private async seedFindCandidates(selector: Record<string, unknown>): Promise<StoreDoc[]> {
     const docType = typeof selector.docType === 'string' ? selector.docType : undefined;
-    if (docType) {
-      return this.db.docs.where('docType').equals(docType).toArray();
+    const platform = typeof selector.platform === 'string' ? selector.platform : undefined;
+    const contactId = typeof selector.contactId === 'string' ? selector.contactId : undefined;
+    const threadId = typeof selector.threadId === 'string' ? selector.threadId : undefined;
+    const status = typeof selector.status === 'string' ? selector.status : undefined;
+    const read = typeof selector.read === 'boolean' ? selector.read : undefined;
+    if (docType && contactId) return this.db.docs.where('[docType+contactId]').equals([docType, contactId]).toArray();
+    if (docType && threadId) return this.db.docs.where('[docType+threadId]').equals([docType, threadId]).toArray();
+    if (docType && status) return this.db.docs.where('[docType+status]').equals([docType, status]).toArray();
+    if (docType && read !== undefined) {
+      return this.db.docs
+        .where('docType')
+        .equals(docType)
+        .filter(doc => 'read' in doc && doc.read === read)
+        .toArray();
     }
+    if (docType && platform) return this.db.docs.where('[docType+platform]').equals([docType, platform]).toArray();
+    if (docType) return this.db.docs.where('docType').equals(docType).toArray();
     return this.db.docs.toArray();
   }
 
   async find<T extends StoreDoc = StoreDoc>(request: StoreFindRequest): Promise<StoreFindResult<T>> {
-    const seeded = await this.seedFindCandidates(request.selector);
+    const seeded = await this.findFastPath(request) ?? await this.seedFindCandidates(request.selector);
     let docs = seeded.filter(doc => selectorMatches(doc, request.selector));
     docs = sortDocs(docs, request.sort);
     if (request.limit) docs = docs.slice(0, request.limit);

@@ -77,6 +77,12 @@ function convertTitlesToTips() {
   document.querySelectorAll('[title]').forEach(el => {
     const title = el.getAttribute('title');
     if (title && !el.hasAttribute('data-tip')) {
+      if (
+        !el.getAttribute('aria-label') &&
+        (el instanceof HTMLButtonElement || el.getAttribute('role') === 'button')
+      ) {
+        el.setAttribute('aria-label', el.getAttribute('data-label') || title);
+      }
       el.setAttribute('data-tip', title);
       el.removeAttribute('title'); // remove native tooltip
       // Header buttons get bottom tooltips (they're at the top of the screen)
@@ -1876,7 +1882,9 @@ async function generateSuggestions() {
 
 document.getElementById('filter-toggle').addEventListener('click', () => {
   const panel = document.getElementById('filter-panel');
-  panel.style.display = panel.style.display === 'none' ? '' : 'none';
+  const expanded = panel.style.display === 'none';
+  panel.style.display = expanded ? '' : 'none';
+  document.getElementById('filter-toggle').setAttribute('aria-expanded', expanded ? 'true' : 'false');
 });
 
 function readFilters() {
@@ -1935,6 +1943,12 @@ document.getElementById('back-btn').addEventListener('click', () => {
   if (settingsOpen) closeSettings();
   else goBack();
 });
+function syncPlatformChipPressedState() {
+  document.querySelectorAll('.platform-chip[data-platform]').forEach(chip => {
+    chip.setAttribute('aria-pressed', chip.classList.contains('active') ? 'true' : 'false');
+  });
+}
+
 document.querySelectorAll('.platform-chip[data-platform]').forEach(chip => {
   chip.addEventListener('click', () => {
     const platform = chip.dataset.platform;
@@ -1942,13 +1956,13 @@ document.querySelectorAll('.platform-chip[data-platform]').forEach(chip => {
     if (platform === 'all') {
       // "All" clears all individual selections and shows everything
       activePlatforms.clear();
-      document.querySelectorAll('.platform-chip').forEach(c => c.classList.remove('active'));
+      document.querySelectorAll('.platform-chip[data-platform]').forEach(c => c.classList.remove('active'));
       chip.classList.add('active');
       currentPlatform = 'all';
     } else if (platform === 'archived') {
       // Archive is exclusive (not a toggle with others)
       activePlatforms.clear();
-      document.querySelectorAll('.platform-chip').forEach(c => c.classList.remove('active'));
+      document.querySelectorAll('.platform-chip[data-platform]').forEach(c => c.classList.remove('active'));
       chip.classList.add('active');
       currentPlatform = 'archived';
     } else {
@@ -1973,9 +1987,11 @@ document.querySelectorAll('.platform-chip[data-platform]').forEach(chip => {
         currentPlatform = 'multi'; // signal that we're using activePlatforms set
       }
     }
+    syncPlatformChipPressedState();
     loadThreads();
   });
 });
+syncPlatformChipPressedState();
 document.getElementById('suggest-btn').addEventListener('click', generateSuggestions);
 
 const textarea = document.getElementById('response-input');
@@ -4900,10 +4916,11 @@ async function performGlobalSearch(query) {
       return;
     }
 
-    const q = query.toLowerCase();
     results.innerHTML = res.messages.map(m => {
       const body = m.body || '';
-      const highlighted = body.replace(new RegExp(`(${escRegex(query)})`, 'gi'), '<mark>$1</mark>');
+      const safeBody = esc(body);
+      const safeQuery = esc(query);
+      const highlighted = safeBody.replace(new RegExp(`(${escRegex(safeQuery)})`, 'gi'), '<mark>$1</mark>');
       const contact = stripPrefix(m.contactId);
       return `<div class="search-result" data-contact-id="${esc(m.contactId)}" data-platform="${esc(m.platform)}">
         <div class="search-result-contact">${esc(contact)} ${platformIcon(m.platform)}</div>

@@ -26,10 +26,40 @@ window.addEventListener('unhandledrejection', (ev) => {
     r?.stack);
 });
 let contextValid = true;
+const MAIN_WORLD_RESPONSE_EVENT = '__aggregaytor_grindr_bridge_response';
 
 function checkContext(): boolean {
   try { void chrome.runtime.id; return true; }
   catch { if (contextValid) { console.warn(`${LOG} Context invalidated`); contextValid = false; } return false; }
+}
+
+function relayMainWorldRequest(
+  eventType: string,
+  detail: Record<string, unknown>,
+  sendResponse: (response?: unknown) => void,
+  timeoutMs = 120_000,
+): true {
+  const requestId = `${eventType}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+  let settled = false;
+  let timer = 0;
+  const cleanup = () => {
+    if (timer) window.clearTimeout(timer);
+    window.removeEventListener(MAIN_WORLD_RESPONSE_EVENT, onResponse as EventListener);
+  };
+  const onResponse = (event: CustomEvent) => {
+    if (event.detail?.requestId !== requestId) return;
+    settled = true;
+    cleanup();
+    sendResponse(event.detail.payload || { ok: false, error: 'empty-response' });
+  };
+  window.addEventListener(MAIN_WORLD_RESPONSE_EVENT, onResponse as EventListener);
+  timer = window.setTimeout(() => {
+    if (settled) return;
+    cleanup();
+    sendResponse({ ok: false, error: 'timeout' });
+  }, timeoutMs);
+  window.dispatchEvent(new CustomEvent(eventType, { detail: { requestId, ...detail } }));
+  return true;
 }
 
 window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
@@ -87,6 +117,16 @@ try {
       showFloatingPanel(message.contactId, message.platform || 'grindr');
       sendResponse({ ok: true });
       return true;
+    }
+    if (message.type === 'GRINDR_IMPORT_TRAINING_DATA') {
+      return relayMainWorldRequest('__aggregaytor_grindr_import_request', {}, sendResponse);
+    }
+    if (message.type === 'GRINDR_FETCH_PROFILES') {
+      return relayMainWorldRequest('__aggregaytor_grindr_profile_fetch_request', {
+        batch: message.batch,
+        delayMs: message.delayMs,
+        jitterMs: message.jitterMs,
+      }, sendResponse);
     }
     if (message.type === 'SCRAPE_AVATARS') {
       let count = 0;

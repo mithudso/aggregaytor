@@ -15,6 +15,7 @@
 import type { UnifiedContact, Platform } from '@aggregaytor/adapter-core';
 import type { ContactDoc } from './types.js';
 import { getDB } from './db.js';
+import type { StoreDatabase } from './db.js';
 
 /**
  * Build a deterministic PouchDB _id for a contact.
@@ -51,7 +52,7 @@ function toContactDoc(contact: UnifiedContact): ContactDoc {
  */
 export async function upsertContact(
   contact: UnifiedContact,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<void> {
   const store = db || await getDB();
   const doc = toContactDoc(contact);
@@ -85,7 +86,7 @@ export async function upsertContact(
  */
 export async function upsertContacts(
   contacts: UnifiedContact[],
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<{ created: number; updated: number }> {
   if (!contacts.length) return { created: 0, updated: 0 };
   const store = db || await getDB();
@@ -136,7 +137,7 @@ export async function upsertContacts(
  */
 export async function getContact(
   id: string,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<ContactDoc | null> {
   const store = db || await getDB();
   try {
@@ -154,7 +155,7 @@ export async function getContact(
  */
 export async function getContactsByPlatform(
   platform: Platform,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<ContactDoc[]> {
   const store = db || await getDB();
   const result = await store.allDocs({
@@ -173,7 +174,7 @@ export async function getContactsByPlatform(
  */
 export async function getAllContacts(
   opts?: { sortBy?: 'lastMessageAt' | 'displayName' },
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<ContactDoc[]> {
   const store = db || await getDB();
   const result = await store.allDocs({

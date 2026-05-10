@@ -63,7 +63,7 @@ These are extracted from `docs/ARCHITECTURE.md`; consult it for the *why*.
 - **PouchDB bulk writes are 2 calls, always**: `allDocs({ keys })` to get `_rev` + preserved fields, then `bulkDocs()`. See `upsertMessages` / `upsertContacts` for the pattern. Don't reintroduce N-call per-doc loops.
 - **Every cache has an explicit invalidation trigger** documented adjacent to its declaration. New caches must follow this rule (15 caches enumerated in `docs/ARCHITECTURE.md`).
 - **No `setInterval` in the service worker** except the dev-reload poll (guarded on `!manifest.update_url`). Use `chrome.alarms` for recurring work — MV3 SW terminates after 30s idle.
-- **Don't expose anything new on `window.*`** from MAIN-world scripts — the host page can read it. Existing exposures (`__aggregaytor_grindr_lookupProfileId`, `__aggregaytor_get_grindr_auth`) are reviewed; new ones aren't.
+- **Don't expose anything new on `window.*`** from MAIN-world scripts — the host page can read it. Keep auth and other privileged page state inside MAIN-world closure scope, and use bridge-mediated request/response flows for narrowly scoped operations instead.
 - **New `thread_meta` signal fields must be added to `SIGNAL_FIELDS`** in `packages/store/src/thread-meta.ts`, otherwise auto-train won't pick them up.
 - **Don't `upsertContact` without filtering empty contacts** — see `handleIncomingContacts` for the filter.
 - **Don't `chrome.tabs.update({url})` if the tab is already at the URL** — it wipes page state.

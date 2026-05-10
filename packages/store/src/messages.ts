@@ -11,6 +11,7 @@ import { stableContentHash } from '@aggregaytor/context-engine';
 import type { UnifiedMessage, Platform } from '@aggregaytor/adapter-core';
 import type { MessageDoc } from './types.js';
 import { getDB } from './db.js';
+import type { StoreDatabase } from './db.js';
 
 /**
  * Retry a PouchDB operation exactly once after a 1-second delay.
@@ -50,6 +51,10 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
  */
 function messageDocId(msg: UnifiedMessage): string {
   return `msg:${msg.platform}:${msg.id.replace(/^[^:]+:/, '')}`;
+}
+
+function isStoreDatabase(value: unknown): value is StoreDatabase {
+  return !!value && typeof value === 'object' && typeof (value as StoreDatabase).get === 'function';
 }
 
 /**
@@ -96,7 +101,7 @@ function toMessageDoc(msg: UnifiedMessage): MessageDoc {
  */
 export async function upsertMessage(
   msg: UnifiedMessage,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<{ created: boolean }> {
   const store = db || await getDB();
   const doc = toMessageDoc(msg);
@@ -137,7 +142,7 @@ export async function upsertMessage(
  */
 export async function upsertMessages(
   msgs: UnifiedMessage[],
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<{ created: number; updated: number }> {
   if (!msgs.length) return { created: 0, updated: 0 };
   const store = db || await getDB();
@@ -212,7 +217,7 @@ export async function upsertMessages(
 export async function getMessagesByThread(
   threadId: string,
   opts?: { limit?: number },
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<MessageDoc[]> {
   const store = db || await getDB();
   const result = await store.find({
@@ -243,14 +248,17 @@ export async function getMessagesByThread(
 export async function getMessagesByContact(
   contactId: string,
   opts?: { limit?: number },
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<MessageDoc[]> {
   const store = db || await getDB();
   const result = await store.find({
     selector: { docType: 'message', contactId },
+    sort: [{ docType: 'asc' }, { timestamp: 'desc' }],
     limit: opts?.limit || 100,
   });
-  // Safety filter: PouchDB find can return incorrect results without a matching index
+  // Safety filter: legacy callers relied on selector filtering even when
+  // indexes were missing or stale; keep the guard while using the timestamp
+  // index so the limit still captures the newest messages first.
   const filtered = (result.docs as MessageDoc[]).filter(d => d.contactId === contactId);
   // Sort newest-first for contact activity views
   return filtered.sort(
@@ -267,13 +275,15 @@ export async function getMessagesByContact(
  */
 export async function getRecentMessages(
   opts?: { platform?: Platform; limit?: number },
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<MessageDoc[]> {
   const store = db || await getDB();
   const selector: Record<string, unknown> = { docType: 'message' };
   if (opts?.platform) selector.platform = opts.platform;
+  selector.timestamp = { $gt: '' };
   const result = await store.find({
     selector,
+    sort: [{ docType: 'asc' }, { timestamp: 'desc' }],
     limit: opts?.limit || 50,
   });
   // Sort newest-first for the activity feed
@@ -295,7 +305,7 @@ export async function getRecentMessages(
  */
 export async function markThreadRead(
   threadId: string,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<number> {
   const store = db || await getDB();
   const result = await store.find({
@@ -349,11 +359,11 @@ const unreadCountCache = new Map<string, { count: number; time: number; capped: 
 export async function getUnreadCount(
   platform?: Platform,
   opts?: { exact?: boolean; limit?: number },
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<number> {
   // Back-compat: older call sites pass the DB as the second positional arg.
-  if (opts && typeof (opts as any).get === 'function' && !db) {
-    db = opts as unknown as PouchDB.Database;
+  if (isStoreDatabase(opts) && !db) {
+    db = opts;
     opts = undefined;
   }
   const exact = !!opts?.exact;
@@ -439,7 +449,7 @@ export interface PurgeResult {
  * hidden, blockedByThem, or favorited (favorited is treated as a manual
  * keep-forever flag too — same intent as "I care about this person").
  */
-async function getProtectedContactIds(db: PouchDB.Database): Promise<Set<string>> {
+async function getProtectedContactIds(db: StoreDatabase): Promise<Set<string>> {
   const out = new Set<string>();
   try {
     const result = await db.allDocs({
@@ -484,7 +494,7 @@ async function getCurrentIdbBytes(): Promise<number> {
  */
 export async function purgeOldestMessages(
   thresholdBytes: number,
-  db?: PouchDB.Database,
+  db?: StoreDatabase,
 ): Promise<PurgeResult> {
   const t0 = Date.now();
   const ranAt = new Date(t0).toISOString();
