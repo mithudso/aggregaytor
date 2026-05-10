@@ -188,6 +188,6 @@ export default defineConfig({
     noExternal: ['events'],
   },
   optimizeDeps: {
-    include: ['events', 'pouchdb-browser', 'pouchdb-find'],
+    include: ['dexie', 'events'],
   },
 });

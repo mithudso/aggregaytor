@@ -1,6 +1,6 @@
 # Dexie migration plan — PouchDB → Dexie
 
-**Status:** Proposed. Not yet scheduled.
+**Status:** Implemented in the current codebase as a Dexie-backed compatibility layer with legacy PouchDB import-on-first-open and supplemental OPFS snapshots.
 **Target version:** v0.58.0 (major because of the schema cutover)
 **Author:** 2026-04-14 research pass
 **Prerequisites:** v0.57.9 ships (Cerebras + Anthropic 1h TTL + FlexSearch) cleanly

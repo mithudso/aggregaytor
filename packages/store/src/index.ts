@@ -36,3 +36,4 @@ export { startSync, stopSync } from './sync.js';
 export type { SyncConfig } from './sync.js';
 export { exportAllData, importAllData, exportBlocked, importBlocked } from './export-import.js';
 export { backupToDrive, restoreFromDrive, getDriveBackupStatus } from './google-drive-sync.js';
+export { saveOpfsSnapshotData, getOpfsSnapshotStatus, restoreFromOpfsSnapshot, deleteOpfsSnapshot } from './opfs-backup.js';

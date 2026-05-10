@@ -19,6 +19,7 @@ import {
   backupToDrive, restoreFromDrive, getDriveBackupStatus,
   getContact, getAllContacts, getContactsByPlatform, getDB, closeDB, destroyDB,
   exportAllData, importAllData, exportBlocked, importBlocked,
+  saveOpfsSnapshotData, getOpfsSnapshotStatus, restoreFromOpfsSnapshot, deleteOpfsSnapshot,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures, ReminderDoc } from '@aggregaytor/store';
 import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS, clearLLMCaches, queryContacts, getDeprecationWarnings, generateConversationSummary, setProviderModelOverride, getEffectiveModelForProvider, getAllProviderModels, getAllProviderKeys } from './llm.js';
@@ -259,6 +260,7 @@ async function runRebuild(trigger: string, startedAt: number): Promise<void> {
     // Phase 1: export current docs to JSON + save backup to Downloads.
     phase = 'export';
     const json = await exportAllData();
+    await saveOpfsSnapshotData(json, { reason: `rebuild/${trigger}` });
     // Best-effort backup — if the download API is unavailable we still
     // proceed because the data lives in the JSON we hold in memory and
     // we'll re-import it shortly.
@@ -2089,6 +2091,7 @@ async function handleMessage(msg: any): Promise<any> {
     case 'EXPORT_ALL_DATA': {
       try {
         const json = await exportAllData(msg.passphrase);
+        await saveOpfsSnapshotData(json, { reason: 'manual-export' });
         return { ok: true, data: json };
       } catch (err) { return { ok: false, error: (err as Error).message }; }
     }
@@ -2100,6 +2103,7 @@ async function handleMessage(msg: any): Promise<any> {
         recentContactUpserts.clear();
         queryContactsCache.clear();
         const result = await importAllData(msg.data, msg.passphrase);
+        await saveOpfsSnapshotData(msg.data, { reason: 'manual-import' });
         return { ok: true, ...result };
       } catch (err) { return { ok: false, error: (err as Error).message }; }
     }
@@ -3146,6 +3150,34 @@ async function handleMessage(msg: any): Promise<any> {
     case 'DRIVE_STATUS': {
       try {
         return { ok: true, ...(await getDriveBackupStatus()) };
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
+    case 'OPFS_BACKUP_SAVE': {
+      try {
+        const json = await exportAllData(msg.passphrase);
+        const snapshot = await saveOpfsSnapshotData(json, { reason: 'manual-opfs-save' });
+        return { ok: true, snapshot };
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
+    case 'OPFS_BACKUP_RESTORE': {
+      try {
+        invalidateThreadCache();
+        clearIndex();
+        autoTrainedSet.clear();
+        recentContactUpserts.clear();
+        queryContactsCache.clear();
+        const result = await restoreFromOpfsSnapshot(msg.passphrase);
+        return { ok: true, ...result };
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
+    case 'OPFS_BACKUP_STATUS': {
+      try {
+        return { ok: true, ...(await getOpfsSnapshotStatus()) };
+      } catch (err) { return { ok: false, error: (err as Error).message }; }
+    }
+    case 'OPFS_BACKUP_DELETE': {
+      try {
+        return await deleteOpfsSnapshot();
       } catch (err) { return { ok: false, error: (err as Error).message }; }
     }
 

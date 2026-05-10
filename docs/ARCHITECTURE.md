@@ -1,6 +1,6 @@
 # Aggregaytor — Architecture & Code Map
 
-**Last updated:** 2026-04-14 (v0.57.8)
+**Last updated:** 2026-05-10 (v0.57.80)
 
 This document is the **primary entry point** for anyone (human or AI) starting fresh on the codebase. Read this before making non-trivial changes. It captures the *why* behind choices that aren't obvious from reading the code alone.
 
@@ -8,7 +8,7 @@ This document is the **primary entry point** for anyone (human or AI) starting f
 
 ## What it is
 
-Chrome MV3 extension that unifies message inboxes across Sniffies, Grindr, DoubleList, Adam4Adam, Gmail, and Yahoo Mail. All data is local-first in IndexedDB (via PouchDB). Adds LLM-powered reply suggestions, auto-respond with escalation tiers, dossier auto-extraction, block-rule automation, preference learning, profile rating, and Google Calendar/Tasks/Drive integration.
+Chrome MV3 extension that unifies message inboxes across Sniffies, Grindr, DoubleList, Adam4Adam, Gmail, and Yahoo Mail. All data is local-first in IndexedDB via a Dexie-backed document store, with optional OPFS snapshots for large local backups. Adds LLM-powered reply suggestions, auto-respond with escalation tiers, dossier auto-extraction, block-rule automation, preference learning, profile rating, and Google Calendar/Tasks/Drive integration.
 
 ## Repository layout
 
@@ -42,7 +42,7 @@ aggregaytor/
 ├── packages/
 │   ├── adapter-core/            # UnifiedMessage/UnifiedContact types
 │   ├── context-engine/          # Dedup hash, normalize, search, entities
-│   ├── store/                   # PouchDB wrapper — all persistence
+│   ├── store/                   # Dexie-backed document store
 │   └── ui/                      # Shared UI primitives (minimal)
 │
 └── tools/debug-server/          # MCP server for debug commands
@@ -61,7 +61,7 @@ aggregaytor/
 
 `chrome.runtime.onMessage` → `handleMessage(msg)` — a single switch statement (~700 cases). Each case:
 1. Invalidates the thread-summary cache if its write affects thread ordering/unread counts
-2. Routes to a PouchDB or LLM helper
+2. Routes to a store or LLM helper
 3. Returns `{ ok: true, ... }` or `{ ok: false, error }`
 
 **All handlers are async.** The outer listener is wrapped in try/catch so a sync throw can't kill the SW.
@@ -71,7 +71,7 @@ aggregaytor/
 | Prefix | Purpose |
 |---|---|
 | `ADAPTER_*` | Inbound writes from content-script adapters |
-| `GET_*` / `UPSERT_*` / `DELETE_*` | CRUD on PouchDB docs |
+| `GET_*` / `UPSERT_*` / `DELETE_*` | CRUD on persisted docs |
 | `GENERATE_*` / `GET_LLM_*` / `CLEAR_LLM_CACHE` | LLM orchestration |
 | `GOOGLE_*` / `DRIVE_*` | Google Tasks / Calendar / Drive |
 | `BULK_TRAIN_*` / `AUTO_TRAIN_NOW` / `ENRICH_BLOCKED_PROFILES` | Preference-model training paths |
@@ -80,7 +80,7 @@ aggregaytor/
 
 ## Storage layer — `packages/store`
 
-PouchDB + pouchdb-find on the IndexedDB adapter. Single database named `aggregaytor`. All docs have a `docType` discriminator.
+Dexie on IndexedDB with a compatibility wrapper that preserves the existing PouchDB-shaped store calls (`get`, `put`, `bulkDocs`, `allDocs`, `find`). The live database is `aggregaytor_dexie`; first-run migration imports legacy `aggregaytor` PouchDB docs if they exist. All docs still have a `docType` discriminator.
 
 ### Doc types
 
@@ -117,7 +117,7 @@ Every bulk writer follows this shape (see `upsertMessages` and `upsertContacts`)
 1. Build deterministic `_id`s for all docs
 2. `allDocs({ keys })` to get `_rev` and preserved fields in one round-trip
 3. Merge `_rev` + preserved fields (createdAt, non-null avatar, non-null displayName)
-4. `bulkDocs()` in one call — regardless of batch size, 2 PouchDB calls total
+4. `bulkDocs()` in one call — regardless of batch size, 2 store calls total
 
 This pattern matters — don't reintroduce N-call per-doc loops.
 
@@ -196,7 +196,7 @@ Chrome MV3 SW terminates after **30s idle** or **5min max single task**. Our SW:
 - Reads all settings lazily via `getCachedStorage` — one chrome.storage call per key per lifetime
 - Uses `chrome.alarms` for all recurring work (badge-refresh 1min, reminder-check 15s, auto-respond-check 3s, preference-auto-train 30min, block-rule-check 5min, task-sync 5min, grindr-login-check 1min, dev-reload-keepalive 30s)
 - `chrome.runtime.onMessage` listener is registered at top-level (first tick) so it never misses events
-- State lives in PouchDB — the SW holds only caches. On cold start, `getDB()` re-opens the database (fast: <10ms for a warm IDB).
+- State lives in Dexie/IndexedDB — the SW holds only caches. On cold start, `getDB()` re-opens the database quickly, and OPFS snapshots are available as a supplemental local backup layer.
 - Dev auto-reload: polls `.build-hash` via `setInterval(1.5s)` + `chrome.alarms` keepalive. Dev-only — guarded on `!manifest.update_url`.
 
 ## Content-script architecture
@@ -247,7 +247,7 @@ ISOLATED bridge (content/<platform>-bridge.ts)
 service-worker.ts handleMessage
     │ upsertMessages / upsertContacts (packages/store)
     ▼
-PouchDB (IndexedDB 'aggregaytor')
+Dexie store (IndexedDB 'aggregaytor_dexie')
     │ chrome.runtime.sendMessage({ type:'NEW_MESSAGES' })
     ▼
 sidepanel/panel.js renders the inbox
@@ -272,7 +272,7 @@ sidepanel/panel.js renders the inbox
 - `pnpm -r test` — vitest across all packages
 - 65 tests currently (context-engine: 34, adapter-core: 23, sniffies: 8)
 - Most adapters and the store package have no tests (they pass `--passWithNoTests`)
-- Tests use in-memory PouchDB adapter (`{ adapter: 'memory' }`) — isolated DB per test
+- Store tests use `fake-indexeddb` for isolated IndexedDB-backed runs
 
 ## Debug
 
@@ -284,7 +284,7 @@ sidepanel/panel.js renders the inbox
 ## Known tech debt / unfinished work
 
 - `handlePictureSend` tracks the stat but doesn't actually send the picture (TODO in code)
-- `packages/store/src/sync.ts` is a stub — CouchDB replication never wired up
+- `packages/store/src/sync.ts` now throws intentionally — remote CouchDB replication is not supported on the Dexie-backed store
 - `packages/ui` is basically empty — no shared components across panel + popup yet
 - Dynamic-vs-static import warning for `llm.ts` and `tasks.ts` — won't fix; functionally fine
 

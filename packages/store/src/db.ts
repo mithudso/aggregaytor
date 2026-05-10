@@ -1,122 +1,412 @@
 /**
- * db.ts — PouchDB wrapper with singleton connection and index management.
+ * db.ts — Dexie-backed store wrapper with a PouchDB-shaped compatibility API.
  *
- * The store uses PouchDB (IndexedDB in the browser) as a local-first database.
- * All document types live in a single database, discriminated by `docType`.
- * Compound indexes on (docType + other fields) enable the Mango queries used
- * throughout the CRUD modules (messages.ts, contacts.ts, threads.ts, etc.).
- *
- * The singleton pattern (`_db`) ensures only one connection is open at a time,
- * and `auto_compaction: true` keeps the database size manageable by compacting
- * old revisions on every write.
+ * The rest of the store code expects a handful of PouchDB-style methods
+ * (`get`, `put`, `bulkDocs`, `allDocs`, `find`, `remove`, `info`, `compact`).
+ * This module preserves that contract while moving the underlying storage to a
+ * single IndexedDB database managed by Dexie.
  */
 
-import PouchDB from 'pouchdb-browser';
-import PouchDBFind from 'pouchdb-find';
+import Dexie from 'dexie';
 
-// Register the pouchdb-find plugin so we can use db.createIndex() and db.find()
-PouchDB.plugin(PouchDBFind);
+declare const chrome: any;
 
-/** Module-level singleton -- null until getDB() is called the first time. */
-let _db: PouchDB.Database | null = null;
-
-/**
- * Create all compound indexes needed for efficient Mango queries.
- *
- * PouchDB/CouchDB indexes are idempotent -- calling createIndex for an index
- * that already exists is a no-op, so this is safe to run on every startup.
- *
- * Index purposes:
- *   (docType, platform, timestamp)    -- getRecentMessages filtered by platform
- *   (docType, contactId, timestamp)   -- getMessagesByContact sorted by time
- *   (docType, threadId)               -- getMessagesByThread
- *   (docType, platform)               -- getContactsByPlatform
- *   (docType, read, timestamp)        -- getUnreadCount, unread queries
- *   (docType, contactId)              -- general contact-scoped queries
- *   (docType, dueAt)                  -- reminder queries sorted by due date
- *   (docType, status, scheduledAt)    -- auto-respond job queue ordering
- */
-async function ensureIndexes(db: PouchDB.Database): Promise<void> {
-  await Promise.all([
-    db.createIndex({ index: { fields: ['docType', 'platform', 'timestamp'] } }),
-    db.createIndex({ index: { fields: ['docType', 'contactId', 'timestamp'] } }),
-    // v0.57.79: global oldest-first scan support. Used by the auto-purge
-    // job which sorts ALL messages by timestamp asc to find the oldest
-    // ones to delete when IDB usage exceeds the threshold.
-    db.createIndex({ index: { fields: ['docType', 'timestamp'] } }),
-    db.createIndex({ index: { fields: ['docType', 'threadId'] } }),
-    db.createIndex({ index: { fields: ['docType', 'platform'] } }),
-    db.createIndex({ index: { fields: ['docType', 'read', 'timestamp'] } }),
-    db.createIndex({ index: { fields: ['docType', 'contactId'] } }),
-    db.createIndex({ index: { fields: ['docType', 'dueAt'] } }),
-    db.createIndex({ index: { fields: ['docType', 'status', 'scheduledAt'] } }),
-  ]);
+export interface StoreDoc {
+  _id: string;
+  _rev?: string;
+  _deleted?: boolean;
+  docType?: string;
 }
 
-/**
- * Get (or create) the singleton PouchDB instance.
- *
- * On first call, opens the database, creates indexes, and caches the instance.
- * Subsequent calls return the cached instance immediately.
- *
- * @param name  Database name in IndexedDB. Defaults to 'aggregaytor'.
- * @returns     The ready-to-use PouchDB instance with all indexes in place.
- */
-export async function getDB(name = 'aggregaytor'): Promise<PouchDB.Database> {
+export interface StorePutResult {
+  ok: true;
+  id: string;
+  rev: string;
+}
+
+export interface StoreInfo {
+  db_name: string;
+  doc_count: number;
+  update_seq: number;
+}
+
+export interface StoreAllDocsOptions {
+  include_docs?: boolean;
+  keys?: string[];
+  startkey?: string;
+  endkey?: string;
+  descending?: boolean;
+  limit?: number;
+}
+
+export interface StoreAllDocsRow<T extends StoreDoc = StoreDoc> {
+  id: string;
+  key: string;
+  value?: { rev?: string };
+  doc?: T;
+  error?: 'not_found';
+}
+
+export interface StoreAllDocsResult<T extends StoreDoc = StoreDoc> {
+  rows: Array<StoreAllDocsRow<T>>;
+  total_rows: number;
+}
+
+type SelectorOperatorValue = {
+  $gt?: unknown;
+  $gte?: unknown;
+  $lt?: unknown;
+  $lte?: unknown;
+  $in?: unknown[];
+  $ne?: unknown;
+};
+
+export interface StoreFindRequest {
+  selector: Record<string, unknown>;
+  sort?: Array<Record<string, 'asc' | 'desc'>>;
+  limit?: number;
+  fields?: string[];
+}
+
+export interface StoreFindResult<T extends StoreDoc = StoreDoc> {
+  docs: T[];
+}
+
+export interface StoreDatabase {
+  get<T extends StoreDoc = StoreDoc>(id: string): Promise<T>;
+  put<T extends StoreDoc = StoreDoc>(doc: T): Promise<StorePutResult>;
+  bulkDocs<T extends StoreDoc = StoreDoc>(docs: T[]): Promise<StorePutResult[]>;
+  allDocs<T extends StoreDoc = StoreDoc>(opts?: StoreAllDocsOptions): Promise<StoreAllDocsResult<T>>;
+  find<T extends StoreDoc = StoreDoc>(request: StoreFindRequest): Promise<StoreFindResult<T>>;
+  remove(doc: Pick<StoreDoc, '_id'>): Promise<StorePutResult>;
+  compact(): Promise<void>;
+  close(): Promise<void>;
+  destroy(): Promise<void>;
+  info(): Promise<StoreInfo>;
+  createIndex(_spec: unknown): Promise<void>;
+}
+
+class AggregaytorDexie extends Dexie {
+  declare docs: Dexie.Table<StoreDoc, string>;
+
+  constructor(name: string) {
+    super(name);
+    this.version(1).stores({
+      docs: [
+        '&_id',
+        'docType',
+        'platform',
+        'threadId',
+        'contactId',
+        'timestamp',
+        'read',
+        'direction',
+        'dueAt',
+        'status',
+        'scheduledAt',
+        'tag',
+        '[docType+platform]',
+        '[docType+platform+timestamp]',
+        '[docType+contactId]',
+        '[docType+contactId+timestamp]',
+        '[docType+timestamp]',
+        '[docType+threadId]',
+        '[docType+read]',
+        '[docType+read+timestamp]',
+        '[docType+status]',
+        '[docType+status+scheduledAt]',
+        '[docType+dueAt]',
+      ].join(','),
+    });
+  }
+}
+
+function actualDbName(name: string): string {
+  return name.endsWith('_dexie') ? name : `${name}_dexie`;
+}
+
+function nextRevision(previous?: string): string {
+  const currentGeneration = previous ? parseInt(previous.split('-', 1)[0] || '0', 10) || 0 : 0;
+  const token = typeof crypto?.randomUUID === 'function'
+    ? crypto.randomUUID().replace(/-/g, '')
+    : Math.random().toString(16).slice(2);
+  return `${currentGeneration + 1}-${token}`;
+}
+
+function notFound(id: string): Error & { status: number; reason: string } {
+  const err = new Error(`missing: ${id}`) as Error & { status: number; reason: string };
+  err.status = 404;
+  err.reason = 'missing';
+  return err;
+}
+
+function compareValues(a: unknown, b: unknown): number {
+  if (a === b) return 0;
+  if (a === undefined) return -1;
+  if (b === undefined) return 1;
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  return String(a).localeCompare(String(b));
+}
+
+function projectDoc<T extends StoreDoc>(doc: T, fields?: string[]): T {
+  if (!fields?.length) return { ...doc };
+  const projected: Record<string, unknown> = {};
+  const record = doc as unknown as Record<string, unknown>;
+  for (const field of new Set(['_id', ...fields])) {
+    if (field in record) projected[field] = record[field];
+  }
+  return projected as T;
+}
+
+function matchesOperator(actual: unknown, operator: SelectorOperatorValue): boolean {
+  if (operator.$gt !== undefined && compareValues(actual, operator.$gt) <= 0) return false;
+  if (operator.$gte !== undefined && compareValues(actual, operator.$gte) < 0) return false;
+  if (operator.$lt !== undefined && compareValues(actual, operator.$lt) >= 0) return false;
+  if (operator.$lte !== undefined && compareValues(actual, operator.$lte) > 0) return false;
+  if (operator.$ne !== undefined && actual === operator.$ne) return false;
+  if (operator.$in && !operator.$in.includes(actual)) return false;
+  return true;
+}
+
+function selectorMatches(doc: StoreDoc, selector: Record<string, unknown>): boolean {
+  const record = doc as unknown as Record<string, unknown>;
+  return Object.entries(selector).every(([field, expected]) => {
+    const actual = record[field];
+    if (
+      expected &&
+      typeof expected === 'object' &&
+      !Array.isArray(expected) &&
+      Object.keys(expected).some(key => key.startsWith('$'))
+    ) {
+      return matchesOperator(actual, expected as SelectorOperatorValue);
+    }
+    return actual === expected;
+  });
+}
+
+function sortDocs<T extends StoreDoc>(docs: T[], sort?: Array<Record<string, 'asc' | 'desc'>>): T[] {
+  if (!sort?.length) return docs;
+  return [...docs].sort((left, right) => {
+    const leftRecord = left as unknown as Record<string, unknown>;
+    const rightRecord = right as unknown as Record<string, unknown>;
+    for (const clause of sort) {
+      const [field, direction] = Object.entries(clause)[0];
+      const compared = compareValues(leftRecord[field], rightRecord[field]);
+      if (compared !== 0) return direction === 'desc' ? -compared : compared;
+    }
+    return left._id.localeCompare(right._id);
+  });
+}
+
+async function maybeReadMigrationFlag(key: string): Promise<boolean> {
+  try {
+    if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
+      const data = await chrome.storage.local.get(key);
+      return !!data[key];
+    }
+  } catch {}
+  return false;
+}
+
+async function maybeWriteMigrationFlag(key: string): Promise<void> {
+  try {
+    if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
+      await chrome.storage.local.set({ [key]: true });
+    }
+  } catch {}
+}
+
+async function migrateLegacyPouchData(store: DexieStoreDatabase, legacyName: string): Promise<void> {
+  const migrationKey = `${actualDbName(legacyName)}_legacy_migrated`;
+  if (await maybeReadMigrationFlag(migrationKey)) return;
+  if (await store.docCount() > 0) {
+    await maybeWriteMigrationFlag(migrationKey);
+    return;
+  }
+
+  try {
+    const pouchModule = await import('pouchdb-browser');
+    const PouchDB = pouchModule.default;
+    const legacyDb = new PouchDB(legacyName);
+    const result = await legacyDb.allDocs({ include_docs: true });
+    const docs = result.rows
+      .filter((row: { doc?: StoreDoc; id: string }) => row.doc && !row.id.startsWith('_design/'))
+      .map((row: { doc: StoreDoc }) => {
+        const doc = { ...row.doc };
+        delete doc._rev;
+        return doc;
+      });
+    if (docs.length) {
+      await store.bulkDocs(docs);
+    }
+    try { await legacyDb.close(); } catch {}
+  } catch {
+    // Fresh installs won't have a legacy PouchDB database.
+  }
+
+  await maybeWriteMigrationFlag(migrationKey);
+}
+
+class DexieStoreDatabase implements StoreDatabase {
+  private readonly db: AggregaytorDexie;
+  private readonly logicalName: string;
+  private updateSeq = 0;
+
+  constructor(logicalName: string) {
+    this.logicalName = logicalName;
+    this.db = new AggregaytorDexie(actualDbName(logicalName));
+  }
+
+  async docCount(): Promise<number> {
+    return this.db.docs.count();
+  }
+
+  async get<T extends StoreDoc = StoreDoc>(id: string): Promise<T> {
+    const doc = await this.db.docs.get(id);
+    if (!doc) throw notFound(id);
+    return { ...doc } as T;
+  }
+
+  async put<T extends StoreDoc = StoreDoc>(doc: T): Promise<StorePutResult> {
+    const [result] = await this.bulkDocs([doc]);
+    return result;
+  }
+
+  async bulkDocs<T extends StoreDoc = StoreDoc>(docs: T[]): Promise<StorePutResult[]> {
+    if (!docs.length) return [];
+    const results: StorePutResult[] = [];
+    await this.db.transaction('rw', this.db.docs, async () => {
+      for (const incoming of docs) {
+        const existing = await this.db.docs.get(incoming._id);
+        const rev = nextRevision(existing?._rev);
+        if (incoming._deleted) {
+          await this.db.docs.delete(incoming._id);
+        } else {
+          await this.db.docs.put({ ...(existing || {}), ...incoming, _rev: rev });
+        }
+        this.updateSeq++;
+        results.push({ ok: true, id: incoming._id, rev });
+      }
+    });
+    return results;
+  }
+
+  async allDocs<T extends StoreDoc = StoreDoc>(opts: StoreAllDocsOptions = {}): Promise<StoreAllDocsResult<T>> {
+    const totalRows = await this.db.docs.count();
+    const includeDocs = !!opts.include_docs;
+
+    if (opts.keys?.length) {
+      const docs = await this.db.docs.bulkGet(opts.keys);
+      return {
+        total_rows: totalRows,
+        rows: opts.keys.map((key, index) => {
+          const doc = docs[index];
+          if (!doc) return { id: key, key, error: 'not_found' as const };
+          return {
+            id: key,
+            key,
+            value: { rev: doc._rev },
+            ...(includeDocs ? { doc: { ...doc } as T } : {}),
+          };
+        }),
+      };
+    }
+
+    let collection: Dexie.Collection<StoreDoc, string>;
+    if (opts.startkey !== undefined || opts.endkey !== undefined) {
+      collection = this.db.docs.where(':id').between(
+        opts.startkey ?? Dexie.minKey,
+        opts.endkey ?? Dexie.maxKey,
+        true,
+        true,
+      );
+    } else {
+      collection = this.db.docs.orderBy(':id');
+    }
+
+    let rows = await (opts.descending ? collection.reverse() : collection).toArray();
+    if (opts.limit) rows = rows.slice(0, opts.limit);
+    return {
+      total_rows: totalRows,
+      rows: rows.map((doc: StoreDoc) => ({
+        id: doc._id,
+        key: doc._id,
+        value: { rev: doc._rev },
+        ...(includeDocs ? { doc: { ...doc } as T } : {}),
+      })),
+    };
+  }
+
+  private async seedFindCandidates(selector: Record<string, unknown>): Promise<StoreDoc[]> {
+    const docType = typeof selector.docType === 'string' ? selector.docType : undefined;
+    if (docType) {
+      return this.db.docs.where('docType').equals(docType).toArray();
+    }
+    return this.db.docs.toArray();
+  }
+
+  async find<T extends StoreDoc = StoreDoc>(request: StoreFindRequest): Promise<StoreFindResult<T>> {
+    const seeded = await this.seedFindCandidates(request.selector);
+    let docs = seeded.filter(doc => selectorMatches(doc, request.selector));
+    docs = sortDocs(docs, request.sort);
+    if (request.limit) docs = docs.slice(0, request.limit);
+    return {
+      docs: docs.map(doc => projectDoc({ ...doc } as T, request.fields)),
+    };
+  }
+
+  async remove(doc: Pick<StoreDoc, '_id'>): Promise<StorePutResult> {
+    const existing = await this.db.docs.get(doc._id);
+    if (!existing) throw notFound(doc._id);
+    const rev = nextRevision(existing._rev);
+    await this.db.docs.delete(doc._id);
+    this.updateSeq++;
+    return { ok: true, id: doc._id, rev };
+  }
+
+  async compact(): Promise<void> {}
+
+  async close(): Promise<void> {
+    this.db.close();
+  }
+
+  async destroy(): Promise<void> {
+    await this.db.delete();
+  }
+
+  async info(): Promise<StoreInfo> {
+    return {
+      db_name: this.logicalName,
+      doc_count: await this.db.docs.count(),
+      update_seq: this.updateSeq,
+    };
+  }
+
+  async createIndex(_spec: unknown): Promise<void> {}
+}
+
+let _db: StoreDatabase | null = null;
+
+const DEFERRED_CLOSE_MS = 30_000;
+let _deferredCloseTimer: ReturnType<typeof setTimeout> | null = null;
+let _orphanedDb: StoreDatabase | null = null;
+
+async function ensureIndexes(_db: StoreDatabase): Promise<void> {}
+
+export async function getDB(name = 'aggregaytor'): Promise<StoreDatabase> {
   if (_db) return _db;
-  // v0.57.72: revs_limit=5 (default 1000) caps the per-doc revision history
-  // PouchDB keeps in IndexedDB. Per pouchdb/pouchdb#4372, revs_limit hides
-  // but doesn't delete revs — the actual delete happens on compact() —
-  // but a tighter limit means each future compaction has less to chew
-  // through and steady-state IDB size stays smaller. With auto_compaction
-  // already on, this halves the rev tree footprint over a multi-month
-  // database. Older databases get the benefit on the next compact().
-  _db = new PouchDB(name, { auto_compaction: true, revs_limit: 5 });
-  await ensureIndexes(_db);
+  const db = new DexieStoreDatabase(name);
+  await ensureIndexes(db);
+  await migrateLegacyPouchData(db, name);
+  _db = db;
   return _db;
 }
 
-/**
- * Release the singleton DB reference and schedule the underlying connection
- * close on a delay.
- *
- * v0.57.76 fix: the previous implementation called `_db.close()` synchronously
- * before returning, which closed the IDB connection out from under any handler
- * still mid-`db.find()` / `db.put()` — those threw "database is closed" the
- * next 100s of ms. The reminder-check alarm fires every 15s and was the most
- * common victim.
- *
- * New behaviour:
- *   1. Replace the singleton with null IMMEDIATELY so the next getDB() opens a
- *      fresh PouchDB instance. New handlers see the new connection.
- *   2. Schedule the actual `.close()` on the OLD instance for 30s later. By
- *      that time any in-flight read/write started before closeDB() was called
- *      has had time to finish; closing afterwards releases the LevelDB block
- *      cache as intended.
- *   3. If closeDB() is called again before the deferred close fires, cancel
- *      the prior timer and start fresh — we always close the most-recently-
- *      orphaned instance, never lose track.
- *   4. If destroyDB() runs in the meantime (legitimate reason to close
- *      synchronously), it cancels any pending deferred close.
- *
- * The 30s window matches the longest realistic handler duration. Operations
- * that take longer are already pathological (a heavy getThreadSummaries
- * scan); bumping to 60s costs little memory and prevents the regression.
- */
-const DEFERRED_CLOSE_MS = 30_000;
-let _deferredCloseTimer: ReturnType<typeof setTimeout> | null = null;
-let _orphanedDb: PouchDB.Database | null = null;
-
 export async function closeDB(): Promise<void> {
   if (!_db) return;
-  // Cancel any prior deferred close. We only ever defer the latest orphan;
-  // earlier orphans are picked up by the new timer on next fire.
   if (_deferredCloseTimer) {
     clearTimeout(_deferredCloseTimer);
     _deferredCloseTimer = null;
-    // If we have an OLDER orphan still pending close, close it now —
-    // otherwise it stays alive forever. (The new orphan replaces it as
-    // the deferred-close target.)
     if (_orphanedDb) {
       try { await _orphanedDb.close(); } catch {}
       _orphanedDb = null;
@@ -134,17 +424,7 @@ export async function closeDB(): Promise<void> {
   }, DEFERRED_CLOSE_MS);
 }
 
-/**
- * Permanently destroy the database and all its data, then clear the singleton.
- *
- * WARNING: This deletes everything in IndexedDB for this database name.
- * Used for "reset all data" in settings and in test teardown.
- *
- * v0.57.76: also flush any deferred-close orphan from closeDB() — destroying
- * the active db while an orphan still has the IDB connection open would
- * conflict (IDB blocks the destroy until the other connection closes).
- */
-export async function destroyDB(): Promise<void> {
+export async function destroyDB(name = 'aggregaytor'): Promise<void> {
   if (_deferredCloseTimer) {
     clearTimeout(_deferredCloseTimer);
     _deferredCloseTimer = null;
@@ -156,23 +436,16 @@ export async function destroyDB(): Promise<void> {
   if (_db) {
     await _db.destroy();
     _db = null;
+    return;
   }
+  await new AggregaytorDexie(actualDbName(name)).delete();
 }
 
-/**
- * Create a standalone DB instance with a custom adapter. Does NOT use or
- * affect the module singleton. Primarily used in tests with the in-memory
- * adapter so each test gets an isolated database.
- *
- * @param name  Database name.
- * @param opts  PouchDB configuration (e.g. `{ adapter: 'memory' }`).
- * @returns     A fresh PouchDB instance with all indexes created.
- */
 export async function createDB(
   name: string,
-  opts?: PouchDB.Configuration.DatabaseConfiguration,
-): Promise<PouchDB.Database> {
-  const db = new PouchDB(name, { auto_compaction: true, ...opts });
+  _opts?: Record<string, unknown>,
+): Promise<StoreDatabase> {
+  const db = new DexieStoreDatabase(name);
   await ensureIndexes(db);
   return db;
 }
