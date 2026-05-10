@@ -1,0 +1,20 @@
+{
+  "name": "@aggregaytor/debug-server",
+  "version": "0.19.1",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "npx tsx src/server.ts",
+    "build": "echo 'no build needed'"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "@types/ws": "^8.5.0"
+  }
+}

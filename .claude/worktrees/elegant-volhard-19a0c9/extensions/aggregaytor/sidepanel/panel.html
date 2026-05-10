@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aggregaytor</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body class="view-inbox">
+  <div class="header">
+    <button class="header-back" id="back-btn" title="Return to the inbox thread list">&larr; Back</button>
+    <h1 id="header-title"><span class="version-tag">v0.57</span></h1>
+    <div id="header-actions" class="header-actions"></div>
+    <span id="total-unread" class="unread-badge" style="display:none"></span>
+    <button class="header-settings" id="btn-show-floating" data-icon="⚡" data-label="Quick" title="Show Quick Actions panel on the platform page — block, notes, rate, and send phrases directly on Sniffies/Grindr">⚡</button>
+    <button class="header-settings" id="btn-popout" data-icon="⧉" data-label="Popout" title="Pop out this panel into its own window. Click again in the popup to close it and return to the side panel.">⧉</button>
+    <button class="header-settings" id="open-tasks" data-icon="☑" data-label="Tasks" title="Open task list — create and manage to-do items linked to contacts. Syncs with Google Tasks. (Shift+T)">☑</button>
+    <button class="header-settings" id="btn-camera" data-icon="📷" data-label="Photo" title="Take a photo to add to your picture library">📷</button>
+    <button class="header-settings" id="btn-gallery" data-icon="🖼" data-label="Gallery" title="Open photo gallery — view all synced profile pictures and your own uploads">🖼</button>
+    <button class="header-settings" id="sync-pics-header" data-icon="🔄" data-label="Sync" title="Sync profile pictures — scrape avatars from all open platform tabs and save to local cache">🔄</button>
+    <button class="header-settings" id="open-ai-query" data-icon="🔎" data-label="Ask AI" title="Ask AI — natural language search over your contacts using profile context, preferences, and conversation history">🔎</button>
+    <button class="header-settings" id="open-settings" data-icon="⚙" data-label="Settings" title="Open settings — AI providers, personality, map filters, export/import, text expansions, and more">⚙</button>
+  </div>
+  <!-- Global search -->
+  <div class="search-bar" id="search-bar" style="display:none">
+    <input type="text" id="search-input" class="search-input" placeholder="Search all messages...">
+    <button class="search-close" id="search-close">✕</button>
+  </div>
+  <div id="search-results" class="search-results" style="display:none"></div>
+
+  <!-- AI query bar -->
+  <div class="ai-query-bar" id="ai-query-bar" style="display:none">
+    <div class="ai-query-input-row">
+      <input type="text" id="ai-query-input" class="ai-query-input" maxlength="500"
+             placeholder='e.g. "10 tops nearby I haven&#39;t talked to yet"'
+             aria-label="Natural language query over contacts">
+      <button class="ai-query-go" id="ai-query-go" title="Run query (Enter)">Go</button>
+      <button class="ai-query-close" id="ai-query-close" title="Close (Esc)" aria-label="Close AI query">✕</button>
+    </div>
+    <div id="ai-query-status" class="ai-query-status" style="display:none"></div>
+  </div>
+  <div id="ai-query-results" class="ai-query-results" style="display:none"></div>
+
+  <!-- Deprecation / upgrade advisory banner -->
+  <div id="advisory-banner" class="advisory-banner" style="display:none"></div>
+
+  <!-- Global controls bar -->
+  <div class="global-controls">
+    <div class="platform-filters">
+      <span class="platform-chip active" data-platform="all" title="Show all platforms. Right-click to open all sites.">All</span>
+      <span class="platform-chip" data-platform="sniffies" title="Toggle Sniffies messages. Click multiple chips to combine. Right-click to open Sniffies.">Sniffies</span>
+      <span class="platform-chip" data-platform="grindr" title="Toggle Grindr messages. Right-click to open Grindr.">Grindr</span>
+      <span class="platform-chip" data-platform="doublelist" title="Toggle DoubleList messages. Right-click to open DoubleList.">DList</span>
+      <span class="platform-chip" data-platform="adam4adam" title="Toggle Adam4Adam messages. Right-click to open A4A.">A4A</span>
+      <span class="platform-chip" data-platform="gmail" title="Toggle Gmail messages. Right-click to open Gmail.">Gmail</span>
+      <span class="platform-chip" data-platform="yahoo" title="Toggle Yahoo Mail messages. Right-click to open Yahoo Mail.">Yahoo</span>
+      <span class="platform-chip archive-chip" data-platform="archived" title="Show archived/hidden conversations">📦</span>
+    </div>
+    <div class="controls-row">
+      <div class="sort-control">
+        <label class="sort-label">Sort:</label>
+        <select id="sort-by" class="sort-select">
+          <option value="recent">Recent</option>
+          <option value="distance">Distance</option>
+          <option value="interest">Most interested</option>
+          <option value="commitment">Likely to commit</option>
+          <option value="unread">Unread first</option>
+          <option value="name">Name</option>
+        </select>
+      </div>
+      <div class="filter-toggle-inline" id="filter-toggle" title="Toggle advanced filters — body type, position, distance, unread, bookmarked, and more">⫸ <span id="filter-count"></span></div>
+      <label class="fav-filter" title="Show only favorited/bookmarked contacts">
+        <input type="checkbox" id="filter-favorites"> ⭐
+      </label>
+      <label class="compact-toggle" title="Toggle compact view — smaller thread items, less whitespace">
+        <input type="checkbox" id="compact-mode"> ▤
+      </label>
+      <div class="global-ar">
+        <label class="global-ar-toggle" id="global-ar-toggle" title="Auto-respond all">
+          <span class="global-ar-label">AR</span>
+          <input type="checkbox" id="global-ar-checkbox">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <div class="global-ar" style="margin-left:6px">
+        <label class="global-ar-toggle" id="finder-toggle" title="Friend Finder — find and intro yourself to nearby profiles passing your filters that you've never chatted with">
+          <span class="global-ar-label">FF</span>
+          <input type="checkbox" id="finder-checkbox">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- Friend Finder modal -->
+  <div id="ff-overlay" class="settings-overlay" style="display:none">
+    <div class="settings-modal" style="max-width:560px">
+      <div class="settings-header">
+        <h2>Friend Finder</h2>
+        <button class="settings-close" id="ff-close">×</button>
+      </div>
+      <div class="settings-body">
+        <div id="ff-step-filters">
+          <div class="settings-section">
+            <h3 class="settings-heading">Intro Filters</h3>
+            <div class="settings-info">By default the finder uses your map-filter settings (position, exclude/include keywords, etc). Toggle these on top of those:</div>
+            <label class="settings-checkbox-label"><input type="checkbox" id="ff-inherit-map" checked> Inherit map filters (position, text exclude/include, etc)</label>
+            <label class="settings-checkbox-label"><input type="checkbox" id="ff-never-chatted" checked> Have never chatted before</label>
+            <label class="settings-checkbox-label"><input type="checkbox" id="ff-zero-deletes" checked> Neither party has ever deleted the chats</label>
+            <label class="settings-checkbox-label"><input type="checkbox" id="ff-currently-active" checked> Is currently active</label>
+            <label class="settings-checkbox-label"><input type="checkbox" id="ff-respect-prefs" checked> Matches my saved preferences (ML feedback model)</label>
+            <label class="settings-checkbox-label" style="border-top:1px solid rgba(251,191,36,0.2);margin-top:6px;padding-top:6px" title="Skip the approve step entirely. After Find Candidates the run starts immediately with every result included. No deselection, no permanent-ignore additions. Use only when you trust your filter set."><input type="checkbox" id="ff-auto-approve"> <span style="color:#fbbf24">⚡ Auto-approve — skip review and send to ALL matches</span></label>
+            <div style="display:flex;gap:8px;margin-top:6px">
+              <label style="flex:1">
+                <span style="display:block;font-size:10px;color:#9ca3af;margin-bottom:2px">Active window (min)</span>
+                <input type="number" id="ff-active-min" value="30" min="1" max="360" class="settings-input" style="width:100%">
+              </label>
+              <label style="flex:1">
+                <span style="display:block;font-size:10px;color:#9ca3af;margin-bottom:2px">Max distance (mi, 0 = any)</span>
+                <input type="number" id="ff-max-distance" value="0" min="0" max="500" class="settings-input" style="width:100%">
+              </label>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:6px">
+              <label style="flex:1">
+                <span style="display:block;font-size:10px;color:#9ca3af;margin-bottom:2px">Max candidates</span>
+                <input type="number" id="ff-max-candidates" value="50" min="1" max="500" class="settings-input" style="width:100%">
+              </label>
+              <label style="flex:1">
+                <span style="display:block;font-size:10px;color:#9ca3af;margin-bottom:2px">Pace (sec between sends)</span>
+                <input type="number" id="ff-pace-sec" value="90" min="30" max="3600" class="settings-input" style="width:100%">
+              </label>
+            </div>
+          </div>
+          <div class="settings-section">
+            <button class="settings-btn" id="ff-build" style="width:100%">Find Candidates →</button>
+            <div id="ff-build-status" class="settings-status"></div>
+          </div>
+        </div>
+
+        <div id="ff-step-approve" style="display:none">
+          <div class="settings-section">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+              <h3 class="settings-heading" style="margin:0">Candidates (<span id="ff-selected-count">0</span> selected of <span id="ff-total-count">0</span>)</h3>
+              <div>
+                <button class="settings-btn" id="ff-select-all" style="font-size:10px;padding:2px 8px">All</button>
+                <button class="settings-btn" id="ff-select-none" style="font-size:10px;padding:2px 8px">None</button>
+              </div>
+            </div>
+            <div class="settings-info">Uncheck anyone you don't want to message. Unchecked profiles are <strong>permanently ignored</strong> in future finder runs.</div>
+            <div id="ff-candidates" style="max-height:340px;overflow-y:auto;border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:4px"></div>
+          </div>
+          <div class="settings-section" style="display:flex;gap:8px">
+            <button class="settings-btn" id="ff-back" style="flex:1">← Back</button>
+            <button class="settings-btn" id="ff-approve" style="flex:2;border-color:rgba(34,197,94,0.5);color:#22c55e">Approve & Start</button>
+          </div>
+        </div>
+
+        <div id="ff-step-running" style="display:none">
+          <div class="settings-section">
+            <h3 class="settings-heading">Sending Intros</h3>
+            <div id="ff-progress-bar" style="height:8px;background:rgba(255,255,255,0.05);border-radius:4px;overflow:hidden;margin:6px 0">
+              <div id="ff-progress-fill" style="height:100%;width:0%;background:linear-gradient(90deg,#3b82f6,#22c55e);transition:width 0.3s"></div>
+            </div>
+            <div id="ff-progress-stats" style="font-size:11px;color:#9ca3af;margin-bottom:4px">…</div>
+            <div id="ff-eta" style="font-size:10px;color:#6b7280;font-style:italic">…</div>
+          </div>
+          <div class="settings-section">
+            <h3 class="settings-heading">Remaining Queue</h3>
+            <div id="ff-queue" style="max-height:280px;overflow-y:auto;border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:4px"></div>
+          </div>
+          <div class="settings-section">
+            <button class="settings-btn" id="ff-stop" style="width:100%;border-color:rgba(239,68,68,0.5);color:#f87171">Stop Now</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Session startup dialog -->
+  <div id="session-dialog" class="session-dialog" style="display:none">
+    <div class="session-header">Start Auto-Respond Session</div>
+    <div class="session-field">
+      <label>Looking by when?</label>
+      <select id="session-deadline">
+        <option value="1">Next hour</option>
+        <option value="2" selected>Next 2 hours</option>
+        <option value="4">Next 4 hours</option>
+        <option value="0">Tonight</option>
+        <option value="-1">No deadline</option>
+      </select>
+    </div>
+    <div class="session-field">
+      <label>Available slots</label>
+      <div id="session-slots" class="session-slots">Checking calendar...</div>
+    </div>
+    <div class="session-field">
+      <label>What are you looking for?</label>
+      <div id="session-summary" class="session-summary">Generating summary...</div>
+    </div>
+    <div class="session-actions">
+      <button class="session-btn confirm" id="session-confirm">Start Session</button>
+      <button class="session-btn cancel" id="session-cancel">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Advanced filters -->
+  <div class="filter-bar" id="filter-bar">
+    <div class="filter-panel" id="filter-panel" style="display:none">
+      <div class="filter-row">
+        <label>Search</label>
+        <input type="text" id="filter-search" placeholder="Name or text..." class="filter-input">
+      </div>
+      <div class="filter-row">
+        <label>Body</label>
+        <select id="filter-body" class="filter-select" multiple size="3">
+          <option value="slim">Slim</option><option value="athletic">Athletic</option>
+          <option value="average">Average</option><option value="muscular">Muscular</option>
+          <option value="chubby">Chubby</option><option value="stocky">Stocky</option>
+        </select>
+      </div>
+      <div class="filter-row">
+        <label>Position</label>
+        <select id="filter-position" class="filter-select" multiple size="3">
+          <option value="top">Top</option><option value="bottom">Bottom</option>
+          <option value="vers">Vers</option><option value="vers top">Vers Top</option>
+          <option value="vers bottom">Vers Bottom</option><option value="side">Side</option>
+        </select>
+      </div>
+      <div class="filter-row">
+        <label>Deletes</label>
+        <select id="filter-deletes" class="filter-select">
+          <option value="0">Any</option><option value="1">1+</option>
+          <option value="3">3+</option><option value="5">5+</option>
+        </select>
+      </div>
+      <div class="filter-row">
+        <label>Distance</label>
+        <select id="filter-distance" class="filter-select">
+          <option value="0">Any</option><option value="1">1 mi</option>
+          <option value="5">5 mi</option><option value="10">10 mi</option>
+          <option value="25">25 mi</option><option value="50">50 mi</option>
+        </select>
+      </div>
+      <div class="filter-row filter-toggles">
+        <label><input type="checkbox" id="filter-unread"> Unread only</label>
+        <label><input type="checkbox" id="filter-newchats"> New chats</label>
+        <label><input type="checkbox" id="filter-responded"> Has responded</label>
+        <label><input type="checkbox" id="filter-recent"> Active 24h</label>
+        <label><input type="checkbox" id="filter-bookmarked"> Bookmarked</label>
+      </div>
+      <button class="filter-clear" id="filter-clear">Clear filters</button>
+    </div>
+  </div>
+
+  <!-- Draft review bar -->
+  <div id="draft-bar" class="draft-bar" style="display:none">
+    <span>Drafts pending review</span>
+    <span id="draft-count" class="unread-badge">0</span>
+  </div>
+  <div id="draft-panel" class="draft-panel" style="display:none"></div>
+
+  <!-- Settings panel with tabs -->
+  <div id="settings-panel" class="settings-panel" style="display:none">
+    <div class="settings-tabs">
+      <span class="settings-tab active" data-tab="tab-ai">AI</span>
+      <span class="settings-tab" data-tab="tab-personality">Style</span>
+      <span class="settings-tab" data-tab="tab-rules">Rules</span>
+      <span class="settings-tab" data-tab="tab-pictures">Pics</span>
+      <span class="settings-tab" data-tab="tab-map">Map</span>
+      <span class="settings-tab" data-tab="tab-sync">Sync</span>
+      <span class="settings-tab" data-tab="tab-data">Data</span>
+      <span class="settings-tab" data-tab="tab-memory">Memory</span>
+    </div>
+
+    <!-- AI tab -->
+    <div class="settings-tab-content active" id="tab-ai">
+      <div class="settings-section">
+        <h3 class="settings-heading">Model Auto-Updater</h3>
+        <div class="settings-info">Periodically checks each configured provider for newer model versions in the same family/tier as your current pick (e.g. <code>gemini-2.5-flash-lite</code> → <code>gemini-3.1-flash-lite</code>). Runs daily; manual check available below.</div>
+        <label class="settings-checkbox-label" title="When checked, newer-model suggestions are applied automatically. When unchecked, suggestions appear here for you to apply or dismiss."><input type="checkbox" id="sp-mu-auto-apply"> Auto-apply newer models without asking</label>
+        <button class="settings-btn" id="sp-mu-check" style="margin-top:4px">Check now</button>
+        <div id="sp-mu-status" style="margin-top:6px;padding:6px 8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;font-size:10px;color:#9ca3af;line-height:1.5">checking…</div>
+        <div id="sp-mu-suggestions" style="margin-top:6px"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Provider</h3>
+        <select id="sp-provider" class="settings-select">
+          <option value="local">Local (no API key)</option>
+          <option value="anthropic">Claude (Anthropic) — 50 RPM</option>
+          <option value="gemini">Gemini (Google) — 15 RPM free</option>
+          <option value="openai">OpenAI — 500 RPM</option>
+          <option value="groq">Groq — 30 RPM free</option>
+          <option value="perplexity">Perplexity — 50 RPM</option>
+          <option value="mistral">Mistral — 2 RPM free</option>
+          <option value="copilot">GitHub Copilot</option>
+        </select>
+        <input type="password" id="sp-apikey" class="settings-input" placeholder="API key">
+        <input type="text" id="sp-model" class="settings-input" placeholder="Model (leave blank for auto)">
+        <button class="settings-btn" id="sp-save-provider">Save Provider</button>
+        <div id="sp-provider-status" class="settings-status"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Rate Limiting</h3>
+        <label class="settings-label"><input type="checkbox" id="sp-llm-enabled" checked> Enable LLM calls</label>
+        <label class="settings-label">Max requests/min: <input type="number" id="sp-rpm" value="10" min="1" max="60" class="settings-num"></label>
+        <label class="settings-label"><input type="checkbox" id="sp-feat-ar" checked> Auto-respond</label>
+        <label class="settings-label"><input type="checkbox" id="sp-feat-suggest" checked> Suggestions</label>
+        <label class="settings-label"><input type="checkbox" id="sp-feat-dossier" checked> Dossier</label>
+        <button class="settings-btn" id="sp-save-rate">Save Rate Settings</button>
+        <div id="sp-queue-status" class="settings-info"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Preference Learning</h3>
+        <div class="settings-info">The ML model learns your type from how you interact with profiles. It uses logistic regression trained on body type, position, age, ethnicity, and other features.</div>
+        <details class="settings-details">
+          <summary style="cursor:pointer;color:#93c5fd;font-size:11px;margin:4px 0">How to train the model ▸</summary>
+          <ol style="font-size:10px;color:#9ca3af;margin:4px 0 8px 16px;line-height:1.6">
+            <li>Open Grindr in a tab (for block/hidden list import)</li>
+            <li>Click <b>Import Grindr Lists</b> — imports all blocked/hidden profiles as negative signals</li>
+            <li>Click <b>Train Now</b> — scans all contacts for pins, favorites, blocks, ratings, and bookmarks</li>
+            <li>Use 👍/👎 buttons on profiles and ⭐ star ratings for ongoing training</li>
+            <li>Click <b>Full Retrain</b> to rebuild the model from scratch with all data</li>
+          </ol>
+          <div style="font-size:10px;color:#6b7280;margin-bottom:6px">
+            <b>Positive signals:</b> Sniffies pins 📌, Grindr favorites ⭐, bookmarks, ratings ≥4<br>
+            <b>Negative signals:</b> blocks, hides, ratings ≤2<br>
+            <b>Features learned:</b> body type, position, age, ethnicity, height, photo presence, profile text keywords
+          </div>
+        </details>
+        <label class="settings-checkbox-label">
+          <input type="checkbox" id="sp-auto-train" checked> Auto-train from platform signals
+        </label>
+        <div class="settings-row" style="margin-top:4px">
+          <button class="settings-btn" id="sp-train-now" title="Scan all contacts for pins, favorites, blocks, and ratings — train the model on those signals">Train Now</button>
+          <button class="settings-btn" id="sp-train-grindr" title="Import Grindr's blocked/hidden list as negative training data (fetches from Grindr API + stored contact metadata)">Import Grindr Lists</button>
+          <button class="settings-btn" id="sp-train-sniffies" title="Import Sniffies blocked (from middle-clicks) and pinned contacts as training signals">Import Sniffies Lists</button>
+          <button class="settings-btn" id="sp-enrich-blocked" title="Enrich blocked/hidden Grindr contacts that are currently empty shells. Fetches full profile data (body type, position, age, ethnicity) from /api/v4/profiles/{id}. Resumes automatically after interruptions.">Enrich Grindr</button>
+          <button class="settings-btn" id="sp-enrich-sniffies" title="Enrich blocked AND pinned Sniffies contacts that are missing attributes (position, age, ethnicity, bio). Fetches full profile data from POST /api/user/full. Resumes automatically after interruptions.">Enrich Sniffies</button>
+          <button class="settings-btn" id="sp-enrich-stop" title="Stop the background enrichment pass" style="display:none;border-color:rgba(239,68,68,0.3);color:#f87171">Stop Enrich</button>
+          <button class="settings-btn" id="sp-retrain-model" title="Retrain the entire model from scratch using all recorded feedback">Full Retrain</button>
+          <button class="settings-btn" id="sp-diagnose-training" title="Audit training data quality — shows how many samples have real profile attributes (body type, position, age, etc.) vs. empty shells that taught the model nothing">Diagnose Data</button>
+        </div>
+        <div id="sp-enrich-progress" class="settings-info" style="margin-top:4px;font-size:11px;display:none"></div>
+        <div id="sp-train-status" class="settings-info" style="margin-top:4px"></div>
+        <div id="sp-model-stats" class="settings-info" style="margin-top:4px;font-size:10px;color:#6b7280"></div>
+      </div>
+    </div>
+
+    <!-- Personality tab -->
+    <div class="settings-tab-content" id="tab-personality">
+      <div class="settings-section">
+        <h3 class="settings-heading">Personality</h3>
+        <select id="sp-personality" class="settings-select"></select>
+        <div id="sp-preset-desc" class="settings-info"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Custom Instructions</h3>
+        <textarea id="sp-custom-instructions" class="settings-textarea" rows="4" placeholder="e.g., Always be closing. Never use emojis. Be direct and clear."></textarea>
+        <button class="settings-btn" id="sp-save-personality">Save Personality</button>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Writing Style</h3>
+        <div id="sp-style-guide" class="settings-info" style="max-height:60px;overflow-y:auto">Not yet derived.</div>
+        <button class="settings-btn" id="sp-derive-style">Analyze my writing style</button>
+      </div>
+    </div>
+
+    <!-- Block Rules tab -->
+    <div class="settings-tab-content" id="tab-rules">
+      <div class="settings-section">
+        <h3 class="settings-heading">Block Rules</h3>
+        <div class="settings-info">Auto-archive or hide profiles based on patterns.</div>
+        <div id="sp-rule-list"></div>
+        <div style="margin-top:6px">
+          <select id="sp-rule-type" class="settings-select" style="width:auto;display:inline-block">
+            <option value="ignored_count">Ignored count</option>
+            <option value="no_response_days">No response (days)</option>
+            <option value="deleted_chat">Deleted chat count</option>
+            <option value="keyword">Keyword match</option>
+          </select>
+          <input type="number" id="sp-rule-threshold" value="3" class="settings-num">
+          <input type="text" id="sp-rule-keywords" class="settings-input" placeholder="Keywords (comma-sep)" style="display:none">
+          <select id="sp-rule-action" class="settings-select" style="width:auto;display:inline-block">
+            <option value="archive">Archive</option>
+            <option value="hide">Hide</option>
+            <option value="block">Block</option>
+          </select>
+          <button class="settings-btn" id="sp-add-rule">Add Rule</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pictures tab -->
+    <div class="settings-tab-content" id="tab-pictures">
+      <div class="settings-section">
+        <h3 class="settings-heading">Picture Library</h3>
+        <div class="settings-info">Upload pictures to send in conversations.</div>
+        <div style="display:flex;gap:6px;margin:6px 0">
+          <select id="sp-pic-tag" class="settings-select" style="width:auto;flex:0 0 70px">
+            <option value="face">Face</option><option value="body">Body</option>
+            <option value="explicit">Explicit</option><option value="other">Other</option>
+          </select>
+          <input type="text" id="sp-pic-label" class="settings-input" placeholder="Label..." style="flex:1;margin:0">
+          <label class="settings-btn" style="cursor:pointer;margin:0">Upload<input type="file" id="sp-pic-upload" accept="image/*" style="display:none"></label>
+        </div>
+        <div id="sp-pic-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px"></div>
+      </div>
+    </div>
+
+    <!-- Map tab (Sniffies map marker filtering) -->
+    <div class="settings-tab-content" id="tab-map">
+      <div class="settings-section">
+        <h3 class="settings-heading">Hide by Position</h3>
+        <div class="settings-info">Hide map markers by position. Each option catches ALL variations (e.g. "Top" hides Top, Passive Top, Dom Top Breeder). Middle-click = quick-hide. Shift+click = toggle.</div>
+        <div class="filter-grid">
+          <label class="settings-checkbox-label" title="Hides: bottom, power bottom, submissive bottom"><input type="checkbox" data-map-filter="hideBottom"> Bottom (all)</label>
+          <label class="settings-checkbox-label" title="Hides: vers bottom, versatile bottom"><input type="checkbox" data-map-filter="hideVersBottom"> Vers Bottom</label>
+          <label class="settings-checkbox-label" title="Hides: vers, versatile (NOT vers top or vers bottom)"><input type="checkbox" data-map-filter="hideVers"> Vers (pure)</label>
+          <label class="settings-checkbox-label" title="Hides: vers top, versatile top"><input type="checkbox" data-map-filter="hideVersTop"> Vers Top</label>
+          <label class="settings-checkbox-label" title="Hides: top, passive top, dom top, dom top breeder"><input type="checkbox" data-map-filter="hideTop"> Top (all)</label>
+          <label class="settings-checkbox-label" title="Hides: side"><input type="checkbox" data-map-filter="hideSide"> Side</label>
+          <label class="settings-checkbox-label" title="Hides profiles with no position set"><input type="checkbox" data-map-filter="hideUnspecified"> Unspecified</label>
+        </div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Highlight by Position</h3>
+        <div class="settings-info">Blue outline on matching profiles.</div>
+        <div class="filter-grid">
+          <label class="settings-checkbox-label" title="Highlights: bottom, power bottom, submissive bottom"><input type="checkbox" data-map-filter="highlightBottom"> Bottom (all)</label>
+          <label class="settings-checkbox-label" title="Highlights: vers bottom, versatile bottom"><input type="checkbox" data-map-filter="highlightVersBottom"> Vers Bottom</label>
+          <label class="settings-checkbox-label" title="Highlights: vers, versatile (NOT vers top or vers bottom)"><input type="checkbox" data-map-filter="highlightVers"> Vers (pure)</label>
+          <label class="settings-checkbox-label" title="Highlights: vers top, versatile top"><input type="checkbox" data-map-filter="highlightVersTop"> Vers Top</label>
+          <label class="settings-checkbox-label" title="Highlights: top, passive top, dom top, dom top breeder"><input type="checkbox" data-map-filter="highlightTop"> Top (all)</label>
+        </div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Profile Text Filters</h3>
+        <label class="settings-checkbox-label">
+          <input type="checkbox" data-map-filter="excludeEnabled"> Enable exclude filter
+        </label>
+        <textarea id="sp-map-exclude-terms" class="settings-textarea" rows="2" placeholder="Exclude keywords (one per line)"></textarea>
+        <label class="settings-checkbox-label" style="margin-top:6px">
+          <input type="checkbox" data-map-filter="includeEnabled"> Enable include highlight
+        </label>
+        <textarea id="sp-map-include-terms" class="settings-textarea" rows="2" placeholder="Highlight keywords (one per line)"></textarea>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Chat Age Badges</h3>
+        <label class="settings-checkbox-label">
+          <input type="checkbox" data-map-filter="showChatAgeBadges"> Show last chat time on markers
+        </label>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Activity</h3>
+        <div class="settings-info">Hide profiles whose last platform activity is older than the threshold. Profiles with no last-active signal are left visible — the partials API backfills timestamps as the map loads, so unknowns become known on the next pass.</div>
+        <label class="settings-checkbox-label" title="Hide profiles whose last-active timestamp is more than 2 hours ago. Useful for trackpad-only zooming where dormant markers clutter the view.">
+          <input type="checkbox" data-map-filter="hideInactiveOver2h"> Hide if not online in last 2 hours
+        </label>
+      </div>
+      <div class="settings-section">
+        <button class="settings-btn" id="sp-map-save">Save Sniffies Filters</button>
+        <button class="settings-btn" id="sp-map-undo-hide" style="margin-top:4px">Undo Last Hide</button>
+        <button class="settings-btn" id="sp-map-clear-blocked" style="margin-top:4px;border-color:rgba(239,68,68,0.3);color:#f87171">Clear All Hidden</button>
+        <button class="settings-btn" id="sp-restore-blocked-archived" style="margin-top:4px" title="Up through v0.57.32, every map-block also archived the inbox thread. This restores those archived-by-block threads to the inbox without un-blocking the profile.">Restore Inbox Threads Hidden by Old Block Behavior</button>
+        <button class="settings-btn" id="sp-refetch-sniffies" style="margin-top:4px" title="Force a fresh fetch of the Sniffies chat-data endpoint in every open Sniffies tab. Useful as a sanity check when the inbox seems stale — the response count tells you whether the adapter is still capturing.">Refetch Sniffies Inbox (Diagnose Stale)</button>
+        <button class="settings-btn" id="sp-free-memory" style="margin-top:4px;border-color:rgba(251,191,36,0.3);color:#fbbf24" title="Clear every in-memory cache and bookkeeping set in the service worker. Use this if the extension feels sluggish or if Chrome's task manager shows the SW process holding multiple GB. The next request will be slower while caches re-populate, but memory drops immediately.">Free SW Memory (when sluggish)</button>
+        <button class="settings-btn" id="sp-compact-db" style="margin-top:4px;border-color:rgba(251,191,36,0.5);color:#fbbf24" title="Compact PouchDB / IndexedDB — drops every non-current revision of every document and rebuilds the index. Use this when GET_THREAD_SUMMARIES keeps timing out even after Free SW Memory + Retry. Typically reclaims 50-90% of disk space and dramatically speeds up subsequent scans. Takes 5-30s on heavy installs.">Compact Database (fix slow scans)</button>
+        <button class="settings-btn" id="sp-rebuild-db" style="margin-top:4px;border-color:rgba(239,68,68,0.5);color:#f87171" title="Rebuild Database from scratch — exports all current docs to a backup JSON file in your Downloads folder, destroys the IndexedDB, recreates it fresh, then re-imports everything. Use this when Compact Database itself times out (PouchDB's compact() walks the rev tree which can take hours on multi-GB DBs; rebuild only reads CURRENT revs and is typically 30-60s). Your data is safe — the backup JSON downloads BEFORE the destroy step.">Rebuild Database (when Compact won't finish)</button>
+        <div id="sp-automaint" style="margin-top:8px;padding:6px 8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:6px;font-size:10px;color:#9ca3af;line-height:1.5">
+          <div style="font-weight:600;color:#93c5fd;margin-bottom:2px">Auto-Maintenance</div>
+          <div id="sp-automaint-text">checking…</div>
+        </div>
+        <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08)">
+          <div style="font-size:11px;color:#9ca3af;margin-bottom:4px">Error Log (<span id="sp-error-count">0</span> entries)</div>
+          <button class="settings-btn" id="sp-export-errors" title="Save the rolling error log as a JSON file in your Downloads folder. Includes errors from the service worker, side panel, and every connected content script (Sniffies, Grindr, A4A, etc).">Export Errors → Downloads</button>
+          <button class="settings-btn" id="sp-clear-errors" style="margin-top:4px;border-color:rgba(239,68,68,0.3);color:#f87171">Clear Error Log</button>
+          <div id="sp-error-status" class="settings-status"></div>
+        </div>
+        <div id="sp-map-status" class="settings-status"></div>
+      </div>
+      <div class="settings-divider"></div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Grindr Cascade Filters</h3>
+        <div class="settings-info">Filter profiles in the Grindr grid. Each filter can be Include (show only matching) or Exclude (hide matching).</div>
+        <label class="settings-checkbox-label"><input type="checkbox" id="gf-enabled"> Enable Grindr filters</label>
+        <label class="settings-checkbox-label" title="Automatically call Grindr's hide API for profiles matching your filters. They won't come back on refresh."><input type="checkbox" id="gf-auto-block"> Auto-block matching profiles (permanent hide via API)</label>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Ethnicity</h3>
+        <select id="gf-ethnicity-mode" class="settings-select" style="margin-bottom:4px">
+          <option value="off">Off</option>
+          <option value="include">Include only</option>
+          <option value="exclude">Exclude</option>
+        </select>
+        <div class="filter-grid" id="gf-ethnicity-checkboxes">
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="2"> Asian</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="3"> Black</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="4"> Latino</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="5"> Middle Eastern</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="6"> Mixed</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="7"> White</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="9"> South Asian</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-eth="8"> Other</label>
+        </div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Gender</h3>
+        <select id="gf-gender-mode" class="settings-select" style="margin-bottom:4px">
+          <option value="off">Off</option>
+          <option value="include">Include only</option>
+          <option value="exclude">Exclude</option>
+        </select>
+        <div class="filter-grid" id="gf-gender-checkboxes">
+          <label class="settings-checkbox-label"><input type="checkbox" data-gender="1"> Cis Man</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-gender="2"> Cis Woman</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-gender="3"> Trans Man</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-gender="4"> Trans Woman</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-gender="5"> Non-Binary</label>
+          <label class="settings-checkbox-label"><input type="checkbox" data-gender="6"> Non-Conforming</label>
+        </div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Chat History</h3>
+        <select id="gf-chatted-mode" class="settings-select">
+          <option value="off">Off</option>
+          <option value="include">Show only never-chatted</option>
+          <option value="exclude">Hide never-chatted</option>
+        </select>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Profile Keyword Filter</h3>
+        <select id="gf-keyword-mode" class="settings-select" style="margin-bottom:4px">
+          <option value="off">Off</option>
+          <option value="include">Include only (show matching)</option>
+          <option value="exclude">Exclude (hide matching)</option>
+        </select>
+        <textarea id="gf-keywords" class="settings-textarea" rows="2" placeholder="Keywords (one per line)"></textarea>
+      </div>
+      <div class="settings-section">
+        <button class="settings-btn" id="sp-grindr-filter-save">Save Grindr Filters</button>
+        <div id="sp-grindr-filter-status" class="settings-status"></div>
+      </div>
+    </div>
+
+    <!-- Sync tab -->
+    <div class="settings-tab-content" id="tab-sync">
+      <div class="settings-section">
+        <h3 class="settings-heading">Google Account</h3>
+        <div class="settings-info">Connect your Google account to enable Calendar, Tasks, Drive backup, and Gmail integration.</div>
+        <button class="settings-btn" id="sp-google-connect">Connect Google Account</button>
+        <div id="sp-google-status" class="settings-info" style="margin-top:4px"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Google Drive Backup</h3>
+        <div class="settings-info">Back up all Aggregaytor data to Google Drive.</div>
+        <div class="settings-row">
+          <button class="settings-btn" id="sp-drive-backup">Backup to Drive</button>
+          <button class="settings-btn" id="sp-drive-restore">Restore from Drive</button>
+        </div>
+        <div id="sp-drive-status" class="settings-info" style="margin-top:4px"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Sync</h3>
+        <button class="settings-btn" id="sp-sync-pics">Sync Profile Pictures</button>
+        <div id="sp-sync-status" class="settings-info" style="margin-top:4px"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Google Calendar</h3>
+        <div class="settings-info">Set availability preferences for the auto-responder.</div>
+        <label class="settings-label">Prep time (min): <input type="number" id="sp-cal-prep" value="30" class="settings-num"></label>
+        <label class="settings-label">Travel time (min): <input type="number" id="sp-cal-travel" value="15" class="settings-num"></label>
+        <button class="settings-btn" id="sp-cal-save">Save Calendar Settings</button>
+        <div id="sp-cal-status" class="settings-info" style="margin-top:4px"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Grindr Auto-Login</h3>
+        <div class="settings-info">
+          Grindr rate-limits block actions and will force a re-login after too many.
+          Save your email + password here and the extension will fill the login form
+          for you the moment it detects you've been logged out — so the block queue
+          can resume without you noticing. Credentials are encrypted (AES-GCM with
+          a device-local key) and never leave your machine.
+          <br><br>
+          <b>⚠ Only works with email + password login.</b> If you use "Sign in with
+          Apple" / Google / Facebook, this won't help — those go through OAuth
+          popups that the extension can't drive. Switch Grindr to a plain email +
+          password account if you want auto-login to work.
+        </div>
+        <div id="sp-grindr-cred-status" class="settings-info" style="margin-top:6px;color:#6b7280"></div>
+        <label class="settings-label" style="margin-top:6px">Email
+          <input type="email" id="sp-grindr-email" class="settings-input" autocomplete="off" placeholder="you@example.com" style="margin-top:2px">
+        </label>
+        <label class="settings-label" style="margin-top:6px">Password
+          <input type="password" id="sp-grindr-password" class="settings-input" autocomplete="new-password" placeholder="••••••••" style="margin-top:2px">
+        </label>
+        <label class="settings-checkbox-label" style="margin-top:6px">
+          <input type="checkbox" id="sp-grindr-auto-login" checked>
+          Auto-fill the Grindr login form when I'm forced out
+        </label>
+        <div class="settings-row" style="margin-top:6px">
+          <button class="settings-btn" id="sp-grindr-cred-save">Save Credentials</button>
+          <button class="settings-btn" id="sp-grindr-cred-clear" title="Delete stored Grindr credentials" style="border-color:rgba(239,68,68,0.3);color:#f87171">Clear</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Data tab -->
+    <div class="settings-tab-content" id="tab-data">
+      <div class="settings-section">
+        <h3 class="settings-heading">Display</h3>
+        <label class="settings-checkbox-label">
+          <input type="checkbox" id="sp-timestamp-absolute">
+          Show absolute timestamps (e.g. "11:42 PM" instead of "5m")
+        </label>
+        <label class="settings-checkbox-label">
+          <input type="checkbox" id="sp-auto-navigate" checked>
+          Open conversation on platform when clicking a thread
+        </label>
+        <label class="settings-checkbox-label">
+          <input type="checkbox" id="sp-grindr-keepalive" checked>
+          Keep Grindr session alive (prevent auto-logout)
+        </label>
+        <label class="settings-label" style="margin-top:6px">Toolbar display:
+          <select id="sp-toolbar-mode" class="settings-select" style="width:auto;margin-left:6px">
+            <option value="icon">Icon only</option>
+            <option value="icon-text">Icon + Text</option>
+            <option value="text">Text only</option>
+          </select>
+        </label>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Blocklists</h3>
+        <div class="settings-info">
+          Clear local hide filters per platform. Does NOT touch the platform's
+          real block (e.g. if you blocked someone on Grindr, they stay blocked
+          on Grindr — this only removes our visual filter in the extension).
+        </div>
+        <div class="settings-row" style="margin-top:6px">
+          <button class="settings-btn" id="sp-unhide-sniffies" title="Clear the Sniffies map-hide list. All middle-clicked/shift-clicked profiles become visible again on the map.">Unhide Sniffies</button>
+          <button class="settings-btn" id="sp-unhide-a4a" title="Clear the Adam4Adam blocklist. All middle-clicked cards reappear.">Unhide A4A</button>
+          <button class="settings-btn" id="sp-unhide-grindr" title="Clear our local md.isBlocked flag on Grindr contacts so they appear in Aggregaytor's thread list again. (Grindr still has them platform-blocked; this only affects what the extension hides from you.)">Unhide Grindr (local)</button>
+        </div>
+        <div id="sp-unhide-status" class="settings-info" style="margin-top:4px"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Log Level</h3>
+        <select id="sp-log-level" class="settings-select">
+          <option value="debug">Debug</option><option value="info" selected>Info</option>
+          <option value="warn">Warn</option><option value="error">Error only</option><option value="off">Off</option>
+        </select>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Export / Import</h3>
+        <div class="settings-row">
+          <button class="settings-btn" id="sp-export-all">Export All Data</button>
+          <button class="settings-btn" id="sp-export-blocked">Export Blocked</button>
+        </div>
+        <div class="settings-row" style="margin-top:6px">
+          <button class="settings-btn" id="sp-import-all">Import All Data</button>
+          <button class="settings-btn" id="sp-import-blocked">Import Blocked</button>
+          <input type="file" id="sp-import-file" accept=".json" style="display:none">
+        </div>
+        <label class="settings-checkbox-label" style="margin-top:6px">
+          <input type="checkbox" id="sp-export-encrypt">
+          Encrypt with passphrase (AES-256)
+        </label>
+        <input type="password" id="sp-export-passphrase" class="settings-input" placeholder="Encryption passphrase..." style="display:none">
+        <div id="sp-export-status" class="settings-status"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Quick Phrases</h3>
+        <div class="settings-info">Predefined messages to send with one click. One per line.</div>
+        <textarea id="sp-quick-phrases" class="settings-textarea" rows="4" placeholder="Hey there!&#10;What are you up to?&#10;Looking?"></textarea>
+        <button class="settings-btn" id="sp-save-phrases" style="margin-top:4px">Save Phrases</button>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Text Expansions</h3>
+        <div class="settings-info">Type a shortcut in any chat input followed by space to auto-expand. Auto-disabled on macOS (native Text Substitutions). Format: <code>shortcut → phrase</code> (one per line).</div>
+        <label class="settings-checkbox-label">
+          <input type="checkbox" id="sp-text-expander-enabled"> Enable text expander
+        </label>
+        <textarea id="sp-text-expansions" class="settings-textarea" rows="8" placeholder="hg → Hey there. How's it going?&#10;yl → You looking?&#10;wt → What're you up to?"></textarea>
+        <div class="settings-row" style="margin-top:4px">
+          <button class="settings-btn" id="sp-save-expansions">Save Expansions</button>
+          <button class="settings-btn" id="sp-load-defaults">Load Defaults</button>
+          <span id="sp-expansion-count" class="settings-info" style="margin-left:8px"></span>
+        </div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Broadcast</h3>
+        <div class="settings-info">Send a message to all bookmarked contacts on a platform.</div>
+        <input type="text" id="sp-broadcast-msg" class="settings-input" placeholder="Message to broadcast...">
+        <div class="settings-row" style="margin-top:4px">
+          <select id="sp-broadcast-platform" class="settings-select" style="flex:1">
+            <option value="sniffies">Sniffies</option>
+            <option value="grindr">Grindr</option>
+            <option value="adam4adam">A4A</option>
+          </select>
+          <button class="settings-btn" id="sp-broadcast-send" style="border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.1);color:#f87171">Send Broadcast</button>
+        </div>
+        <div id="sp-broadcast-status" class="settings-status"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Data</h3>
+        <button class="settings-btn" id="sp-clear-all" style="border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.1);color:#f87171">Clear all messages &amp; data</button>
+        <div id="sp-clear-status" class="settings-status"></div>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Keyboard Shortcuts</h3>
+        <button class="settings-btn" id="sp-show-hotkeys">Show keyboard shortcuts (?)</button>
+      </div>
+      <div class="settings-section">
+        <h3 class="settings-heading">Developer</h3>
+        <button class="settings-btn" id="sp-toggle-devlog">Show activity log</button>
+        <div id="sp-devlog" style="display:none;max-height:200px;overflow-y:auto;font-family:monospace;font-size:9px;color:#6b7280;margin-top:6px;background:rgba(0,0,0,0.3);border-radius:6px;padding:6px"></div>
+      </div>
+    </div>
+
+    <!-- Memory tab — granular per-cache breakdown so the user can spot which structure is bloating -->
+    <div class="settings-tab-content" id="tab-memory">
+      <div class="settings-section">
+        <h3 class="settings-heading">Memory Breakdown</h3>
+        <div class="settings-info">Per-cache size across the service worker, content scripts, and persistent storage. Auto-refreshes every 5s while this tab is visible. Click a cache name to clear it.</div>
+        <div style="display:flex;gap:6px;margin:6px 0;align-items:center">
+          <button class="settings-btn" id="sp-mem-refresh" style="width:auto">Refresh now</button>
+          <button class="settings-btn" id="sp-mem-free-all" style="width:auto;border-color:rgba(239,68,68,0.4);background:rgba(239,68,68,0.1);color:#f87171">Free all SW caches</button>
+          <span id="sp-mem-summary" style="font-size:10px;color:#9ca3af;flex:1;text-align:right"></span>
+        </div>
+        <div id="sp-mem-body" style="font-size:11px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Photo gallery overlay -->
+  <div id="gallery-overlay" class="gallery-overlay" style="display:none">
+    <div class="gallery-header">
+      <span id="gallery-title" class="gallery-title">Photos</span>
+      <button class="gallery-close" id="gallery-close">✕</button>
+    </div>
+    <div id="gallery-grid" class="gallery-grid"></div>
+  </div>
+
+  <!-- Inbox thread list -->
+  <div id="thread-list" class="thread-list">
+    <div class="empty-state"><h2>No messages yet</h2><p>Visit a connected site to start capturing messages.</p></div>
+  </div>
+
+  <!-- Thread detail view -->
+  <div id="thread-detail" class="thread-detail">
+    <!-- Thread toolbar -->
+    <div class="thread-toolbar">
+      <button class="toolbar-btn" id="btn-resync" title="Re-fetch this conversation from the platform — pulls in any messages the extension may have missed">↻ Resync</button>
+      <button class="toolbar-btn" id="btn-gallery" title="View all photos for this contact — profile pictures and any shared images">🖼 Photos</button>
+      <button class="toolbar-btn" id="btn-export" title="Copy this conversation to clipboard as plain text for sharing or saving">📋 Export</button>
+      <button class="toolbar-btn" id="btn-thread-search" title="Search within this conversation for specific words or phrases">🔍 Search</button>
+      <button class="toolbar-btn" id="btn-add-task" title="Create a to-do task linked to this contact (e.g. 'Follow up with...'). Keyboard: Shift+T">☑ Task</button>
+      <button class="toolbar-btn" id="btn-archive-thread" title="Archive this conversation — moves it to the 📦 Archive tab and hides from the main inbox">📦 Archive</button>
+      <button class="toolbar-btn danger" id="btn-clear-thread" title="Delete all locally stored messages for this conversation. Does NOT delete messages on the platform.">Clear</button>
+    </div>
+    <div class="thread-search-bar" id="thread-search-bar" style="display:none">
+      <input type="text" id="thread-search-input" class="search-input" placeholder="Search this conversation...">
+      <span id="thread-search-count" class="search-count"></span>
+    </div>
+    <!-- Notes editor (collapsible) -->
+    <div id="notes-section" class="notes-section" style="display:none">
+      <textarea id="notes-input" class="notes-input" placeholder="Add notes about this person..." rows="2"></textarea>
+    </div>
+    <!-- Reminder picker (collapsible) -->
+    <div id="reminder-section" class="reminder-section" style="display:none">
+      <div class="reminder-form">
+        <input type="datetime-local" id="reminder-datetime" class="reminder-datetime">
+        <input type="text" id="reminder-note" placeholder="Reminder note..." class="reminder-note-input">
+        <button class="reminder-save" id="reminder-save">Set</button>
+      </div>
+      <div id="reminder-list" class="reminder-list"></div>
+    </div>
+    <!-- Profile info -->
+    <div id="profile-info" class="profile-info"></div>
+    <!-- Dossier -->
+    <div id="dossier-section" class="dossier-section" style="display:none">
+      <div class="dossier-header">
+        <span>Dossier</span>
+        <button class="dossier-extract-btn" id="dossier-extract">Auto-fill from chat</button>
+      </div>
+      <div id="dossier-fields" class="dossier-fields"></div>
+    </div>
+
+    <!-- Conversation summary sidebar -->
+    <div id="thread-summary" class="thread-summary">
+      <div class="summary-section">
+        <div class="summary-label">Sentiment</div>
+        <div id="sentiment-display" class="sentiment-display"></div>
+      </div>
+      <div class="summary-section">
+        <div class="summary-label">Preference</div>
+        <div id="preference-display" class="preference-display"></div>
+        <div class="pref-actions">
+          <button class="pref-btn like" id="pref-like" title="Like">👍</button>
+          <button class="pref-btn dislike" id="pref-dislike" title="Pass">👎</button>
+        </div>
+      </div>
+      <div class="summary-section">
+        <div class="summary-label">Summary</div>
+        <div id="convo-summary" class="convo-summary"></div>
+      </div>
+      <div class="summary-section" id="commitments-section" style="display:none">
+        <div class="summary-label">Commitments</div>
+        <div id="commitments-display"></div>
+      </div>
+    </div>
+    <div id="message-list" class="message-list"></div>
+  </div>
+
+  <!-- Suggestions -->
+  <div id="suggestions" class="suggestions">
+    <div class="label">Suggested responses</div>
+  </div>
+
+  <!-- Response bar -->
+  <div class="response-bar">
+    <button class="phrase-btn" id="phrase-toggle" title="Quick phrases — click to show your saved phrases. Click any phrase to instantly send it.">💬</button>
+    <textarea id="response-input" rows="1" placeholder="Type a response..." title="Type a message to send on the platform. Text expansions work here (type a shortcut + space)."></textarea>
+    <button class="suggest-btn" id="suggest-btn" title="Generate AI-suggested responses based on the conversation context. Requires an LLM API key in Settings → AI.">Suggest</button>
+  </div>
+
+  <!-- Quick phrase floating panel (shown when 💬 is clicked in thread view) -->
+  <div id="phrase-panel" class="phrase-panel" style="display:none">
+    <div class="phrase-header">
+      <span>Quick Phrases</span>
+      <button class="phrase-close" id="phrase-close">&times;</button>
+    </div>
+    <div id="phrase-list" class="phrase-list"></div>
+  </div>
+
+  <!-- Keyboard shortcuts help overlay -->
+  <div id="hotkey-help" class="hotkey-overlay" style="display:none">
+    <div class="hotkey-modal">
+      <div class="hotkey-header">
+        <h3>Keyboard Shortcuts</h3>
+        <button class="hotkey-close" id="hotkey-close">&times;</button>
+      </div>
+      <div class="hotkey-columns">
+        <div class="hotkey-col">
+          <h4>Inbox</h4>
+          <div class="hotkey-row"><kbd>j</kbd> / <kbd>&darr;</kbd> <span>Next thread</span></div>
+          <div class="hotkey-row"><kbd>k</kbd> / <kbd>&uarr;</kbd> <span>Previous thread</span></div>
+          <div class="hotkey-row"><kbd>o</kbd> / <kbd>Enter</kbd> <span>Open thread</span></div>
+          <div class="hotkey-row"><kbd>s</kbd> <span>Toggle favorite</span></div>
+          <div class="hotkey-row"><kbd>x</kbd> <span>Toggle bookmark</span></div>
+          <div class="hotkey-row"><kbd>e</kbd> <span>Archive</span></div>
+        </div>
+        <div class="hotkey-col">
+          <h4>Conversation</h4>
+          <div class="hotkey-row"><kbd>u</kbd> <span>Back to inbox</span></div>
+          <div class="hotkey-row"><kbd>r</kbd> <span>Reply (focus input)</span></div>
+          <div class="hotkey-row"><kbd>j</kbd> / <kbd>k</kbd> <span>Scroll messages</span></div>
+          <div class="hotkey-row"><kbd>s</kbd> <span>Toggle favorite</span></div>
+          <div class="hotkey-row"><kbd>e</kbd> <span>Archive thread</span></div>
+          <div class="hotkey-row"><kbd>Shift+N</kbd> <span>Resync messages</span></div>
+          <div class="hotkey-row"><kbd>Shift+T</kbd> <span>Add task</span></div>
+        </div>
+        <div class="hotkey-col">
+          <h4>Global</h4>
+          <div class="hotkey-row"><kbd>/</kbd> <span>Search</span></div>
+          <div class="hotkey-row"><kbd>Ctrl+F</kbd> <span>Search</span></div>
+          <div class="hotkey-row"><kbd>?</kbd> <span>This help</span></div>
+          <div class="hotkey-row"><kbd>Esc</kbd> <span>Close / Back</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Task panel overlay -->
+  <div id="task-panel" class="task-panel" style="display:none">
+    <div class="task-header">
+      <button class="task-back-btn" id="task-back-btn">&larr; Back</button>
+      <h3>Tasks</h3>
+      <div class="task-header-actions">
+        <button class="task-add-btn" id="task-sync-btn" title="Sync with Google Tasks">↻</button>
+        <button class="task-add-btn" id="task-add-btn">+ New</button>
+      </div>
+    </div>
+    <div id="task-form" class="task-form" style="display:none">
+      <input type="text" id="task-title" class="task-input" placeholder="Task title...">
+      <textarea id="task-notes" class="task-input" rows="2" placeholder="Notes (optional)"></textarea>
+      <div class="task-form-row">
+        <input type="datetime-local" id="task-due" class="task-input task-due">
+        <select id="task-priority" class="task-input task-priority">
+          <option value="low">Low</option>
+          <option value="medium" selected>Medium</option>
+          <option value="high">High</option>
+        </select>
+      </div>
+      <div class="task-form-row">
+        <span id="task-contact-link" class="task-contact-link"></span>
+        <button class="task-save-btn" id="task-save-btn">Save</button>
+        <button class="task-cancel-btn" id="task-cancel-btn">Cancel</button>
+      </div>
+    </div>
+    <div id="task-list" class="task-list"></div>
+  </div>
+
+  <script src="panel.js"></script>
+</body>
+</html>

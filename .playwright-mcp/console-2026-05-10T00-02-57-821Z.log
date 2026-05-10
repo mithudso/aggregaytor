@@ -1,0 +1,4 @@
+[     280ms] TypeError: Failed to execute 'observe' on 'MutationObserver': parameter 1 is not of type 'Node'.
+    at https://help.grindr.com/hc/theming_assets/91987/139994/script.js?digest=50211574561171:360:10
+[     366ms] [ERROR] Failed to load resource: the server responded with a status of 403 () @ https://help.grindr.com/hc/activity:0
+[     519ms] [LOG] Ketch GTM consent template loaded successfully @ https://www.googletagmanager.com/gtm.js?id=GTM-N8H7NKPC:718

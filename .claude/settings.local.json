@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm test:*)",
+      "Bash(pnpm -r test)",
+      "Bash(time pnpm:*)",
+      "Bash(find /Users/mitch/Documents/GitHub/aggregaytor/packages -name \"package.json\" -exec head -20 {} +)",
+      "Bash(find /Users/mitch/Documents/GitHub/aggregaytor/adapters -name \"package.json\" -exec head -20 {} +)",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(gh pr create --title 'Add comprehensive unit + performance test suite \\(65 → 189 tests\\)' --body ' *)",
+      "Bash(/opt/homebrew/bin/gh --version)",
+      "Bash(/usr/local/bin/gh --version)",
+      "Bash(awk '{print $NF}')",
+      "Bash(npx vitest *)",
+      "Bash([ -f \"$dir/package.json\" ])",
+      "Bash(find /Users/mitch/Documents/GitHub/aggregaytor -type f \\\\\\( -name \"*.test.ts\" -o -name \"*.test.js\" -o -name \"*.spec.ts\" -o -name \"*.spec.js\" \\\\\\) ! -path \"*/node_modules/*\" -exec wc -l {} +)",
+      "Bash(bash /dev/stdin)",
+      "Bash(rm -f /Users/mitch/Documents/GitHub/aggregaytor/.git/index.lock)",
+      "Bash(git pull *)",
+      "Bash(kill -9 88246 88248 88257 88258)",
+      "Bash(rm -f /Users/mitch/Documents/GitHub/aggregaytor/.git/gc.pid)",
+      "Bash(rm -f /Users/mitch/Documents/GitHub/aggregaytor/.git/objects/pack/.tmp-*)"
+    ]
+  }
+}
