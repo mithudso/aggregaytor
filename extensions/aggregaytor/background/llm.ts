@@ -95,7 +95,7 @@ function invalidateStorageCache(key: string): void {
 }
 
 const DEFAULT_MODELS: Record<LLMProvider, string> = {
-  gemini: 'gemini-2.5-flash-lite', // Auto-swapped post-2026-06-17 — see GEMINI_DEPRECATION_DATE / applyDeprecationFallback
+  gemini: 'gemini-3.1-flash-lite-preview',
   openai: 'gpt-4o-mini',
   anthropic: 'claude-haiku-4-5-20251001',
   groq: 'llama-3.1-8b-instant',
@@ -110,12 +110,8 @@ const DEFAULT_MODELS: Record<LLMProvider, string> = {
 
 // ── Deprecation fallback ────────────────────────────────────────────────────
 // Gemini 2.5 Flash family is announced for deprecation on 2026-06-17.
-// v0.57.20: add an automatic fallback so we don't ship a broken default
-// on the day after deprecation. The user can still pin any exact model
-// via config.model; this only kicks in when we'd otherwise auto-pick a
-// gemini-2.5-* model. The replacement is 3.1-flash-lite-preview — Google
-// has committed to keeping the preview models available as long as 2.5
-// is unavailable.
+// Keep a fallback for pinned legacy Gemini 2.5 models so older saved
+// settings continue working after the deprecation date.
 //
 // Surfaces as a warning via `getDeprecationWarnings()` so the panel can
 // show a one-time banner before the swap happens.
@@ -148,14 +144,14 @@ export function getDeprecationWarnings(): { id: string; message: string; activeA
   if (geminiDays > 0 && geminiDays <= 60) {
     warnings.push({
       id: 'gemini-2.5-deprecation',
-      message: `Gemini 2.5 Flash deprecates in ${geminiDays} day${geminiDays === 1 ? '' : 's'} (2026-06-17). Aggregaytor will auto-swap to gemini-3.1-flash-lite-preview on that date.`,
+      message: `Gemini 2.5 Flash deprecates in ${geminiDays} day${geminiDays === 1 ? '' : 's'} (2026-06-17). Aggregaytor already defaults to gemini-3.1-flash-lite-preview; update any pinned Gemini 2.5 model in Settings → AI before that date.`,
       activeAfter: GEMINI_DEPRECATION_DATE.toISOString(),
       active: false,
     });
   } else if (geminiDays <= 0) {
     warnings.push({
       id: 'gemini-2.5-deprecated',
-      message: 'Gemini 2.5 Flash is deprecated — Aggregaytor has auto-swapped to gemini-3.1-flash-lite-preview. You can pin a specific model in Settings → AI if needed.',
+      message: 'Gemini 2.5 Flash is deprecated — Aggregaytor defaults to gemini-3.1-flash-lite-preview and will remap pinned Gemini 2.5 models automatically.',
       activeAfter: GEMINI_DEPRECATION_DATE.toISOString(),
       active: true,
     });
@@ -166,7 +162,7 @@ export function getDeprecationWarnings(): { id: string; message: string; activeA
 // Known rate limits per provider (requests per minute on free/tier-1)
 // Sources: provider docs as of April 2026
 const PROVIDER_RPM: Record<string, number> = {
-  gemini: 15,       // Free: 15 RPM (gemini-2.5-flash-lite), gemini-2.5 deprecates 2026-06-17
+  gemini: 15,       // Free tier baseline; pinned Gemini 2.5 models auto-remap after 2026-06-17
   openai: 500,      // Tier 1 ($5): 500 RPM. Free tier only 3 RPM.
   anthropic: 50,    // Tier 1 ($5): 50 RPM all models
   groq: 30,         // Free: 30 RPM, 14400 RPD, very fast LPU inference

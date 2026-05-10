@@ -1,32 +1,14 @@
 /**
- * sync.ts — Future CouchDB replication stub.
+ * sync.ts — Remote replication is intentionally unsupported on the Dexie store.
  */
-
-import { getDB } from './db.js';
 
 export interface SyncConfig {
   remoteUrl: string;
   auth?: { username: string; password: string };
 }
 
-let _sync: PouchDB.Replication.Sync<{}> | null = null;
-
-export async function startSync(config: SyncConfig): Promise<void> {
-  const db = await getDB();
-  const remoteOpts: PouchDB.Configuration.RemoteDatabaseConfiguration = {};
-  if (config.auth) {
-    remoteOpts.auth = config.auth;
-  }
-  _sync = db.sync(config.remoteUrl, {
-    live: true,
-    retry: true,
-    ...remoteOpts,
-  });
+export async function startSync(_config: SyncConfig): Promise<void> {
+  throw new Error('Remote CouchDB replication is not supported with the Dexie-backed store');
 }
 
-export function stopSync(): void {
-  if (_sync) {
-    _sync.cancel();
-    _sync = null;
-  }
-}
+export function stopSync(): void {}

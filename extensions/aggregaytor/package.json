@@ -17,10 +17,9 @@
     "@aggregaytor/adapter-sniffies": "workspace:*",
     "@aggregaytor/context-engine": "workspace:*",
     "@aggregaytor/store": "workspace:*",
+    "dexie": "^4.0.11",
     "events": "^3.3.0",
-    "flexsearch": "^0.7.43",
-    "pouchdb-browser": "^9.0.0",
-    "pouchdb-find": "^9.0.0"
+    "flexsearch": "^0.7.43"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

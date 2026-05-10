@@ -63,7 +63,7 @@
   │ sniffies.ts  │ ──────> │ sniffies-    │ ──────> │ service-worker.ts    │
   │ grindr.ts    │ Custom  │ bridge.ts    │ chrome  │                      │
   │ doublelist.ts│ Events  │ grindr-      │ .runtime│ ┌──────────────────┐ │
-  │ adam4adam.ts  │         │ bridge.ts    │ .send   │ │ PouchDB (store)  │ │
+  │ adam4adam.ts  │         │ bridge.ts    │ .send   │ │ Dexie store      │ │
   │ gmail.ts     │         │ etc.         │ Message │ │ messages/contacts│ │
   └──────┬───────┘         └──────────────┘         │ │ threads/dossiers │ │
          │                                          │ └──────────────────┘ │
@@ -86,7 +86,7 @@
 
 1. **Adapters** run in MAIN world (page's JS context) and monkey-patch `fetch`, `XMLHttpRequest`, and `WebSocket` to intercept network traffic
 2. **Bridge scripts** run in ISOLATED world (extension context) and relay messages from MAIN world to the service worker via `chrome.runtime.sendMessage`
-3. **Service worker** processes incoming messages, stores them in PouchDB, triggers auto-respond, manages LLM requests
+3. **Service worker** processes incoming messages, stores them in Dexie/IndexedDB, triggers auto-respond, manages LLM requests
 4. **Side panel** queries the service worker for data and renders the UI
 
 ### Why Two Worlds?
@@ -119,7 +119,7 @@ aggregaytor/
 │   │   │   ├── lsh.ts              # Locality-Sensitive Hashing
 │   │   │   └── search.ts           # Full-text search
 │   │   └── tsup.config.ts
-│   └── store/                        # PouchDB data layer
+│   └── store/                        # Dexie-backed data layer
 │       ├── src/
 │       │   ├── db.ts                # Database init, indexes, destroy
 │       │   ├── messages.ts          # Message CRUD + dedup
@@ -134,7 +134,7 @@ aggregaytor/
 │       │   ├── block-rules.ts       # Auto-block/archive rules
 │       │   ├── reminders.ts         # Contact reminders
 │       │   ├── calendar.ts          # Availability calendar
-│       │   └── types.ts             # All PouchDB document interfaces
+│       │   └── types.ts             # All persisted document interfaces
 │       └── tsup.config.ts
 │
 ├── adapters/                         # Platform-specific adapters
@@ -379,7 +379,7 @@ Tasks are routed to different model tiers:
 
 ### Storage
 
-All data is stored **locally** in PouchDB (IndexedDB backend). Nothing leaves your browser except LLM API calls (which send conversation context to generate responses).
+All data is stored **locally** in IndexedDB through Dexie, with optional OPFS snapshots for supplemental local backups. Nothing leaves your browser except LLM API calls (which send conversation context to generate responses).
 
 Clear all data: Settings → Data → Clear All Data
 
@@ -398,7 +398,7 @@ Clear all data: Settings → Data → Clear All Data
 4. **WebSocket** — Presence events (userJoined/userAwake) are filtered; `newGlobalMsg` events route to Global Chat
 5. **Normalization** — Messages are converted to `UnifiedMessage` format with platform, threadId, contactId, body, timestamp, direction
 6. **Deduplication** — `seenMessageIds` Set prevents re-emitting captured messages
-7. **Storage** — Messages flow through the bridge → service worker → PouchDB
+7. **Storage** — Messages flow through the bridge → service worker → Dexie/IndexedDB
 
 ### Self-ID Detection
 

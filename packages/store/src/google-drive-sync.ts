@@ -18,6 +18,7 @@
 declare const chrome: any;
 
 import { exportAllData, importAllData } from './export-import.js';
+import { saveOpfsSnapshotData } from './opfs-backup.js';
 
 // Need drive.file scope (already in manifest.json oauth2.scopes)
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
@@ -190,7 +191,7 @@ async function findBackupFile(folderId: string): Promise<{ id: string; modifiedT
 // ── Backup / Restore ─────────────────────────────────────────────────────────
 
 /**
- * Upload a full backup of all PouchDB data to Google Drive.
+ * Upload a full backup of all store data to Google Drive.
  * Creates or overwrites the backup file in the "Aggregaytor Backups" folder.
  * @returns The file ID on success, or an error message.
  */
@@ -198,6 +199,7 @@ export async function backupToDrive(): Promise<{ ok: boolean; fileId?: string; e
   try {
     // 1. Export all data as JSON
     const jsonData = await exportAllData();
+    await saveOpfsSnapshotData(jsonData, { reason: 'drive-backup' });
 
     // 2. Find or create the backup folder
     const folderId = await getOrCreateFolder();
@@ -252,7 +254,7 @@ export async function backupToDrive(): Promise<{ ok: boolean; fileId?: string; e
 }
 
 /**
- * Download the backup from Google Drive and restore it into PouchDB.
+ * Download the backup from Google Drive and restore it into the local store.
  * @returns The number of imported documents on success, or an error message.
  */
 export async function restoreFromDrive(): Promise<{ ok: boolean; imported?: number; error?: string }> {
@@ -275,8 +277,9 @@ export async function restoreFromDrive(): Promise<{ ok: boolean; imported?: numb
     // The backup is a JSON string, so we may need to re-stringify if it was parsed.
     const jsonStr = typeof jsonData === 'string' ? jsonData : JSON.stringify(jsonData);
 
-    // 4. Import into PouchDB
+    // 4. Import into the local store
     const { imported } = await importAllData(jsonStr);
+    await saveOpfsSnapshotData(jsonStr, { reason: 'drive-restore' });
 
     return { ok: true, imported };
   } catch (err: any) {
