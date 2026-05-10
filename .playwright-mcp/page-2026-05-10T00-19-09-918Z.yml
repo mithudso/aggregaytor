@@ -1,0 +1,295 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - paragraph [ref=e4]: Connected!
+    - generic [ref=e57]:
+      - generic [ref=e59]:
+        - banner [ref=e60]:
+          - heading [level=1] [ref=e61]: Nearby
+          - generic [ref=e62]:
+            - button [ref=e63] [cursor=pointer]:
+              - img [ref=e64]
+            - button [ref=e68] [cursor=pointer]:
+              - img [ref=e69]
+              - text: Shuffle
+            - button [ref=e76] [cursor=pointer]:
+              - img [ref=e77]
+              - text: Explore
+            - button [ref=e82] [cursor=pointer]:
+              - img [ref=e83]
+              - text: Search
+            - button [ref=e87] [cursor=pointer]:
+              - img [ref=e88]
+              - text: Favorites
+        - banner [ref=e90]:
+          - button [ref=e91] [cursor=pointer]:
+            - generic [ref=e92]:
+              - img [ref=e93]
+              - paragraph [ref=e95]: Filters
+          - button [ref=e96] [cursor=pointer]:
+            - paragraph [ref=e97]: Online Now
+          - button [ref=e98] [cursor=pointer]:
+            - paragraph [ref=e99]: Age
+          - button [ref=e100] [cursor=pointer]:
+            - paragraph [ref=e101]: Position
+        - generic [ref=e105]:
+          - gridcell [ref=e106]
+          - gridcell [ref=e109]
+          - gridcell [ref=e112]
+          - gridcell [ref=e115]
+          - gridcell [ref=e118]
+          - gridcell [ref=e121]
+          - gridcell [ref=e124]
+          - gridcell [ref=e127]
+          - gridcell [ref=e130]
+          - gridcell [ref=e133]
+          - gridcell [ref=e136]
+          - gridcell [ref=e139]
+          - gridcell [ref=e142]
+          - gridcell [ref=e145]
+          - gridcell [ref=e148]
+          - gridcell [ref=e151]
+          - gridcell [ref=e154]
+          - gridcell [ref=e157]
+          - gridcell [ref=e160]
+          - gridcell [ref=e162]
+          - gridcell [ref=e164]
+          - gridcell [ref=e166]
+          - gridcell [ref=e168]
+          - gridcell [ref=e170]
+          - gridcell [ref=e172]
+          - gridcell [ref=e174]
+          - gridcell [ref=e176]
+          - gridcell [ref=e178]
+          - gridcell [ref=e180]
+          - gridcell [ref=e182]
+          - gridcell [ref=e184]
+          - gridcell [ref=e186]
+          - gridcell [ref=e188]
+          - gridcell [ref=e190]
+          - gridcell [ref=e192]
+          - gridcell [ref=e194]
+          - gridcell [ref=e196]
+          - gridcell [ref=e198]
+          - gridcell [ref=e200]
+          - gridcell [ref=e202]
+          - gridcell [ref=e204]
+          - gridcell [ref=e206]
+          - gridcell [ref=e208]
+          - gridcell [ref=e210]
+          - gridcell [ref=e212]
+          - gridcell [ref=e214]
+          - gridcell [ref=e216]
+          - gridcell [ref=e218]
+          - gridcell [ref=e220]
+          - gridcell [ref=e222]
+        - generic [ref=e227] [cursor=pointer]:
+          - paragraph [ref=e229]: Chats
+          - button [ref=e233]:
+            - img [ref=e234]
+      - banner [ref=e236]:
+        - generic [ref=e237]:
+          - link [ref=e238] [cursor=pointer]:
+            - /url: /
+            - img [ref=e239]
+          - link [ref=e241] [cursor=pointer]:
+            - /url: /chat
+            - generic [ref=e242]:
+              - img [ref=e243]
+              - generic [ref=e245]: "16"
+          - link [ref=e247] [cursor=pointer]:
+            - /url: /interest
+            - img [ref=e249]
+          - link [ref=e252] [cursor=pointer]:
+            - /url: /?myProfile=true
+            - img [ref=e255]
+          - generic [ref=e256]:
+            - link [ref=e257] [cursor=pointer]:
+              - /url: https://www.grindr.com/terms-of-service/
+              - text: Terms of Service
+            - link [ref=e258] [cursor=pointer]:
+              - /url: https://www.grindr.com/privacy-policy/
+              - text: Privacy Policy
+  - generic [ref=e321]:
+    - banner [ref=e322]:
+      - button [ref=e511] [cursor=pointer]:
+        - img [ref=e324]
+      - paragraph [ref=e326]: Settings
+    - generic [ref=e327]:
+      - paragraph [ref=e328]: Account
+      - generic [ref=e329]:
+        - button [ref=e512] [cursor=pointer]:
+          - generic [ref=e332]:
+            - heading [level=5] [ref=e513]: User ID
+            - paragraph [ref=e334]: 846429M1NC
+        - separator [ref=e335]
+      - paragraph [ref=e336]: App Settings
+      - generic [ref=e337]:
+        - button [ref=e514] [cursor=pointer]:
+          - generic [ref=e340]:
+            - heading [level=5] [ref=e515]: Unit System
+            - paragraph [ref=e342]: Imperial (U.S.)
+            - img [ref=e516]
+        - separator [ref=e346]
+        - button [ref=e517] [cursor=pointer]:
+          - generic [ref=e349]:
+            - heading [level=5] [ref=e518]: Sound Effects
+            - img [ref=e519]
+        - separator [ref=e354]
+        - button [ref=e520] [cursor=pointer]:
+          - generic [ref=e357]:
+            - heading [level=5] [ref=e521]: Notifications
+            - img [ref=e522]
+        - separator [ref=e362]
+      - paragraph [ref=e363]: Security and Privacy
+      - generic [ref=e364]:
+        - button [ref=e523] [cursor=pointer]:
+          - generic [ref=e367]:
+            - heading [level=5] [ref=e524]: Location and Visibility
+            - img [ref=e525]
+        - separator [ref=e372]
+        - button [ref=e526] [cursor=pointer]:
+          - generic [ref=e375]:
+            - heading [level=5] [ref=e527]: Unblock Users
+            - img [ref=e528]
+        - separator [ref=e380]
+        - button [ref=e529] [cursor=pointer]:
+          - generic [ref=e383]:
+            - heading [level=5] [ref=e530]: Unhide Users
+            - img [ref=e531]
+        - separator [ref=e388]
+        - button [ref=e532] [cursor=pointer]:
+          - generic [ref=e391]:
+            - heading [level=5] [ref=e533]: Consent Preference Center
+            - img [ref=e534]
+        - separator [ref=e396]
+        - button [ref=e535] [cursor=pointer]:
+          - generic [ref=e399]:
+            - heading [level=5] [ref=e536]: Download Data
+            - img [ref=e537]
+        - separator [ref=e404]
+        - generic [ref=e405]:
+          - heading [level=5] [ref=e538]: Delete Profile
+          - paragraph [ref=e408]:
+            - generic [ref=e409]:
+              - text: If you want to delete your profile, please initiate in the Grindr app. Review the
+              - link [ref=e539] [cursor=pointer]:
+                - /url: https://help.grindr.com/hc/en-us/articles/4402749200915-In-app-privacy-features#h_01F8ZS93QRT7WWTD8CZC6A9Q7V
+                - text: "\"Delete your profile\""
+              - text: help center article for more information. Alternatively, you can submit a request
+              - link [ref=e540] [cursor=pointer]:
+                - /url: https://help.grindr.com/hc/en-us/requests/new?ticket_form_id=360006692913
+                - text: here
+              - text: .
+      - paragraph [ref=e412]: Follow Us
+      - generic [ref=e413]:
+        - button [ref=e541] [cursor=pointer]:
+          - generic [ref=e416]:
+            - img [ref=e418]
+            - heading [level=5] [ref=e542]: Instagram
+        - separator [ref=e421]
+        - button [ref=e543] [cursor=pointer]:
+          - generic [ref=e424]:
+            - img [ref=e426]
+            - heading [level=5] [ref=e544]: Facebook
+        - separator [ref=e429]
+        - button [ref=e545] [cursor=pointer]:
+          - generic [ref=e432]:
+            - img [ref=e434]
+            - heading [level=5] [ref=e546]: Twitter
+        - separator [ref=e437]
+        - button [ref=e547] [cursor=pointer]:
+          - generic [ref=e440]:
+            - img [ref=e442]
+            - heading [level=5] [ref=e548]: LinkedIn
+        - separator [ref=e445]
+        - button [ref=e549] [cursor=pointer]:
+          - generic [ref=e448]:
+            - img [ref=e450]
+            - heading [level=5] [ref=e550]: TikTok
+        - separator [ref=e453]
+      - paragraph [ref=e454]: About
+      - generic [ref=e455]:
+        - button [ref=e551] [cursor=pointer]:
+          - heading [level=5] [ref=e552]: Feature Requests
+        - separator [ref=e460]
+        - button [ref=e553] [cursor=pointer]:
+          - heading [level=5] [ref=e554]: Support
+        - separator [ref=e465]
+        - button [ref=e555] [cursor=pointer]:
+          - heading [level=5] [ref=e556]: Community Guidelines
+        - separator [ref=e470]
+        - button [ref=e557] [cursor=pointer]:
+          - heading [level=5] [ref=e558]: Careers
+        - separator [ref=e475]
+        - button [ref=e559] [cursor=pointer]:
+          - heading [level=5] [ref=e560]: Terms of Service
+        - separator [ref=e480]
+        - button [ref=e561] [cursor=pointer]:
+          - heading [level=5] [ref=e562]: Privacy Policy
+        - separator [ref=e485]
+        - button [ref=e563] [cursor=pointer]:
+          - heading [level=5] [ref=e564]: Consumer Health Data Privacy Policy
+        - separator [ref=e490]
+        - button [ref=e565] [cursor=pointer]:
+          - heading [level=5] [ref=e566]: Frequently Asked Questions
+        - separator [ref=e495]
+        - button [ref=e567] [cursor=pointer]:
+          - generic [ref=e498]:
+            - heading [level=5] [ref=e568]: Licenses
+            - img [ref=e569]
+        - separator [ref=e503]
+        - button [ref=e570] [cursor=pointer]:
+          - heading [level=5] [ref=e571]: Patents
+        - separator [ref=e508]
+      - paragraph [ref=e509]: v2.1.1-
+  - generic [ref=e574]:
+    - banner [ref=e575]:
+      - button "close" [ref=e576] [cursor=pointer]:
+        - img [ref=e577]
+      - paragraph [ref=e579]: Location and Visibility
+    - generic [ref=e580]:
+      - paragraph [ref=e581]:
+        - generic [ref=e583]: Show Me
+      - generic [ref=e584]:
+        - button "Show Me in Explore Searches Opt for your profile to appear in the 'Explore' grid, increasing your chances of finding more matches." [ref=e585] [cursor=pointer]:
+          - generic [ref=e586]:
+            - heading "Show Me in Explore Searches" [level=5] [ref=e587]
+            - paragraph [ref=e588]: Opt for your profile to appear in the 'Explore' grid, increasing your chances of finding more matches.
+          - checkbox [checked] [ref=e591]
+        - separator [ref=e594]
+        - 'button "Show My Distance Show the approximate distance (Ex: < 5 miles away) between you and prospective matches for an easier understanding of proximity." [ref=e595] [cursor=pointer]':
+          - generic [ref=e596]:
+            - heading "Show My Distance" [level=5] [ref=e597]
+            - paragraph [ref=e598]: "Show the approximate distance (Ex: < 5 miles away) between you and prospective matches for an easier understanding of proximity."
+          - checkbox [checked] [ref=e601]
+        - separator [ref=e604]
+        - button "Show Me in Viewed Me List Turn off to hide from others’ ‘Viewed Me’ lists. This will also delete your Viewed Me history and disable your own Viewed Me list." [ref=e605] [cursor=pointer]:
+          - generic [ref=e606]:
+            - heading "Show Me in Viewed Me List" [level=5] [ref=e607]
+            - paragraph [ref=e608]: Turn off to hide from others’ ‘Viewed Me’ lists. This will also delete your Viewed Me history and disable your own Viewed Me list.
+          - checkbox [checked] [ref=e611]
+        - separator [ref=e614]
+      - paragraph [ref=e615]:
+        - generic [ref=e616]:
+          - generic [ref=e617]: Location Precision
+          - button "location help" [ref=e618] [cursor=pointer]:
+            - img [ref=e619]
+      - generic [ref=e622]:
+        - button "Precise Shared within 100m of accuracy" [ref=e623] [cursor=pointer]:
+          - img [ref=e625]
+          - generic [ref=e628]:
+            - heading "Precise" [level=5] [ref=e629]
+            - paragraph [ref=e630]: Shared within 100m of accuracy
+          - generic [ref=e631]:
+            - checkbox [checked] [ref=e632]
+            - img [ref=e633]
+        - separator [ref=e636]
+        - button "Approximate Randomized within your general area" [ref=e637] [cursor=pointer]:
+          - img [ref=e639]
+          - generic [ref=e642]:
+            - heading "Approximate" [level=5] [ref=e643]
+            - paragraph [ref=e644]: Randomized within your general area
+          - generic [ref=e645]:
+            - checkbox [ref=e646]
+            - img [ref=e647]
+        - separator [ref=e649]

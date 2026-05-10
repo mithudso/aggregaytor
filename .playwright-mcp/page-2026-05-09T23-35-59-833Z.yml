@@ -1,0 +1,67 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e6]:
+        - button "Map Layers" [disabled] [ref=e8]:
+          - generic "Map Layers" [ref=e9]: 
+        - generic "Sitelinks" [ref=e11]:
+          - button "App Notifications" [ref=e12] [cursor=pointer]:
+            - generic "Sniffies" [ref=e13]: 
+            - generic [ref=e14]: 
+        - button "Settings" [ref=e16] [cursor=pointer]:
+          - generic "Settings" [ref=e17]: 
+      - generic [ref=e26]:
+        - button "Messages" [ref=e28] [cursor=pointer]:
+          - generic "Messages" [ref=e29]: 
+        - button "Plus" [disabled] [ref=e31]:
+          - generic "Plus" [ref=e32]: 
+        - generic "Cruising Update" [ref=e33]:
+          - button "Cruising Update" [disabled] [ref=e34]:
+            - generic "Cruising Update" [ref=e35]:
+              - text: 
+              - generic [ref=e36]: 
+    - generic [ref=e41]:
+      - generic "Welcome To Sniffies" [ref=e42]: 
+      - paragraph [ref=e43]:
+        - generic [ref=e44]: 
+        - text: For The Curious
+      - generic "Log in to your account" [ref=e46]:
+        - generic [ref=e47]:
+          - generic [ref=e48]:
+            - generic:
+              - generic: 
+            - textbox "" [ref=e49]:
+              - /placeholder: Email
+          - generic [ref=e50]:
+            - generic:
+              - generic: 
+            - textbox "" [ref=e51]:
+              - /placeholder: Password
+          - paragraph [ref=e52]: Forgot your password?
+          - button "Login" [ref=e53] [cursor=pointer]
+        - paragraph [ref=e55]: Don't have an account? Sign up
+      - generic [ref=e57]: or
+      - button "Use Anonymously" [ref=e58] [cursor=pointer]:
+        - generic [ref=e59]: 
+        - text: Use Anonymously
+      - generic [ref=e60]:
+        - link "About Sniffies" [ref=e62] [cursor=pointer]:
+          - /url: /map/pages/about-sniffies
+        - generic [ref=e63]:
+          - paragraph [ref=e64]:
+            - text: By entering, you agree to our
+            - link "Terms and Policies" [ref=e65] [cursor=pointer]:
+              - /url: /map/policies/terms-and-policies
+            - text: and
+            - link "Safety Policy" [ref=e66] [cursor=pointer]:
+              - /url: /map/policies/safety-policy
+            - text: . You must be over 18 years old to enter.
+          - paragraph [ref=e67]:
+            - link "18 U.S.C. § 2257 Statement" [ref=e68] [cursor=pointer]:
+              - /url: /map/policies/terms-of-service?goToAnchor=exemptionStatement
+            - text: "|"
+            - link "Content Removal Request" [ref=e69] [cursor=pointer]:
+              - /url: /map/content-removal
+    - generic:      
+  - generic "Sniffies" [ref=e73]: 
+  - img [ref=e74]

@@ -1,0 +1,791 @@
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e6]:
+        - button "Map Layers Filters Applied" [ref=e80] [cursor=pointer]:
+          - generic "Map Layers" [ref=e9]: 
+          - generic "Filters Applied" [ref=e81]: 
+        - generic "Sitelinks" [ref=e11]:
+          - button "App Notifications" [ref=e12] [cursor=pointer]:
+            - generic "Sniffies" [ref=e13]: 
+            - generic [ref=e14]: 
+            - generic [ref=e84]: 
+        - button "Settings" [ref=e16] [cursor=pointer]:
+          - generic "Settings" [ref=e17]: 
+      - generic [ref=e90]:
+        - generic [ref=e92]:
+          - generic [ref=e93]:
+            - region "Map" [ref=e94]
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e95] [cursor=pointer]:
+                - generic [ref=e96]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e98] [cursor=pointer]:
+                - generic [ref=e99]:
+                  - generic:
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e107] [cursor=pointer]:
+                - generic [ref=e108]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e116] [cursor=pointer]:
+                - generic [ref=e117]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e119] [cursor=pointer]:
+                - generic [ref=e120]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                    - generic:
+                      - generic:
+                        - generic: "6"
+                        - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e122] [cursor=pointer]:
+                - generic [ref=e123]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e137] [cursor=pointer]:
+                - generic [ref=e138]:
+                  - generic:
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e140] [cursor=pointer]:
+                - generic [ref=e141]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e155] [cursor=pointer]:
+                - generic [ref=e156]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e158] [cursor=pointer]:
+                - generic [ref=e159]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e167] [cursor=pointer]:
+                - generic [ref=e168]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e176] [cursor=pointer]:
+                - generic [ref=e177]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e191] [cursor=pointer]:
+                - generic [ref=e192]:
+                  - generic:
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e203] [cursor=pointer]:
+                - generic [ref=e204]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e212] [cursor=pointer]:
+                - generic [ref=e213]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e221] [cursor=pointer]:
+                - generic [ref=e222]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e227] [cursor=pointer]:
+                - generic [ref=e228]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Your Profile Selected" [ref=e230] [cursor=pointer]:
+                - generic [ref=e231]:
+                  - generic "This is you" [ref=e232]
+                  - generic:
+                    - generic:
+                      - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "bottom"
+                      - generic: 
+                      - text: You
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e469] [cursor=pointer]:
+                - generic [ref=e470]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e472] [cursor=pointer]:
+                - generic [ref=e473]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e475] [cursor=pointer]:
+                - generic [ref=e476]:
+                  - generic:
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e481] [cursor=pointer]:
+                - generic [ref=e482]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e490] [cursor=pointer]:
+                - generic [ref=e491]:
+                  - generic:
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e493] [cursor=pointer]:
+                - generic [ref=e494]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e502] [cursor=pointer]:
+                - generic [ref=e503]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                      - generic: 
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e508] [cursor=pointer]:
+                - generic [ref=e509]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e541] [cursor=pointer]:
+                - generic [ref=e542]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e544] [cursor=pointer]:
+                - generic [ref=e545]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e879] [cursor=pointer]:
+                - generic [ref=e880]:
+                  - generic:
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e891] [cursor=pointer]:
+                - generic [ref=e892]:
+                  - generic:
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                    - generic:
+                      - generic:
+                        - generic: "1"
+                        - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e1060] [cursor=pointer]:
+                - generic [ref=e1061]:
+                  - generic:
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e1063] [cursor=pointer]:
+                - generic [ref=e1064]:
+                  - generic:
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e1353] [cursor=pointer]:
+                - generic [ref=e1354]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e1356] [cursor=pointer]:
+                - generic [ref=e1357]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e1594] [cursor=pointer]:
+                - generic [ref=e1595]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e1600] [cursor=pointer]:
+                - generic [ref=e1601]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e1881] [cursor=pointer]:
+                - generic [ref=e1882]:
+                  - generic:
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e2289] [cursor=pointer]:
+                - generic [ref=e2290]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e2295] [cursor=pointer]:
+                - generic [ref=e2296]:
+                  - generic:
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e2561] [cursor=pointer]:
+                - generic [ref=e2562]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e2564] [cursor=pointer]:
+                - generic [ref=e2565]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e2570] [cursor=pointer]:
+                - generic [ref=e2571]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e2575] [cursor=pointer]:
+                - generic [ref=e2576]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e2578] [cursor=pointer]:
+                - generic [ref=e2579]:
+                  - generic:
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e2581] [cursor=pointer]:
+                - generic [ref=e2582]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e2584] [cursor=pointer]:
+                - generic [ref=e2585]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+            - button "Map marker":
+              - generic "Cruiser Selected" [ref=e2587] [cursor=pointer]:
+                - generic [ref=e2588]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic: 
+                    - generic:
+                      - generic: 
+                      - generic:
+                        - generic:
+                          - img "top"
+                          - img
+          - generic [ref=e242]:
+            - button "Zoom in" [ref=e243] [cursor=pointer]
+            - button "Zoom out" [ref=e245] [cursor=pointer]
+        - generic:
+          - generic:
+            - generic:
+              - generic:
+                - button "Toggle Fullscreen" [ref=e249]:
+                  - img [ref=e250] [cursor=pointer]
+                - generic [ref=e252]:
+                  - generic "Enable Travel Mode" [ref=e253]:
+                    - img [ref=e254] [cursor=pointer]
+                  - generic "Hide me" [ref=e256]:
+                    - img [ref=e257] [cursor=pointer]
+                  - button "Find Me" [ref=e259]:
+                    - img [ref=e260] [cursor=pointer]
+        - generic [ref=e262] [cursor=pointer]:
+          - generic "Connected users preview" [ref=e264]
+          - generic "Open carousel" [ref=e277]:
+            - generic [ref=e278]: 
+      - generic [ref=e26]:
+        - button "Messages " [ref=e1345] [cursor=pointer]:
+          - generic "Messages" [ref=e29]: 
+          - generic [ref=e1346]: 
+        - button "Shop" [ref=e78] [cursor=pointer]:
+          - generic "Shop" [ref=e79]: 
+        - generic "Cruising Update" [ref=e33]:
+          - button "Cruising Update " [ref=e279] [cursor=pointer]:
+            - generic "Cruising Update" [ref=e35]:
+              - text: 
+              - generic [ref=e36]: 
+            - generic [ref=e280]: 
+    - generic:
+      - generic [ref=e2306]:
+        - generic [ref=e2308]:
+          - button [ref=e2310] [cursor=pointer]:
+            - generic [ref=e2311]: 
+          - generic [ref=e2312]:
+            - generic [ref=e2314]:
+              - generic "Verified Cruiser" [ref=e2315]: 
+              - generic [ref=e2316]: Verified Cruiser
+            - generic [ref=e2318]: M, 6'0", 200lb, 6.5" , muscular, bottom
+          - generic [ref=e2319]:
+            - button "Go To Edit Profile" [ref=e2320] [cursor=pointer]:
+              - generic [ref=e2321]: 
+            - button "" [ref=e2322] [cursor=pointer]:
+              - generic [ref=e2323]: 
+        - generic "Your Profile" [ref=e2324]:
+          - generic:
+            - generic:
+              - generic "View Profile Photo" [ref=e2325]
+              - generic [ref=e2326]:
+                - generic "View Profile Photo":
+                  - generic [ref=e2330]:
+                    - table [ref=e2332]:
+                      - row " Visiting from Charlotte, North Carolina" [ref=e2333]:
+                        - cell "" [ref=e2334]:
+                          - generic [ref=e2335]: 
+                        - cell "Visiting from Charlotte, North Carolina" [ref=e2336]:
+                          - generic [ref=e2337]: Visiting from Charlotte, North Carolina
+                      - row " M, 6'0\", 200lb, 6.5\" , muscular, bottom" [ref=e2338]:
+                        - cell "" [ref=e2339]:
+                          - generic [ref=e2340]: 
+                        - cell "M, 6'0\", 200lb, 6.5\" , muscular, bottom" [ref=e2341]:
+                          - generic [ref=e2342]: M, 6'0", 200lb, 6.5" , muscular, bottom
+                    - table [ref=e2344]:
+                      - row " BB Bttm Here for a good time not a long time. If you send me a pics of your load, and/or you shooting inside someone I will get instantly hard and respond in kind." [ref=e2345]:
+                        - cell "" [ref=e2346]:
+                          - generic [ref=e2347]: 
+                        - cell "BB Bttm Here for a good time not a long time. If you send me a pics of your load, and/or you shooting inside someone I will get instantly hard and respond in kind." [ref=e2348]
+                    - table [ref=e2352]:
+                      - row " I'm hosting" [ref=e2353]:
+                        - cell "" [ref=e2354]:
+                          - generic [ref=e2355]: 
+                        - cell "I'm hosting" [ref=e2356]
+                    - generic [ref=e2357]:
+                      - generic [ref=e2360]:
+                        - paragraph [ref=e2364]: Location
+                        - generic [ref=e2365]:
+                          - paragraph [ref=e2369]: Can host
+                          - paragraph [ref=e2373]: Can travel
+                      - generic [ref=e2378]:
+                        - paragraph [ref=e2382]: Fetishes
+                        - generic [ref=e2383]:
+                          - paragraph [ref=e2387]: Armpits
+                          - paragraph [ref=e2391]: Body Hair
+                          - paragraph [ref=e2395]: Cum
+                          - paragraph [ref=e2399]: Muscles
+                          - paragraph [ref=e2403]: Hung Cocks
+                          - paragraph [ref=e2407]: Happy Trails
+                      - generic [ref=e2412]:
+                        - paragraph [ref=e2416]: Into
+                        - generic [ref=e2417]:
+                          - paragraph [ref=e2421]: Fucking
+                          - paragraph [ref=e2425]: Oral
+                          - paragraph [ref=e2429]: Massage
+                      - generic [ref=e2434]:
+                        - paragraph [ref=e2438]: Interaction
+                        - generic [ref=e2439]:
+                          - paragraph [ref=e2443]: Cum and Go
+                          - paragraph [ref=e2447]: Drop Pants
+                          - paragraph [ref=e2451]: Pump And Dump
+                      - generic [ref=e2456]:
+                        - paragraph [ref=e2460]: Practices
+                        - paragraph [ref=e2465]: Bareback Only
+                      - generic [ref=e2470]:
+                        - paragraph [ref=e2474]: HIV Status
+                        - paragraph [ref=e2479]: Negative, On PrEP
+                      - generic [ref=e2484]:
+                        - paragraph [ref=e2488]: HIV Tested
+                        - paragraph [ref=e2493]: Jan 25, 2026
+                      - generic [ref=e2498]:
+                        - paragraph [ref=e2502]: STI Tested
+                        - paragraph [ref=e2507]: Jan 25, 2026
+                      - generic [ref=e2512]:
+                        - generic [ref=e2514]:
+                          - paragraph [ref=e2516]: Safeguards
+                          - generic [ref=e2517] [cursor=pointer]: 
+                        - generic [ref=e2518]:
+                          - paragraph [ref=e2522]: COVID Vaccinated
+                          - paragraph [ref=e2526]: Mpox Vaccinated / Immune
+                          - paragraph [ref=e2530]: DoxyPEP
+                      - generic [ref=e2535]:
+                        - generic [ref=e2537]:
+                          - paragraph [ref=e2539]: I carry...
+                          - generic [ref=e2540] [cursor=pointer]: 
+                        - paragraph [ref=e2545]: Lube
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic "View Profile Photo" [ref=e2546] [cursor=pointer]
+                      - generic "View Profile Photo" [ref=e2549] [cursor=pointer]
+                      - generic "View Profile Photo" [ref=e2552] [cursor=pointer]
+                      - generic "NSFW photos can only depict yourself and no other individuals to ensure consent":
+                        - generic: 
+        - generic [ref=e2555]:
+          - button "" [ref=e2556] [cursor=pointer]:
+            - generic [ref=e2557]: 
+          - text: 
+          - button "Sniffies" [ref=e2559] [cursor=pointer]:
+            - generic "Sniffies" [ref=e2560]: 
+      - generic "Settings Menu" [active] [ref=e2591]:
+        - generic [ref=e2593]:
+          - generic [ref=e2595]:
+            - generic [ref=e2597] [cursor=pointer]:
+              - generic [ref=e2598]: 
+              - generic [ref=e2599]:
+                - paragraph [ref=e2602]: Your Cruiser Profile
+                - paragraph [ref=e2604]: PLUS Member
+            - generic [ref=e2607]: 
+          - generic [ref=e2609]:
+            - generic [ref=e2611] [cursor=pointer]:
+              - generic [ref=e2612]: 
+              - paragraph [ref=e2616]: Account Settings
+            - generic [ref=e2619]: 
+        - generic [ref=e2621]:
+          - generic [ref=e2623]:
+            - generic [ref=e2625] [cursor=pointer]:
+              - generic [ref=e2626]: 
+              - generic [ref=e2627]:
+                - paragraph [ref=e2630]: Vanilla Mode
+                - paragraph [ref=e2632]: NSFW media is shown
+            - checkbox " Vanilla Mode NSFW media is shown" [disabled] [ref=e2636] [cursor=pointer]
+          - generic [ref=e2639]:
+            - generic [ref=e2641]:
+              - generic [ref=e2642]: 
+              - paragraph [ref=e2646]: Cluster Markers
+            - checkbox " Cluster Markers" [checked] [disabled] [ref=e2650]
+          - generic [ref=e2653]:
+            - generic [ref=e2655] [cursor=pointer]:
+              - generic [ref=e2656]: 
+              - paragraph [ref=e2660]: Sounds (If Supported)
+            - checkbox " Sounds (If Supported)" [disabled] [ref=e2664] [cursor=pointer]
+        - generic [ref=e2668]:
+          - generic [ref=e2670]:
+            - generic [ref=e2672] [cursor=pointer]:
+              - generic [ref=e2673]: 
+              - generic [ref=e2675]:
+                - paragraph [ref=e2677]: Host a Group
+                - generic [ref=e2679]: 
+            - generic [ref=e2682]: 
+          - generic [ref=e2684]:
+            - generic [ref=e2686] [cursor=pointer]:
+              - generic [ref=e2687]: 
+              - generic [ref=e2689]:
+                - paragraph [ref=e2691]: Add a Place
+                - generic [ref=e2693]: 
+            - generic [ref=e2696]: 
+        - generic [ref=e2698]:
+          - generic [ref=e2703] [cursor=pointer]:
+            - generic [ref=e2704]: 
+            - generic [ref=e2705]:
+              - paragraph [ref=e2708]: Location Randomizer
+              - generic [ref=e2709]:
+                - paragraph [ref=e2710]: less
+                - slider [ref=e2712]: "1"
+                - paragraph [ref=e2713]: more
+          - generic [ref=e2717] [cursor=pointer]:
+            - generic [ref=e2718]: 
+            - paragraph [ref=e2722]: Logout
+          - generic [ref=e2726] [cursor=pointer]:
+            - generic [ref=e2727]: 
+            - paragraph [ref=e2731]: Refresh App
+          - generic [ref=e2733]:
+            - generic [ref=e2735] [cursor=pointer]:
+              - generic [ref=e2736]: 
+              - paragraph [ref=e2740]: Information
+            - generic [ref=e2743]: 
+    - generic:    
+  - text: 
+  - img [ref=e74]
