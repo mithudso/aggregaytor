@@ -5,6 +5,16 @@
 const LOG = '[Aggregaytor:Bridge:DList]';
 let contextValid = true;
 
+/**
+ * Probe whether this content script's extension context is still live.
+ *
+ * WHY: after an extension reload/update, `chrome.runtime.id` throws in
+ * orphaned content scripts and every subsequent `chrome.*` call would throw.
+ * Gating relays on this keeps a stale bridge from spamming exceptions. Logs the
+ * transition exactly once (guarded on `contextValid`).
+ *
+ * @returns `true` while the context is usable; `false` once invalidated.
+ */
 function checkContext(): boolean {
   try { void chrome.runtime.id; return true; }
   catch { if (contextValid) { console.warn(`${LOG} Context invalidated`); contextValid = false; } return false; }
@@ -29,6 +39,11 @@ window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
   catch { contextValid = false; }
 }) as EventListener);
 
+// Service-worker command handler (trusted sender). Dispatches SW commands to
+// the MAIN world via CustomEvents and does DOM-side work (avatar scraping).
+// Wrapped in try/catch because `chrome.runtime.onMessage` throws synchronously
+// if the context was invalidated between load and this registration.
+// Each `localStorage.setItem` is individually guarded (quota/private-mode).
 try {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === 'SEND_AUTO_RESPONSE') {
@@ -84,6 +99,13 @@ try {
 } catch { contextValid = false; }
 
 let lastUrl = location.href;
+/**
+ * Detect DoubleList SPA/URL navigation and notify the SW which conversation is
+ * now active. Polled (3s) and on `popstate`; no-ops when the URL is unchanged
+ * or the extension context is gone. The `chrome.runtime.sendMessage` is
+ * double-guarded (rejected promise + synchronous throw) so a dead context never
+ * surfaces an uncaught error from the interval.
+ */
 function checkUrlChange() {
   if (!contextValid) return;
   const url = location.href;

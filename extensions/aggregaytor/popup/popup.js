@@ -57,6 +57,22 @@ function esc(text) {
 
 // ── Personality settings ────────────────────────────────────────────────────
 
+// NOTE ON LOGGING: this popup is loaded as a plain `<script>` (see
+// popup.html), not an ES module, so it cannot import the package's
+// `createLogger`. `console.*` is the only logging channel available here.
+// Load-time failures below are logged with `console.warn` and, where the user
+// needs to know, also surfaced in the UI.
+
+/**
+ * Fetch the saved personality settings from the service worker and populate the
+ * preset dropdown, description, custom-instructions field, and style-guide
+ * display. Runs once on popup open.
+ *
+ * Failures are non-fatal: on error the section is simply left in its default
+ * (empty) state rather than blocking the rest of the popup.
+ *
+ * @returns {Promise<void>}
+ */
 async function loadPersonality() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_PERSONALITY' });
@@ -78,7 +94,9 @@ async function loadPersonality() {
 
     // Style guide
     document.getElementById('style-guide-display').textContent = personality.styleGuide || 'Not yet derived. Click "Analyze" to scan your sent messages.';
-  } catch {}
+  } catch (err) {
+    console.warn('[Aggregaytor:popup] loadPersonality failed:', err);
+  }
 }
 
 document.getElementById('personality-preset')?.addEventListener('change', (e) => {
@@ -163,17 +181,32 @@ document.querySelectorAll('[data-toggle]').forEach(el => {
 
 // ── Stats ───────────────────────────────────────────────────────────────────
 
+/**
+ * Fetch the unread-message count from the service worker and render it into the
+ * stats box. On failure (e.g. the worker is still spinning up) shows a
+ * "Connecting..." placeholder instead of an error.
+ *
+ * @returns {Promise<void>}
+ */
 async function loadStats() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_UNREAD_COUNT' });
     document.getElementById('stats').innerHTML = `<div class="stat"><span class="stat-label">Unread</span><span class="stat-value">${res?.count || 0}</span></div>`;
-  } catch {
+  } catch (err) {
+    console.warn('[Aggregaytor:popup] loadStats failed:', err);
     document.getElementById('stats').innerHTML = `<div class="stat"><span class="stat-label">Status</span><span class="stat-value">Connecting...</span></div>`;
   }
 }
 
 // ── LLM settings ────────────────────────────────────────────────────────────
 
+/**
+ * Fetch the saved LLM provider config from the service worker and populate the
+ * provider dropdown, API-key field, and model field, then sync the dependent UI
+ * via `updateProviderUI`. Runs once on popup open.
+ *
+ * @returns {Promise<void>}
+ */
 async function loadLLMSettings() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_LLM_CONFIG' });
@@ -183,17 +216,30 @@ async function loadLLMSettings() {
       document.getElementById('model').value = res.config.model || '';
       updateProviderUI(res.config.provider || 'local');
     }
-  } catch {}
+  } catch (err) {
+    console.warn('[Aggregaytor:popup] loadLLMSettings failed:', err);
+  }
 }
 
-// Log level
+// Log level: persist the chosen level to the background (via popupSend, which
+// never throws) on change, and initialise the dropdown from stored state.
 document.getElementById('log-level').addEventListener('change', async (e) => {
   await popupSend({ type: 'SET_LOG_LEVEL', level: e.target.value });
 });
 chrome.storage.local.get('aggregaytor_log_level').then(data => {
   if (data.aggregaytor_log_level) document.getElementById('log-level').value = data.aggregaytor_log_level;
+}).catch(err => {
+  console.warn('[Aggregaytor:popup] could not read stored log level:', err);
 });
 
+/**
+ * Sync the provider-dependent parts of the LLM settings UI: show the provider's
+ * description, and reveal or hide the API-key / model / save controls (hidden
+ * for the `local` provider, which needs no key).
+ *
+ * @param {string} provider - The selected provider id (a key of `PROVIDER_INFO`).
+ * @returns {void}
+ */
 function updateProviderUI(provider) {
   document.getElementById('provider-info').textContent = PROVIDER_INFO[provider] || '';
   const show = provider !== 'local';
@@ -228,6 +274,16 @@ document.getElementById('save-llm').addEventListener('click', async () => {
 
 // ── Rate settings ───────────────────────────────────────────────────────────
 
+/**
+ * Populate the LLM rate-limit / feature-toggle controls and the live queue
+ * status line from the service worker. Also called after saving rate settings
+ * to reflect the persisted values back into the form.
+ *
+ * The settings load and the queue-status load are independent try/catch blocks
+ * so a failure of one does not blank out the other.
+ *
+ * @returns {Promise<void>}
+ */
 async function loadRateSettings() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_LLM_RATE_SETTINGS' });
@@ -241,7 +297,9 @@ async function loadRateSettings() {
       document.getElementById('llm-feat-nick').checked = s.enableNicknames !== false;
       document.getElementById('llm-feat-summary').checked = s.enableSummaries !== false;
     }
-  } catch {}
+  } catch (err) {
+    console.warn('[Aggregaytor:popup] loadRateSettings (settings) failed:', err);
+  }
   // Show queue status
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_LLM_QUEUE_STATUS' });
@@ -251,7 +309,9 @@ async function loadRateSettings() {
         `Queue: ${s.queueLength} | Last min: ${s.requestsLastMinute} req` +
         (s.backoffUntil > 0 ? ` | Backoff: ${Math.round(s.backoffUntil / 1000)}s` : '');
     }
-  } catch {}
+  } catch (err) {
+    console.warn('[Aggregaytor:popup] loadRateSettings (queue status) failed:', err);
+  }
 }
 
 document.getElementById('save-rate').addEventListener('click', async () => {
@@ -308,6 +368,14 @@ document.getElementById('cal-save').addEventListener('click', async () => {
   status.style.color = '#34d399';
 });
 
+/**
+ * Fetch saved Google Calendar settings from the service worker; if calendar
+ * integration is connected/enabled, reveal the settings fields and populate the
+ * prep-time / travel-time values and the connected-status line. Runs once on
+ * popup open.
+ *
+ * @returns {Promise<void>}
+ */
 async function loadCalendarSettings() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_CALENDAR_SETTINGS' });
@@ -318,11 +386,23 @@ async function loadCalendarSettings() {
       document.getElementById('cal-status').textContent = 'Calendar connected';
       document.getElementById('cal-status').style.color = '#34d399';
     }
-  } catch {}
+  } catch (err) {
+    console.warn('[Aggregaytor:popup] loadCalendarSettings failed:', err);
+  }
 }
 
 // ── Picture library ─────────────────────────────────────────────────────────
 
+/**
+ * Fetch the saved picture library from the service worker and render it as a
+ * grid of thumbnails with per-picture send/response/like stats and a delete
+ * button. Delete buttons are wired to `DELETE_PICTURE` + a re-render.
+ *
+ * All interpolated picture fields (labels, tags, data URLs, ids) are run
+ * through `esc()` because they can originate from imported JSON.
+ *
+ * @returns {Promise<void>}
+ */
 async function loadPictures() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_ALL_PICTURES' });
@@ -343,37 +423,63 @@ async function loadPictures() {
         loadPictures();
       });
     });
-  } catch {}
+  } catch (err) {
+    console.warn('[Aggregaytor:popup] loadPictures failed:', err);
+  }
 }
 
+// Picture upload: read the user-selected file (untrusted input), decode it as
+// an image, downscale it to a 200x200 center-cropped JPEG thumbnail on a
+// canvas, and send both the full data URL and the thumbnail to the service
+// worker. Every failure branch (unreadable file, undecodable/hostile image,
+// missing 2D context) is handled so a bad file surfaces an error instead of
+// leaving the upload silently hung.
 document.getElementById('pic-upload').addEventListener('change', async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
   const tag = document.getElementById('pic-tag').value;
   const label = document.getElementById('pic-label').value.trim() || file.name;
 
+  /** Reset the picker on failure so the user can retry the same file. */
+  const failUpload = (reason, err) => {
+    console.warn(`[Aggregaytor:popup] picture upload failed: ${reason}`, err || '');
+    e.target.value = '';
+  };
+
   const reader = new FileReader();
+  reader.onerror = () => failUpload('could not read file', reader.error);
   reader.onload = async () => {
     const dataUrl = reader.result;
     // Create thumbnail (resize to 200px)
     const img = new Image();
+    // A non-image or corrupt file never fires `onload`; without this the whole
+    // upload would hang with no feedback.
+    img.onerror = () => failUpload('file is not a decodable image');
     img.onload = async () => {
-      const canvas = document.createElement('canvas');
-      const size = 200;
-      canvas.width = size; canvas.height = size;
-      const ctx = canvas.getContext('2d');
-      const scale = Math.max(size / img.width, size / img.height);
-      const w = img.width * scale, h = img.height * scale;
-      ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
-      const thumbnail = canvas.toDataURL('image/jpeg', 0.7);
+      try {
+        const canvas = document.createElement('canvas');
+        const size = 200;
+        canvas.width = size; canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        // getContext can return null (e.g. context lost / blocked); bail rather
+        // than throw on `ctx.drawImage`.
+        if (!ctx) { failUpload('2D canvas context unavailable'); return; }
+        const scale = Math.max(size / img.width, size / img.height);
+        const w = img.width * scale, h = img.height * scale;
+        ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+        const thumbnail = canvas.toDataURL('image/jpeg', 0.7);
 
-      await popupSend({
-        type: 'ADD_PICTURE',
-        input: { tag, label, dataUrl, thumbnail },
-      });
-      document.getElementById('pic-label').value = '';
-      e.target.value = '';
-      loadPictures();
+        const res = await popupSend({
+          type: 'ADD_PICTURE',
+          input: { tag, label, dataUrl, thumbnail },
+        });
+        if (res?.ok === false) { failUpload(`background rejected picture: ${res.error || 'unknown error'}`); return; }
+        document.getElementById('pic-label').value = '';
+        e.target.value = '';
+        loadPictures();
+      } catch (err) {
+        failUpload('thumbnail generation threw', err);
+      }
     };
     img.src = dataUrl;
   };
@@ -389,6 +495,14 @@ document.getElementById('rule-type').addEventListener('change', (e) => {
   document.getElementById('rule-threshold').style.display = e.target.value === 'keyword' ? 'none' : '';
 });
 
+/**
+ * Fetch the saved auto-block rules from the service worker and render them as a
+ * list with per-rule execution counts and enable/disable + delete controls.
+ * Those controls are wired to `UPDATE_BLOCK_RULE` / `DELETE_BLOCK_RULE` plus a
+ * re-render. Rule names are `esc()`-escaped (user/import-controlled).
+ *
+ * @returns {Promise<void>}
+ */
 async function loadRules() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_ALL_BLOCK_RULES' });
@@ -417,7 +531,9 @@ async function loadRules() {
         loadRules();
       });
     });
-  } catch {}
+  } catch (err) {
+    console.warn('[Aggregaytor:popup] loadRules failed:', err);
+  }
 }
 
 document.getElementById('add-rule').addEventListener('click', async () => {

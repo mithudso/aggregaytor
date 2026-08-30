@@ -78,6 +78,19 @@ const _knownStores = new Map<string, Set<string>>();
 // later upgrade.
 const _openChains = new Map<string, Promise<unknown>>();
 
+/**
+ * Open (and, when `version` forces an upgrade, create the given object stores
+ * in) an IndexedDB database.
+ *
+ * Steps aside on `versionchange` so another context's upgrade isn't blocked,
+ * and rejects on `blocked` rather than hanging.
+ *
+ * @param dbName   Database name.
+ * @param version  Force this version (triggers onupgradeneeded); omit to open current.
+ * @param stores   Stores to create during an upgrade (keyPath 'k').
+ * @returns The opened IDBDatabase.
+ * @throws On IDB open error or an upgrade blocked by another connection.
+ */
 function openIdb(dbName: string, version?: number, stores?: Set<string>): Promise<IDBDatabase> {
   return new Promise<IDBDatabase>((resolve, reject) => {
     const req = version === undefined ? indexedDB.open(dbName) : indexedDB.open(dbName, version);
@@ -122,6 +135,18 @@ async function openWithStores(dbName: string, stores: Set<string>): Promise<IDBD
   return openIdb(dbName, nextVersion, stores);
 }
 
+/**
+ * Return a shared connection to `dbName`, guaranteeing `storeName` exists.
+ *
+ * Opens are serialized per dbName (via `_openChains`) so two concurrent opens
+ * can't race on the version number and wedge later upgrades, and the resolved
+ * connection is memoized in `_dbConnections`. Every store ever requested for a
+ * dbName is remembered so the next upgrade creates them all at once.
+ *
+ * @param dbName     Cache database name.
+ * @param storeName  Object store that must exist on the returned connection.
+ * @returns A shared IDBDatabase with `storeName` present.
+ */
 async function getCacheDb(dbName: string, storeName: string): Promise<IDBDatabase> {
   // Track every store we've ever wanted so the next upgrade creates them all.
   let stores = _knownStores.get(dbName);
@@ -171,10 +196,15 @@ export class LruIdbCache<V> {
     };
   }
 
+  /** True when a TTL is configured and `ts` is older than it. */
   private isExpired(ts: number): boolean {
     return this.opts.ttlMs > 0 && Date.now() - ts > this.opts.ttlMs;
   }
 
+  /**
+   * Insert/refresh a mem-tier entry at the most-recently-used position and evict
+   * the oldest entries until the tier is back under `maxItems`.
+   */
   private memSet(key: string, entry: CacheEntry<V>): void {
     // Insertion-order LRU: delete-then-set bumps the entry to the end of the
     // Map iteration order so it's the LAST thing evicted, not the first.
@@ -257,6 +287,7 @@ export class LruIdbCache<V> {
     for (const resolve of waiters) resolve();
   }
 
+  /** Remove a key from both tiers, cancelling any queued write for it. */
   async delete(key: string): Promise<void> {
     this.mem.delete(key);
     // Drop any queued write for this key, or the pending flush would
@@ -304,6 +335,7 @@ export class LruIdbCache<V> {
   }
 
   // ── Cold-tier helpers (IDB) ─────────────────────────────────────────────
+  /** Read one entry from the cold (IDB) tier; null on miss or IDB failure (logged). */
   private async coldGet(key: string): Promise<CacheEntry<V> | null> {
     try {
       const db = await getCacheDb(this.opts.dbName, this.opts.storeName);
@@ -323,6 +355,11 @@ export class LruIdbCache<V> {
     }
   }
 
+  /**
+   * Write a batch of entries to the cold tier in one transaction, then trim to
+   * `maxItemsTotal` outside that transaction so the writes still commit if trim
+   * hits a quota error.
+   */
   private async coldSetBatch(batch: [string, CacheEntry<V>][]): Promise<void> {
     if (!batch.length) return;
     const db = await getCacheDb(this.opts.dbName, this.opts.storeName);
@@ -343,6 +380,7 @@ export class LruIdbCache<V> {
     });
   }
 
+  /** Delete one key from the cold tier; failures are logged, not thrown. */
   private async coldDelete(key: string): Promise<void> {
     try {
       const db = await getCacheDb(this.opts.dbName, this.opts.storeName);
@@ -358,6 +396,7 @@ export class LruIdbCache<V> {
     }
   }
 
+  /** Clear the entire cold-tier object store; failures are logged, not thrown. */
   private async coldClear(): Promise<void> {
     try {
       const db = await getCacheDb(this.opts.dbName, this.opts.storeName);

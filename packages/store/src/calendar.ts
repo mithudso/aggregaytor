@@ -15,10 +15,18 @@ const CAL_TOKEN_KEY = 'aggregaytor_calendar_token';
 // Storage abstraction — chrome.storage.local is injected at runtime
 let _storage: { get(k: string): Promise<any>; set(k: string, v: any): Promise<void> } | null = null;
 
+/**
+ * Inject a storage backend (used by tests to replace chrome.storage.local).
+ * When unset, the helpers fall back to chrome.storage.local at runtime.
+ */
 export function setCalendarStorage(storage: { get(k: string): Promise<any>; set(k: string, v: any): Promise<void> }): void {
   _storage = storage;
 }
 
+/**
+ * Read a value from the injected storage, else chrome.storage.local.
+ * Returns null when neither is available (e.g. a non-extension context).
+ */
 async function storageGet(key: string): Promise<any> {
   if (_storage) return _storage.get(key);
   if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
@@ -28,6 +36,10 @@ async function storageGet(key: string): Promise<any> {
   return null;
 }
 
+/**
+ * Write a value to the injected storage, else chrome.storage.local. Silently
+ * no-ops when neither backend is available.
+ */
 async function storageSet(key: string, value: any): Promise<void> {
   if (_storage) { await _storage.set(key, value); return; }
   if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
@@ -57,20 +69,24 @@ const DEFAULT_CAL_SETTINGS: CalendarSettings = {
   bookingUrl: '',
 };
 
+/** Load calendar settings, back-filled with DEFAULT_CAL_SETTINGS for any missing keys. */
 export async function getCalendarSettings(): Promise<CalendarSettings> {
   const data = await storageGet(CAL_SETTINGS_KEY);
   return { ...DEFAULT_CAL_SETTINGS, ...(data || {}) };
 }
 
+/** Merge a partial settings patch over the stored settings and persist it. */
 export async function saveCalendarSettings(settings: Partial<CalendarSettings>): Promise<void> {
   const existing = await getCalendarSettings();
   await storageSet(CAL_SETTINGS_KEY, { ...existing, ...settings });
 }
 
+/** Load the stored OAuth token, or null if none is saved. */
 export async function getCalendarToken(): Promise<CalendarToken | null> {
   return await storageGet(CAL_TOKEN_KEY) || null;
 }
 
+/** Persist the OAuth token. Never logged (see isTokenUsable / clearRejectedToken). */
 export async function saveCalendarToken(token: CalendarToken): Promise<void> {
   await storageSet(CAL_TOKEN_KEY, token);
 }
@@ -139,6 +155,19 @@ export async function getAvailableSlots(
 /** A free gap shorter than this isn't worth offering as a meetup slot. */
 const MIN_SLOT_MS = 30 * 60_000;
 
+/**
+ * Turn Google's busy periods into free meetup slots within [from, to].
+ *
+ * Each busy block is pushed earlier by the prep+travel buffer so a slot never
+ * runs right up against an existing event, and gaps shorter than MIN_SLOT_MS
+ * are dropped as too small to offer.
+ *
+ * @param from      ISO 8601 window start.
+ * @param to        ISO 8601 window end.
+ * @param busy      Google free/busy periods.
+ * @param settings  Provides prep/travel buffers.
+ * @returns Free TimeSlots, each at least MIN_SLOT_MS long.
+ */
 function invertBusyToFree(
   from: string, to: string,
   busy: Array<{ start: string; end: string }>,
@@ -174,6 +203,7 @@ function invertBusyToFree(
   return slots;
 }
 
+/** Render a slot as a human-readable "7:00 PM - 9:00 PM" label in local time. */
 function formatSlotLabel(startMs: number, endMs: number): string {
   const fmt = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   return `${fmt(startMs)} - ${fmt(endMs)}`;
@@ -255,11 +285,14 @@ export async function createCalendarEvent(
 }
 
 /**
- * Initiate Google Calendar OAuth using chrome.identity.
- */
-/**
- * Authenticate with Google Calendar.
- * Must be called from the extension context (service worker) where chrome.identity is available.
+ * Initiate Google Calendar OAuth via chrome.identity and persist the token.
+ *
+ * Must run in the extension context (service worker) where chrome.identity is
+ * available. On success stores a token with a 1-hour expiry (chrome.identity
+ * owns refresh, so no refresh token is kept). Auth failures are logged without
+ * the token and reported as `false`.
+ *
+ * @returns true if a token was obtained and saved, false otherwise.
  */
 export async function authenticateCalendar(): Promise<boolean> {
   try {

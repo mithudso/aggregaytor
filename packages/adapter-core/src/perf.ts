@@ -48,6 +48,13 @@ interface PerfEntry {
   lastAt: number;
 }
 
+/**
+ * In-memory registry of named timing/count counters.
+ *
+ * A single shared instance (`perf`) is used across the package. Each named
+ * counter accumulates call count and cumulative/max elapsed time; nothing is
+ * persisted or reported anywhere until something reads `stats()`.
+ */
 class PerfCounters {
   private counters = new Map<string, PerfEntry>();
   private startTime = Date.now();

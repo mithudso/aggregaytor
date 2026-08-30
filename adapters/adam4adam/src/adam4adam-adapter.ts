@@ -64,6 +64,13 @@ export class Adam4AdamAdapter extends BaseAdapter {
   private currentUser = '';
   private seenMessageIds = new Set<string>(); // dedup
 
+  /**
+   * Bring the adapter online. Seeds self-IDs (page globals, `frontend-config`
+   * meta tag, localStorage, URL), wires a {@link createDOMExtractor} for
+   * newly-rendered message elements, scans messages already on the page, and
+   * installs fetch/XHR interception. A4A serves DMs through both server-rendered
+   * DOM and a REST API, so both paths are needed.
+   */
   async init(): Promise<void> {
     log.info('Initializing...');
     this.selfIds.seedFromWindow(window as Window & typeof globalThis);
@@ -98,6 +105,16 @@ export class Adam4AdamAdapter extends BaseAdapter {
 
   // ── URL Interception ────────────────────────────────────────────────────
 
+  /**
+   * Gate which intercepted requests are parsed as Adam4Adam data.
+   *
+   * Cheap substring pre-check, then static-asset rejection, then a real host
+   * check via {@link isA4AHost} so a look-alike third-party URL cannot inject
+   * forged payloads.
+   *
+   * @param url - The request URL seen by the network interceptor.
+   * @returns `true` only for genuinely A4A-owned, non-asset URLs.
+   */
   protected shouldInterceptUrl(url: string): boolean {
     const s = String(url).toLowerCase();
     if (!s.includes('adam4adam.com')) return false;
@@ -112,6 +129,18 @@ export class Adam4AdamAdapter extends BaseAdapter {
 
   // ── API Response Parsing ────────────────────────────────────────────────
 
+  /**
+   * Extract Adam4Adam messages and contacts from an intercepted JSON payload.
+   *
+   * Walks the (untrusted) response with {@link walkPayload}; each object node is
+   * handled by {@link visitPayloadObject}, wrapped so a throw on one node cannot
+   * abort the walk. Messages are deduplicated before return; contacts are
+   * emitted directly as a `'contacts'` event.
+   *
+   * @param url     - Source URL, recorded in message metadata.
+   * @param payload - The parsed JSON body; may be any shape.
+   * @returns The deduplicated messages extracted from this payload.
+   */
   protected parseApiResponse(url: string, payload: unknown): UnifiedMessage[] {
     const messages: UnifiedMessage[] = [];
     const contacts: UnifiedContact[] = [];
@@ -246,12 +275,31 @@ export class Adam4AdamAdapter extends BaseAdapter {
     });
   }
 
+  /**
+   * Parse a WebSocket frame — always returns `[]`.
+   *
+   * Adam4Adam delivers messages over its REST API, not WebSockets, so there is
+   * nothing to parse. Present only to satisfy the {@link BaseAdapter} contract.
+   *
+   * @returns An empty array (always).
+   */
   protected parseWebSocketFrame(): UnifiedMessage[] {
     return []; // A4A uses REST, not WebSocket
   }
 
   // ── Deduplication ────────────────────────────────────────────────────────
 
+  /**
+   * Filter out messages already seen this session (by exact id and by a
+   * contact+body+minute content key), then cap the seen-set to bound memory.
+   *
+   * The same message can arrive via the DOM scan and the REST API with
+   * different ids, so content-keying catches near-duplicates the id check
+   * misses. When the seen-set passes 3000 entries the oldest ~1000 are dropped.
+   *
+   * @param messages - Freshly extracted messages, possibly containing dupes.
+   * @returns Only the messages not previously emitted.
+   */
   private dedup(messages: UnifiedMessage[]): UnifiedMessage[] {
     const result = messages.filter(m => {
       if (this.seenMessageIds.has(m.id)) return false;
@@ -272,6 +320,17 @@ export class Adam4AdamAdapter extends BaseAdapter {
 
   // ── Self-ID Detection ────────────────────────────────────────────────────
 
+  /**
+   * Populate {@link selfIds} (and `currentUser`) with the logged-in user's ID so
+   * outgoing messages can be direction-detected and the user's own profile is
+   * skipped during contact extraction.
+   *
+   * Three strategies in order: the `frontend-config` meta tag, user/profile/
+   * auth/session keys in localStorage, and the profile ID in the URL when an
+   * "own-profile" marker is present. Best-effort — the whole scan is wrapped so
+   * a hostile DOM or unreadable storage can't abort init(); a failure is logged
+   * at debug and leaves self-IDs unseeded from this source.
+   */
   private detectCurrentUser(): void {
     try {
       // Strategy 1: frontend-config meta tag
@@ -298,7 +357,7 @@ export class Adam4AdamAdapter extends BaseAdapter {
               }
             }
           }
-        } catch {}
+        } catch { /* localStorage value not JSON — expected, skip this key */ }
       }
       // Strategy 3: check URL for profile
       const urlMatch = location.href.match(/\/profile\/([^/?#]+)/);
@@ -306,11 +365,19 @@ export class Adam4AdamAdapter extends BaseAdapter {
         this.selfIds.ids.add(urlMatch[1]);
         this.currentUser = this.currentUser || urlMatch[1];
       }
-    } catch {}
+    } catch (err) {
+      log.debug('Self-ID detection failed:', err);
+    }
   }
 
   // ── DOM Message Parsing ──────────────────────────────────────────────────
 
+  /**
+   * Parse messages already present in the DOM at init time (the DOM extractor
+   * only fires on subsequently-added nodes). Emits any messages (deduplicated)
+   * and contacts found, and logs the count so a session can confirm the initial
+   * scan ran.
+   */
   private scanExistingMessages(): void {
     const elements = document.querySelectorAll('[data-author], .message-item, .mail-message');
     const messages: UnifiedMessage[] = [];
@@ -327,7 +394,23 @@ export class Adam4AdamAdapter extends BaseAdapter {
     if (contacts.length) this.emit({ type: 'contacts', payload: contacts });
   }
 
+  /**
+   * Turn one Adam4Adam message DOM element into a normalized message (and, for
+   * inbound messages, the sender contact).
+   *
+   * Reads the sender from `data-author`, the body from element text (rejecting
+   * profile-attribute enum values that aren't real messages), an absolute or
+   * relative timestamp from a nearby time element, and a nearby avatar image.
+   * Direction is outbound when the author matches a known self-ID. The whole
+   * body is wrapped so a malformed element yields `null` instead of throwing out
+   * of the caller's batch loop.
+   *
+   * @param el - A candidate message element from the DOM.
+   * @returns `{ message, contact? }`, or `null` when the element has no author/
+   *          usable body, the body is a profile attribute, or parsing threw.
+   */
   private parseMessageElement(el: Element): { message?: UnifiedMessage; contact?: UnifiedContact } | null {
+    try {
     const author = (el.getAttribute('data-author') || '').replace(/:$/, '').trim();
     if (!author) return null;
     const body = el.textContent?.trim();
@@ -388,5 +471,9 @@ export class Adam4AdamAdapter extends BaseAdapter {
     } : undefined;
 
     return { message, contact };
+    } catch (err) {
+      log.debug('Skipped unparseable Adam4Adam DOM element:', err);
+      return null;
+    }
   }
 }

@@ -53,6 +53,11 @@ function messageDocId(msg: UnifiedMessage): string {
   return `msg:${msg.platform}:${msg.id.replace(/^[^:]+:/, '')}`;
 }
 
+/**
+ * Duck-type guard for a StoreDatabase, used so older call sites that pass the
+ * `db` in the second positional slot (where `opts` now lives) are detected and
+ * re-routed rather than mistaken for options.
+ */
 function isStoreDatabase(value: unknown): value is StoreDatabase {
   return !!value && typeof value === 'object' && typeof (value as StoreDatabase).get === 'function';
 }
@@ -329,6 +334,10 @@ export async function markThreadRead(
   return docs.length;
 }
 
+const MAX_BADGE_SCAN = 999; // badge renders "999+" after this
+const UNREAD_CACHE_TTL_MS = 2000;
+const unreadCountCache = new Map<string, { count: number; time: number; capped: boolean }>();
+
 /**
  * Count unread inbound messages, optionally filtered by platform.
  *
@@ -357,12 +366,10 @@ export async function markThreadRead(
  * @param platform  If provided, only count unreads on this platform.
  * @param opts.exact  If true, return exact count (no cap). Default false.
  * @param opts.limit  Override the default cap. Ignored if exact=true.
+ * @param db          Optional store override (also accepted in the `opts` slot
+ *                    for back-compat with older two-arg call sites).
  * @returns           Count of unread inbound messages, capped unless exact.
  */
-const MAX_BADGE_SCAN = 999; // badge renders "999+" after this
-const UNREAD_CACHE_TTL_MS = 2000;
-const unreadCountCache = new Map<string, { count: number; time: number; capped: boolean }>();
-
 export async function getUnreadCount(
   platform?: Platform,
   opts?: { exact?: boolean; limit?: number },

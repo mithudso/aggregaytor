@@ -14,7 +14,18 @@
 
 const LOG = '[Aggregaytor:Bridge:A4A]';
 
-// v0.57.44: forward bridge errors to the SW's rolling error log.
+/**
+ * v0.57.44: forward a bridge error to the service worker's rolling error log.
+ *
+ * WHY: uncaught errors in an ISOLATED content script are otherwise invisible
+ * unless the page's DevTools is open on this exact frame. Both the rejected
+ * promise and the synchronous `sendMessage` throw (dead context) are swallowed
+ * so the error reporter can never itself throw.
+ *
+ * @param level - Origin of the error: window `error`, promise `rejection`, or manual `error`.
+ * @param message - Human-readable error message.
+ * @param stack - Optional stack trace, when available.
+ */
 function _forwardError(level: 'unhandled' | 'rejection' | 'error', message: string, stack?: string): void {
   try {
     chrome.runtime.sendMessage({
@@ -37,6 +48,15 @@ const HIDE_CLASS = 'aggregaytor-a4a-hide';
 const BLOCKED_KEY = 'aggregaytor_a4a_blocked';
 let contextValid = true;
 
+/**
+ * Probe whether this content script's extension context is still live.
+ *
+ * WHY: after an extension reload/update `chrome.runtime.id` throws in orphaned
+ * content scripts; gating `chrome.*` work on this check stops a stale bridge
+ * from spamming exceptions. Logs the transition exactly once.
+ *
+ * @returns `true` while the context is usable; `false` once invalidated.
+ */
 function checkContext(): boolean {
   try { void chrome.runtime.id; return true; }
   catch { if (contextValid) { console.warn(`${LOG} Context invalidated`); contextValid = false; } return false; }
@@ -62,6 +82,9 @@ function escapeHtml(text: unknown): string {
 // profile card on the page that matches. The PROFILE_BLOCKED event still
 // flows to the service worker for aggregator tracking + preference training.
 const blockedUsernames = new Set<string>();
+// Hydrate the in-memory blocklist from localStorage. The stored value is
+// untrusted (user-editable / possibly corrupt), so the parse is guarded and a
+// non-array is ignored rather than allowed to throw at module top level.
 try {
   const raw = localStorage.getItem(BLOCKED_KEY);
   if (raw) {
@@ -70,10 +93,15 @@ try {
   }
 } catch {}
 
+/** Persist the in-memory blocklist to localStorage. Guarded against quota /
+ *  private-mode write failures — a failed save just means the block is
+ *  session-only, which must not throw. */
 function saveBlockedList(): void {
   try { localStorage.setItem(BLOCKED_KEY, JSON.stringify([...blockedUsernames])); } catch {}
 }
 
+/** Inject the one-time `<style>` that powers {@link HIDE_CLASS}. Idempotent —
+ *  no-ops if the style element already exists. */
 function injectHideStyles(): void {
   if (document.getElementById('aggregaytor-a4a-css')) return;
   const style = document.createElement('style');
@@ -175,6 +203,8 @@ function applyHideFilter(): void {
   for (const el of toHide) el.classList.add(HIDE_CLASS);
 }
 
+/** Fade a single profile card out, then apply {@link HIDE_CLASS} after the
+ *  300ms transition so it stays hidden (and re-hidden across filter passes). */
 function hideCard(card: HTMLElement): void {
   injectHideStyles();
   card.style.transition = 'opacity 0.3s';
@@ -301,6 +331,12 @@ window.addEventListener('__aggregaytor_a4a_blocked_update', ((event: CustomEvent
 // multiple profile links, it was hidden by the buggy v0.57.13 container
 // selector. Un-hide it. applyHideFilter will then re-apply proper per-card
 // hides using the corrected findCardContainer walk-up.
+/**
+ * Best-effort DOM self-heal: strip stale inline hide styles this bridge may
+ * have left on cards from a previous navigation so nothing stays wrongly
+ * hidden after an SPA route change. Swallows DOM errors (advisory cleanup).
+ * @returns nothing
+ */
 function selfHeal(): void {
   let unhidden = 0;
   // 1. Elements with our HIDE_CLASS that contain multiple profile links
@@ -348,9 +384,11 @@ setTimeout(() => { selfHeal(); applyHideFilter(); }, 3000);
 // page-side stubs use localStorage (shared across worlds) plus the
 // __aggregaytor_a4a_console_* CustomEvents handled below, so the
 // in-memory blocklist + DOM hide state stay in sync with the bridge.
+/** DevTools recovery (ISOLATED-world console): clear the blocklist and unhide all. */
 (window as any).__aggregaytor_a4a_reset = function(): void {
   clearA4ABlocklist();
 };
+/** DevTools recovery: reveal every currently-hidden card, keeping the blocklist. */
 (window as any).__aggregaytor_a4a_unhide_all = function(): void {
   document.querySelectorAll<HTMLElement>(`.${HIDE_CLASS}`).forEach(el => {
     el.classList.remove(HIDE_CLASS);
@@ -358,14 +396,16 @@ setTimeout(() => { selfHeal(); applyHideFilter(); }, 3000);
   });
   console.log(`${LOG} All hidden cards revealed. Blocklist unchanged (${blockedUsernames.size} entries).`);
 };
+/** DevTools helper: print and return the sorted in-memory blocklist. */
 (window as any).__aggregaytor_a4a_list_blocked = function(): string[] {
   const list = [...blockedUsernames].sort();
   console.log(`${LOG} ${list.length} blocked username(s):`, list);
   return list;
 };
 
-// MAIN-world bridge: listen for the CustomEvents the page-side stubs
-// fire and run the real helpers in the ISOLATED world.
+// MAIN-world bridge: the page-side console stubs (content/adam4adam.ts) can't
+// reach ISOLATED-world state, so they fire these CustomEvents and we run the
+// real helpers here.
 window.addEventListener('__aggregaytor_a4a_console_reset', () => clearA4ABlocklist());
 window.addEventListener('__aggregaytor_a4a_console_unhide_all', () => {
   document.querySelectorAll<HTMLElement>(`.${HIDE_CLASS}`).forEach(el => {
@@ -425,6 +465,11 @@ function clearA4ABlocklist(): void {
   console.log(`${LOG} Cleared ${n} blocked username(s); removed hide styling from the DOM.`);
 }
 
+// Service-worker command handler (trusted sender): unhide, auto-send, SPA
+// navigation, text-expander settings relay, and avatar scraping. Registration
+// is wrapped in try/catch because `onMessage` throws synchronously if the
+// context was invalidated before this ran; each `localStorage.setItem` inside
+// is individually guarded.
 try {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // Clear local A4A blocklist (from Settings → Data → Unhide A4A)
@@ -524,6 +569,8 @@ function destroyFloatingPanel(): void {
   document.getElementById(FP_ID)?.remove();
 }
 
+/** Inject the one-time `<style>` for the floating quick-actions panel.
+ *  Idempotent — no-ops if the stylesheet is already present. */
 function injectFpStyles(): void {
   if (document.getElementById('aggregaytor-a4a-fp-css')) return;
   const s = document.createElement('style');
@@ -547,6 +594,19 @@ function injectFpStyles(): void {
   (document.head || document.documentElement).appendChild(s);
 }
 
+/**
+ * Mount the floating quick-actions panel (block, notes, rating, quick phrases,
+ * reminder) for the given profile, replacing any existing panel.
+ *
+ * WHY: A4A is a multi-page site, so this runs once per navigation. It tears
+ * down the prior panel first (see {@link destroyFloatingPanel}) to avoid
+ * leaking the document-level drag listeners. `username` is escaped via
+ * {@link escapeHtml} before it enters the innerHTML template. Every panel action
+ * fires a `chrome.runtime.sendMessage` guarded against a dead context, and every
+ * `localStorage` read/write (saved position, collapsed state) is guarded.
+ *
+ * @param username - A4A profile username the panel acts on; ignored if empty or context is dead.
+ */
 function showFloatingPanel(username: string): void {
   if (!username || !contextValid) return;
   if (document.getElementById(FP_ID) && fpUsername === username) return;
@@ -743,6 +803,12 @@ function showFloatingPanel(username: string): void {
 
 // ── URL Change Detection ───────────────────────────────────────────────────
 let lastUrl = location.href;
+/**
+ * Detect A4A navigation and sync UI/SW state: notify the SW of the active
+ * profile (or PROFILE_CLOSED), show/destroy the floating panel, and re-apply
+ * the hide filter against the new DOM. Polled (2s) and on `popstate`; no-ops on
+ * an unchanged URL or a dead context. All `sendMessage` calls are guarded.
+ */
 function checkUrlChange() {
   if (!contextValid) return;
   const url = location.href;

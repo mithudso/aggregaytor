@@ -177,6 +177,15 @@ async function postMessage(
   return false;
 }
 
+/**
+ * Send a Sniffies chat message by replaying the conversation-messages endpoint
+ * with captured credentials.
+ *
+ * @param contactId - Unified contact ID (`sniffies:{profileId}`).
+ * @param text      - Message body.
+ * @param auth      - Captured Sniffies auth headers.
+ * @returns `true` on a 2xx response; `false` otherwise (caller falls back to DOM).
+ */
 async function sendSniffiesApi(contactId: string, text: string, auth: Record<string, string>): Promise<boolean> {
   // encodeURIComponent: the ID reaches us from stored/UI data, and an
   // unescaped `/`, `?` or `..` would silently retarget the request at a
@@ -191,6 +200,15 @@ async function sendSniffiesApi(contactId: string, text: string, auth: Record<str
   );
 }
 
+/**
+ * Send a Grindr chat message by replaying the conversation endpoint with
+ * captured credentials.
+ *
+ * @param contactId - Unified contact ID (`grindr:{conversationId}`).
+ * @param text      - Message body.
+ * @param auth      - Captured Grindr auth headers.
+ * @returns `true` on a 2xx response; `false` otherwise (caller falls back to DOM).
+ */
 async function sendGrindrApi(contactId: string, text: string, auth: Record<string, string>): Promise<boolean> {
   const conversationId = encodeURIComponent(stripPlatformPrefix(contactId, 'grindr:'));
   return postMessage(

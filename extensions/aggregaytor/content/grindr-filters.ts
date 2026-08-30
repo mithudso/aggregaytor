@@ -103,6 +103,7 @@ const AUTO_BLOCKED_MAX = 2000;
 
 // ── CSS Injection ──────────────────────────────────────────────────────────
 
+/** Inject the one-time `<style>` backing {@link HIDE_CLASS}. Idempotent. */
 function injectStyles(): void {
   if (document.getElementById('aggregaytor-grindr-filter-css')) return;
   const style = document.createElement('style');
@@ -118,6 +119,17 @@ function injectStyles(): void {
 
 // ── Profile Indexing ───────────────────────────────────────────────────────
 
+/**
+ * Index one profile-shaped API object into `profileMap` (keyed by profileId) and
+ * its photo hashes into `hashToProfile`, so {@link applyFilters} can map a
+ * visible cascade image back to filterable profile data. Both maps are FIFO-
+ * capped to bound memory. Called (MAIN world) over every grindr.com JSON
+ * response, so untrusted fields are coerced defensively — notably `genders`,
+ * which is Array-guarded because a non-array would otherwise throw and abort
+ * indexing for the whole response body.
+ *
+ * @param obj - A single object from a walked grindr.com JSON response.
+ */
 export function indexGrindrProfile(obj: Record<string, unknown>): void {
   const pid = String(obj.profileId || '');
   if (!pid || !/^\d+$/.test(pid)) return;
@@ -162,6 +174,15 @@ export function indexGrindrProfile(obj: Record<string, unknown>): void {
 
 // ── Filter Logic ───────────────────────────────────────────────────────────
 
+/**
+ * Decide whether a profile should be hidden under the current filter settings,
+ * evaluating ethnicity, gender, never-chatted, and keyword rules — each of which
+ * can be inclusive (hide non-matches) or exclusive (hide matches). Pure — no
+ * side effects, no logging.
+ *
+ * @param profile - Indexed profile data to test.
+ * @returns `true` to hide the card; `false` to show it.
+ */
 function shouldHideProfile(profile: GrindrProfile): boolean {
   if (!settings.enabled) return false;
 
@@ -199,6 +220,13 @@ function shouldHideProfile(profile: GrindrProfile): boolean {
 
 let _lastGrindrFilterSig = '';
 
+/**
+ * Scan visible cascade cards, resolve each to indexed profile data via its photo
+ * hash, and toggle {@link HIDE_CLASS} per {@link shouldHideProfile}. When
+ * autoBlock is on, fires a one-shot block for freshly-hidden profiles
+ * (deduped this session, FIFO-capped). Runs on a 3s interval, so it logs its
+ * tally only when the hidden/resolved signature changes (avoids console spam).
+ */
 function applyFilters(): void {
   if (!settings.enabled) return;
 
@@ -290,6 +318,11 @@ function sanitizeFilterSettings(raw: unknown): Partial<GrindrFilterSettings> {
   return out;
 }
 
+/**
+ * Load persisted filter settings from localStorage, passing them through
+ * {@link sanitizeFilterSettings} so a stale/corrupt shape can't poison the
+ * filter loop. Read+parse is guarded; a failure leaves the in-memory defaults.
+ */
 function loadSettings(): void {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -309,6 +342,11 @@ window.addEventListener('__aggregaytor_grindr_filter_settings', ((event: CustomE
 
 // ── Init ───────────────────────────────────────────────────────────────────
 
+/**
+ * Initialize Grindr cascade filtering: inject styles, load persisted settings,
+ * and start the periodic (3s) filter pass that hides cards as cascade cells load
+ * in. Called once from the MAIN-world content script.
+ */
 export function initGrindrFilters(): void {
   injectStyles();
   loadSettings();

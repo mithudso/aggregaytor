@@ -19,13 +19,13 @@
     "@aggregaytor/context-engine": "workspace:*",
     "@aggregaytor/grindr-lib": "workspace:*",
     "@aggregaytor/store": "workspace:*",
-    "dexie": "^4.0.11",
+    "dexie": "^4.4.5",
     "events": "^3.3.0",
     "flexsearch": "^0.7.43"
   },
   "devDependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
-    "@types/chrome": "^0.2.7",
+    "@anthropic-ai/sdk": "^0.121.0",
+    "@types/chrome": "^0.0.300",
     "typescript": "^5.7.0",
     "vite": "^6.3.0"
   }

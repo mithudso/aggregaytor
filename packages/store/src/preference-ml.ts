@@ -53,10 +53,17 @@ export function extractFeatures(raw: Partial<ProfileFeatures>): Record<string, n
 
 // ── Logistic regression model ───────────────────────────────────────────────
 
+/** Logistic sigmoid, clamped to ±500 to avoid Math.exp overflow → NaN. */
 function sigmoid(x: number): number {
   return 1 / (1 + Math.exp(-Math.max(-500, Math.min(500, x))));
 }
 
+/**
+ * Score a feature vector with the model weights: sigmoid(bias + Σ wᵢ·xᵢ).
+ * Missing weights are treated as 0.
+ *
+ * @returns A "like" probability in [0, 1].
+ */
 function predict(features: Record<string, number>, weights: Record<string, number>): number {
   let sum = weights._bias || 0;
   for (const [key, value] of Object.entries(features)) {
@@ -100,6 +107,19 @@ function trainStep(
 
 // ── CRUD ────────────────────────────────────────────────────────────────────
 
+/**
+ * Record a like/dislike decision and incrementally update the model.
+ *
+ * Persists a PreferenceFeedbackDoc (`pref:{contactId}:{ts}`) capturing the
+ * profile features at decision time, then folds the sample into the model via
+ * one SGD step (see updateModel).
+ *
+ * @param contactId  Contact that was liked/disliked.
+ * @param platform   Contact's platform.
+ * @param liked      true = liked/engaged, false = passed.
+ * @param features   Profile feature snapshot at decision time.
+ * @param db         Optional store override.
+ */
 export async function recordFeedback(
   contactId: string,
   platform: Platform,
@@ -124,6 +144,19 @@ export async function recordFeedback(
   await updateModel(features, liked, store);
 }
 
+/**
+ * Fold one feedback sample into the stored model via a single online SGD step,
+ * updating its running accuracy estimate.
+ *
+ * Only a genuine 404 ("no model yet") starts from blank weights; any other read
+ * error is re-thrown so a transient failure can't silently wipe trained weights
+ * on the next put().
+ *
+ * @param rawFeatures  Raw profile features to extract and train on.
+ * @param liked        The label for this sample.
+ * @param store        The store to read/write the model in.
+ * @throws Re-throws any non-404 error while loading the model.
+ */
 async function updateModel(
   rawFeatures: ProfileFeatures,
   liked: boolean,
@@ -162,6 +195,17 @@ async function updateModel(
   await store.put(model);
 }
 
+/**
+ * Predict how much the user would like a profile.
+ *
+ * Confidence grows with the model's training count (saturating at 50 samples).
+ * A missing model is normal and returns a neutral {0.5, 0}; any other read
+ * error is logged (never the model contents) before the same neutral fallback.
+ *
+ * @param rawFeatures  Raw profile features to score.
+ * @param db           Optional store override.
+ * @returns `{ score, confidence }`, both in [0, 1].
+ */
 export async function predictPreference(
   rawFeatures: ProfileFeatures,
   db?: StoreDatabase,
@@ -181,6 +225,16 @@ export async function predictPreference(
   }
 }
 
+/**
+ * Report model training count, accuracy, and its 10 highest-magnitude feature
+ * weights (for a "what the model learned" UI).
+ *
+ * A missing model returns neutral defaults; any other read error is logged
+ * (never the model contents) before the same fallback.
+ *
+ * @param db  Optional store override.
+ * @returns Training count, accuracy, and top features by |weight|.
+ */
 export async function getModelStats(db?: StoreDatabase): Promise<{
   trainingCount: number;
   accuracy: number;
@@ -201,6 +255,13 @@ export async function getModelStats(db?: StoreDatabase): Promise<{
   }
 }
 
+/**
+ * Load every stored preference-feedback sample (the full training set for
+ * retrainModel).
+ *
+ * @param db  Optional store override.
+ * @returns All PreferenceFeedbackDocs.
+ */
 export async function getAllFeedback(db?: StoreDatabase): Promise<PreferenceFeedbackDoc[]> {
   const store = db || await getDB();
   const result = await store.find({ selector: { docType: 'preference_feedback' } });

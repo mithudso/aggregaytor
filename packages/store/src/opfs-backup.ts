@@ -40,11 +40,17 @@ async function getBackupDirectory(create = true): Promise<FileSystemDirectoryHan
   }
 }
 
+/** Read an OPFS file handle's contents as text. */
 async function readTextFile(handle: FileSystemFileHandle): Promise<string> {
   const file = await handle.getFile();
   return file.text();
 }
 
+/**
+ * Derive a status summary (encrypted?, docCount) from an export envelope
+ * string. Falls back to a minimal "exists" summary if the JSON can't be parsed,
+ * so a partially-written snapshot doesn't throw here.
+ */
 function summarizeSnapshot(jsonData: string, reason?: string): OpfsBackupStatus {
   try {
     const parsed = JSON.parse(jsonData) as Record<string, unknown>;
@@ -124,6 +130,16 @@ export async function saveOpfsSnapshotData(
   }
 }
 
+/**
+ * Report on the latest OPFS snapshot: whether OPFS is available, whether a
+ * snapshot exists, and its size/metadata.
+ *
+ * Prefers the sidecar meta file; if that's missing or corrupt it falls back to
+ * stat-ing the backup file directly. Never throws — a missing directory or file
+ * is reported as `exists: false`.
+ *
+ * @returns The snapshot status.
+ */
 export async function getOpfsSnapshotStatus(): Promise<OpfsBackupStatus> {
   const dir = await getBackupDirectory(false);
   // No directory means either OPFS is missing or nothing was ever saved.
@@ -148,10 +164,22 @@ export async function getOpfsSnapshotStatus(): Promise<OpfsBackupStatus> {
   }
 }
 
+/** True when the OPFS API (navigator.storage.getDirectory) is available here. */
 function opfsAvailable(): boolean {
   return typeof navigator !== 'undefined' && !!navigator.storage?.getDirectory;
 }
 
+/**
+ * Restore the local store from the latest OPFS snapshot.
+ *
+ * Snapshots are encrypted at rest; with no explicit passphrase, importAllData
+ * falls back to the persisted device backup key. Distinguishes "no snapshot
+ * written" from "OPFS unavailable" in its thrown message.
+ *
+ * @param passphrase  Optional decryption passphrase; defaults to the device key.
+ * @returns Imported-doc count plus the post-restore snapshot status.
+ * @throws If OPFS is unavailable or no snapshot file exists.
+ */
 export async function restoreFromOpfsSnapshot(
   passphrase?: string,
 ): Promise<{ imported: number; snapshot: OpfsBackupStatus }> {
@@ -176,6 +204,12 @@ export async function restoreFromOpfsSnapshot(
   };
 }
 
+/**
+ * Delete the OPFS snapshot and its meta file. Idempotent and best-effort:
+ * a missing directory or file is treated as already-deleted.
+ *
+ * @returns `{ ok: true }` once both entries are gone (or were never there).
+ */
 export async function deleteOpfsSnapshot(): Promise<{ ok: true }> {
   const dir = await getBackupDirectory(false);
   if (!dir) return { ok: true };

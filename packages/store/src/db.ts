@@ -130,10 +130,16 @@ class AggregaytorDexie extends Dexie {
   }
 }
 
+/** Map a logical store name to its physical Dexie DB name (suffixed `_dexie`). */
 function actualDbName(name: string): string {
   return name.endsWith('_dexie') ? name : `${name}_dexie`;
 }
 
+/**
+ * Generate the next PouchDB-style `{generation}-{token}` revision string,
+ * incrementing the generation parsed from `previous`. Preserves the rev shape
+ * the compatibility API promises even though Dexie has no rev tree.
+ */
 function nextRevision(previous?: string): string {
   const currentGeneration = previous ? parseInt(previous.split('-', 1)[0] || '0', 10) || 0 : 0;
   const token = typeof crypto?.randomUUID === 'function'
@@ -142,6 +148,7 @@ function nextRevision(previous?: string): string {
   return `${currentGeneration + 1}-${token}`;
 }
 
+/** Build a PouchDB-shaped 404 (`status: 404`) so callers' `err.status === 404` checks work. */
 function notFound(id: string): Error & { status: number; reason: string } {
   const err = new Error(`missing: ${id}`) as Error & { status: number; reason: string };
   err.status = 404;
@@ -149,6 +156,11 @@ function notFound(id: string): Error & { status: number; reason: string } {
   return err;
 }
 
+/**
+ * Order two selector/sort values: numbers numerically, everything else by
+ * string locale compare, with `undefined` sorting first. Underpins sort and
+ * range-operator comparisons.
+ */
 function compareValues(a: unknown, b: unknown): number {
   if (a === b) return 0;
   if (a === undefined) return -1;
@@ -157,6 +169,7 @@ function compareValues(a: unknown, b: unknown): number {
   return String(a).localeCompare(String(b));
 }
 
+/** Reduce a doc to the requested `fields` (always keeping `_id`); clone when no fields given. */
 function projectDoc<T extends StoreDoc>(doc: T, fields?: string[]): T {
   if (!fields?.length) return { ...doc };
   const projected: Record<string, unknown> = {};
@@ -167,6 +180,7 @@ function projectDoc<T extends StoreDoc>(doc: T, fields?: string[]): T {
   return projected as T;
 }
 
+/** Evaluate a Mango-style operator object ($gt/$gte/$lt/$lte/$ne/$in) against a value. */
 function matchesOperator(actual: unknown, operator: SelectorOperatorValue): boolean {
   if (operator.$gt !== undefined && compareValues(actual, operator.$gt) <= 0) return false;
   if (operator.$gte !== undefined && compareValues(actual, operator.$gte) < 0) return false;
@@ -177,6 +191,11 @@ function matchesOperator(actual: unknown, operator: SelectorOperatorValue): bool
   return true;
 }
 
+/**
+ * Test whether a doc matches every field in a Mango selector. A field whose
+ * value is an operator object is dispatched to matchesOperator; otherwise it's
+ * an equality check.
+ */
 function selectorMatches(doc: StoreDoc, selector: Record<string, unknown>): boolean {
   const record = doc as unknown as Record<string, unknown>;
   return Object.entries(selector).every(([field, expected]) => {
@@ -193,6 +212,10 @@ function selectorMatches(doc: StoreDoc, selector: Record<string, unknown>): bool
   });
 }
 
+/**
+ * Stable multi-key sort matching a Mango `sort` clause, with `_id` as the final
+ * tiebreaker. Returns a new array; a missing/empty sort returns the input as-is.
+ */
 function sortDocs<T extends StoreDoc>(docs: T[], sort?: Array<Record<string, 'asc' | 'desc'>>): T[] {
   if (!sort?.length) return docs;
   return [...docs].sort((left, right) => {
@@ -207,6 +230,7 @@ function sortDocs<T extends StoreDoc>(docs: T[], sort?: Array<Record<string, 'as
   });
 }
 
+/** Return the sort direction requested for `field`, or null if it isn't sorted. */
 function getSortDirection(
   sort: Array<Record<string, SortDirection>> | undefined,
   field: string,
@@ -219,6 +243,7 @@ function getSortDirection(
   return null;
 }
 
+/** Return `field`'s operator object ($gt/$lte/…) if it has one, else null (plain equality). */
 function getSelectorOperatorValue(
   selector: Record<string, unknown>,
   field: string,
@@ -235,6 +260,11 @@ function getSelectorOperatorValue(
   return value as SelectorOperatorValue;
 }
 
+/**
+ * Translate a selector operator object into IndexedDB `between()` bounds,
+ * defaulting to Dexie.minKey/maxKey when a side is unbounded and marking a
+ * bound open for the exclusive `$gt`/`$lt` variants.
+ */
 function getRangeBounds(operator: SelectorOperatorValue): {
   lower: unknown;
   upper: unknown;
@@ -251,6 +281,7 @@ function getRangeBounds(operator: SelectorOperatorValue): {
   };
 }
 
+/** Read a boolean migration flag from chrome.storage.local; false if unset or unreachable. */
 async function maybeReadMigrationFlag(key: string): Promise<boolean> {
   try {
     if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
@@ -261,6 +292,11 @@ async function maybeReadMigrationFlag(key: string): Promise<boolean> {
   return false;
 }
 
+/**
+ * Set a migration flag in chrome.storage.local; silently no-ops when storage is
+ * unreachable. Callers must only write this AFTER the migration truly succeeded,
+ * since the flag permanently skips the migration on later opens.
+ */
 async function maybeWriteMigrationFlag(key: string): Promise<void> {
   try {
     if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
@@ -272,6 +308,15 @@ async function maybeWriteMigrationFlag(key: string): Promise<void> {
 /** Write the legacy corpus in slices so one huge IDB transaction isn't built. */
 const LEGACY_MIGRATION_CHUNK = 500;
 
+/**
+ * One-shot copy of a legacy PouchDB corpus into the Dexie store, written in
+ * LEGACY_MIGRATION_CHUNK-sized slices. The 'migrated' flag is set only after a
+ * fully successful copy so a mid-way failure retries instead of orphaning data.
+ * @param store destination Dexie-backed store
+ * @param legacyName source legacy database name
+ * @returns resolves when migration completed (or was already done)
+ * @throws propagates a copy/transaction failure so the flag is NOT set
+ */
 async function migrateLegacyPouchData(store: DexieStoreDatabase, legacyName: string): Promise<void> {
   const migrationKey = `${actualDbName(legacyName)}_legacy_migrated`;
   if (await maybeReadMigrationFlag(migrationKey)) return;
@@ -322,16 +367,24 @@ class DexieStoreDatabase implements StoreDatabase {
     this.db = new AggregaytorDexie(actualDbName(logicalName));
   }
 
+  /** Total number of documents in the store (used by the legacy-migration guard). */
   async docCount(): Promise<number> {
     return this.db.docs.count();
   }
 
+  /**
+   * Fetch one document by `_id`, returned as a shallow clone so callers can't
+   * mutate the stored object.
+   *
+   * @throws A PouchDB-shaped 404 ({@link notFound}) when the id is absent.
+   */
   async get<T extends StoreDoc = StoreDoc>(id: string): Promise<T> {
     const doc = await this.db.docs.get(id);
     if (!doc) throw notFound(id);
     return { ...doc } as T;
   }
 
+  /** Write a single document (thin wrapper over {@link bulkDocs}; same merge semantics). */
   async put<T extends StoreDoc = StoreDoc>(doc: T): Promise<StorePutResult> {
     const [result] = await this.bulkDocs([doc]);
     return result;
@@ -388,6 +441,13 @@ class DexieStoreDatabase implements StoreDatabase {
     return results;
   }
 
+  /**
+   * PouchDB-style `allDocs`: fetch documents by explicit `keys` (each row
+   * carries `error: 'not_found'` for a missing id) or as an `_id` key-range
+   * scan (startkey/endkey/descending/limit). `include_docs` controls whether
+   * the row bodies are returned. The limit is pushed into IndexedDB for range
+   * scans so the whole store isn't materialised first.
+   */
   async allDocs<T extends StoreDoc = StoreDoc>(opts: StoreAllDocsOptions = {}): Promise<StoreAllDocsResult<T>> {
     const totalRows = await this.db.docs.count();
     const includeDocs = !!opts.include_docs;
@@ -436,6 +496,17 @@ class DexieStoreDatabase implements StoreDatabase {
     };
   }
 
+  /**
+   * Try to satisfy a `find` request through a compound IndexedDB index instead
+   * of a docType scan + JS filter. Returns the candidate rows when one of the
+   * `[docType+…+timestamp/scheduledAt]` indexes covers the sort (and optionally
+   * a range), or null when no fast path applies so the caller falls back to
+   * {@link seedFindCandidates}.
+   *
+   * `limit` is only pushed into IndexedDB when the chosen index covers EVERY
+   * selector field — otherwise truncating before the post-filter would
+   * under-return.
+   */
   private async findFastPath(request: StoreFindRequest): Promise<StoreDoc[] | null> {
     const selector = request.selector;
     const docType = typeof selector.docType === 'string' ? selector.docType : undefined;
@@ -515,6 +586,13 @@ class DexieStoreDatabase implements StoreDatabase {
     return null;
   }
 
+  /**
+   * Pick the narrowest available index to seed the candidate set for a `find`
+   * that has no fast path — preferring a `[docType+…]` compound index, falling
+   * back to a `docType` scan, then a full-table scan. A boolean `read` selector
+   * can't be indexed (IndexedDB has no boolean keys) so it's a docType scan plus
+   * a JS filter. The returned set is still post-filtered by the full selector.
+   */
   private async seedFindCandidates(selector: Record<string, unknown>): Promise<StoreDoc[]> {
     const docType = typeof selector.docType === 'string' ? selector.docType : undefined;
     const platform = typeof selector.platform === 'string' ? selector.platform : undefined;
@@ -537,6 +615,12 @@ class DexieStoreDatabase implements StoreDatabase {
     return this.db.docs.toArray();
   }
 
+  /**
+   * PouchDB-style Mango `find`: seed candidates via the fast path or an index
+   * scan, post-filter by the full selector, sort, then apply `limit` and field
+   * projection. The final filter/sort/limit run in JS so results are correct
+   * even when only part of the selector is indexed.
+   */
   async find<T extends StoreDoc = StoreDoc>(request: StoreFindRequest): Promise<StoreFindResult<T>> {
     const seeded = await this.findFastPath(request) ?? await this.seedFindCandidates(request.selector);
     let docs = seeded.filter(doc => selectorMatches(doc, request.selector));
@@ -547,6 +631,11 @@ class DexieStoreDatabase implements StoreDatabase {
     };
   }
 
+  /**
+   * Delete a document by `_id`.
+   *
+   * @throws A PouchDB-shaped 404 ({@link notFound}) when the id is absent.
+   */
   async remove(doc: Pick<StoreDoc, '_id'>): Promise<StorePutResult> {
     const existing = await this.db.docs.get(doc._id);
     if (!existing) throw notFound(doc._id);
@@ -556,16 +645,20 @@ class DexieStoreDatabase implements StoreDatabase {
     return { ok: true, id: doc._id, rev };
   }
 
+  /** No-op: Dexie has no rev tree to compact. Kept for PouchDB API compatibility. */
   async compact(): Promise<void> {}
 
+  /** Close the underlying Dexie/IndexedDB connection. */
   async close(): Promise<void> {
     this.db.close();
   }
 
+  /** Delete the entire underlying IndexedDB database. */
   async destroy(): Promise<void> {
     await this.db.delete();
   }
 
+  /** PouchDB-style `info`: logical name, live doc count, and the in-process update sequence. */
   async info(): Promise<StoreInfo> {
     return {
       db_name: this.logicalName,
@@ -574,6 +667,7 @@ class DexieStoreDatabase implements StoreDatabase {
     };
   }
 
+  /** No-op: indexes are declared statically in the Dexie schema. Kept for API compatibility. */
   async createIndex(_spec: unknown): Promise<void> {}
 }
 
@@ -583,8 +677,17 @@ const DEFERRED_CLOSE_MS = 30_000;
 let _deferredCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let _orphanedDb: StoreDatabase | null = null;
 
+/** No-op hook: Dexie declares indexes statically, but the call site is kept as a seam. */
 async function ensureIndexes(_db: StoreDatabase): Promise<void> {}
 
+/**
+ * Return the process-wide singleton store, creating and (once) migrating legacy
+ * PouchDB data on first call. A pending {@link closeDB} timer does not prevent
+ * a fresh open here.
+ *
+ * @param name  Logical DB name (default 'aggregaytor').
+ * @returns The shared StoreDatabase.
+ */
 export async function getDB(name = 'aggregaytor'): Promise<StoreDatabase> {
   if (_db) return _db;
   const db = new DexieStoreDatabase(name);
@@ -594,6 +697,13 @@ export async function getDB(name = 'aggregaytor'): Promise<StoreDatabase> {
   return _db;
 }
 
+/**
+ * Detach the singleton and close its connection after a grace period.
+ *
+ * The actual close is deferred by DEFERRED_CLOSE_MS so an immediate follow-up
+ * getDB() (common in the MV3 service worker) reuses a still-open handle instead
+ * of paying a reopen. A pending close is cancelled if a newer one supersedes it.
+ */
 export async function closeDB(): Promise<void> {
   if (!_db) return;
   if (_deferredCloseTimer) {
@@ -616,6 +726,13 @@ export async function closeDB(): Promise<void> {
   }, DEFERRED_CLOSE_MS);
 }
 
+/**
+ * Delete the database entirely, cancelling any deferred close and dropping the
+ * singleton. Falls back to opening + deleting by name when no singleton is live
+ * (e.g. destroying a store this process never opened).
+ *
+ * @param name  Logical DB name (default 'aggregaytor').
+ */
 export async function destroyDB(name = 'aggregaytor'): Promise<void> {
   if (_deferredCloseTimer) {
     clearTimeout(_deferredCloseTimer);
@@ -633,6 +750,14 @@ export async function destroyDB(name = 'aggregaytor'): Promise<void> {
   await new AggregaytorDexie(actualDbName(name)).delete();
 }
 
+/**
+ * Create a standalone store instance NOT registered as the singleton — used by
+ * tests that need an isolated database. The caller owns its lifecycle
+ * (close/destroy); this does not run the legacy migration.
+ *
+ * @param name  Logical DB name for this isolated instance.
+ * @returns A new StoreDatabase.
+ */
 export async function createDB(
   name: string,
   _opts?: Record<string, unknown>,
