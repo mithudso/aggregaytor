@@ -27,6 +27,6 @@
     "@anthropic-ai/sdk": "^0.121.0",
     "@types/chrome": "^0.0.300",
     "typescript": "^5.7.0",
-    "vite": "^6.3.0"
+    "vite": "^8.2.2"
   }
 }
