@@ -94,9 +94,13 @@ describe('PerfCounters', () => {
         const end = perf.start('many-calls');
         end();
       }
-      const keys = Object.keys(perf.stats());
       const stats = perf.stats();
-      expect(stats[keys[0]].totalMs).toBeGreaterThanOrEqual(stats[keys[1]].totalMs);
+      const keys = Object.keys(stats);
+      expect(keys.length).toBeGreaterThan(1);
+      // Verify the full ordering, not just the first pair — a two-entry spot
+      // check passes even when the middle of the list is unsorted.
+      const totals = keys.map(k => stats[k].totalMs);
+      expect(totals).toEqual([...totals].sort((a, b) => b - a));
     });
   });
 

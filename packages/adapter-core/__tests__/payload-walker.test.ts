@@ -32,6 +32,9 @@ describe('walkPayload', () => {
     }
 
     walkPayload(payload, null, visitor, 3);
+    // Guard: with no visits Math.max(...[]) is -Infinity, which would satisfy
+    // the depth assertion vacuously.
+    expect(visited.length).toBeGreaterThan(0);
     expect(Math.max(...visited)).toBeLessThanOrEqual(3);
   });
 

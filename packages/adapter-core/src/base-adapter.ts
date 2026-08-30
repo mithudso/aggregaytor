@@ -43,7 +43,12 @@ import type {
   UnifiedMessage,
   InterceptorOptions,
 } from './types.js';
-import { installAllInterceptors } from './network-interceptor.js';
+import {
+  installAllInterceptors,
+  installFetchInterceptor,
+  installXHRInterceptor,
+  installWebSocketInterceptor,
+} from './network-interceptor.js';
 import { SelfIdTracker } from './self-id-tracker.js';
 
 /** Callback signature for adapter event listeners. */
@@ -89,19 +94,26 @@ export abstract class BaseAdapter {
   }
 
   // -------------------------------------------------------------------------
-  // Abstract lifecycle -- subclasses MUST implement
+  // Lifecycle
   // -------------------------------------------------------------------------
 
   /**
    * Initialize the adapter -- set up network interception, DOM observers,
    * self-ID seeding, and anything else platform-specific.
    * Called once after construction.
+   *
+   * Abstract: every concrete adapter MUST implement this.
    */
   abstract init(): Promise<void>;
 
   /**
    * Tear down all resources: remove network patches, disconnect observers,
    * clear listeners and self-ID state.
+   *
+   * Concrete (not abstract) -- subclasses that need extra teardown should
+   * prefer `addCleanup()` over overriding this, and must call `super.destroy()`
+   * if they do override.
+   *
    * Safe to call multiple times.
    */
   async destroy(): Promise<void> {
@@ -159,8 +171,11 @@ export abstract class BaseAdapter {
    */
   protected emit(event: AdapterEvent): void {
     const handlers = this.listeners.get(event.type);
-    if (!handlers) return;
-    for (const handler of handlers) {
+    if (!handlers || handlers.size === 0) return;
+    // Snapshot before dispatching: a handler that subscribes or unsubscribes
+    // during its own callback (e.g. a one-shot listener) would otherwise
+    // mutate the Set mid-iteration and change who receives this event.
+    for (const handler of [...handlers]) {
       try { handler(event); } catch { /* ignore listener errors */ }
     }
   }
@@ -200,8 +215,14 @@ export abstract class BaseAdapter {
    *     adapter's `parseApiResponse()` / `parseWebSocketFrame()`.
    *  4. Any resulting `UnifiedMessage[]` is emitted as a `'messages'` event.
    *
+   * Which of the three mechanisms are installed is driven by the
+   * `interceptFetch` / `interceptXHR` / `interceptWebSocket` config flags
+   * (all default to `true`).
+   *
    * The returned cleanup function (also auto-registered for `destroy()`)
-   * restores the original globals.
+   * restores the original globals. It is idempotent and de-registers itself,
+   * so calling it directly and then calling `destroy()` will not attempt a
+   * second teardown.
    *
    * @param target - The MAIN-world `window` whose globals will be patched.
    *                 In a Chrome extension, this must be the page's own window,
@@ -225,7 +246,39 @@ export abstract class BaseAdapter {
       },
     };
 
-    const cleanup = installAllInterceptors(target, opts);
+    const { interceptFetch, interceptXHR, interceptWebSocket } = this.config;
+
+    // Honour the config flags. Previously every adapter got all three patches
+    // regardless of its `intercept*` settings, so those flags were inert --
+    // an adapter that opted out of, say, WebSocket patching still had
+    // `window.WebSocket` replaced on the host page.
+    let inner: () => void;
+    if (interceptFetch && interceptXHR && interceptWebSocket) {
+      inner = installAllInterceptors(target, opts);
+    } else {
+      const installed: (() => void)[] = [];
+      if (interceptFetch) installed.push(installFetchInterceptor(target, opts));
+      if (interceptXHR) installed.push(installXHRInterceptor(target, opts));
+      if (interceptWebSocket) installed.push(installWebSocketInterceptor(target, opts));
+      inner = () => {
+        // One failing restore must not strand the others.
+        for (const fn of installed) {
+          try { fn(); } catch { /* keep tearing down the rest */ }
+        }
+      };
+    }
+
+    // Make the handle idempotent: it is both returned to the caller and held
+    // in `cleanupFns`, so without this guard a caller that tears down
+    // explicitly would trigger a second restore from `destroy()`.
+    let done = false;
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      this.cleanupFns = this.cleanupFns.filter(fn => fn !== cleanup);
+      inner();
+    };
+
     this.cleanupFns.push(cleanup);
     return cleanup;
   }

@@ -46,6 +46,56 @@ import { perf } from './perf.js';
 const PATCH_FLAG = '__aggregaytorPatched';
 
 // ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Reduce a request URL to the registrable-domain-ish key that `api-sender`
+ * caches auth headers under (e.g. `https://web.grindr.com/v4/x` ->
+ * `grindr.com`).
+ *
+ * `base` matters: SPAs overwhelmingly issue relative-path fetches
+ * (`fetch('/api/messages')`). Without a base those throw inside `new URL()`,
+ * which previously meant auth capture silently never fired for the most
+ * common request shape on the page.
+ *
+ * @param url  - Absolute or relative request URL.
+ * @param base - Base URL to resolve relative paths against (the page's own).
+ * @returns The host key, or `null` if the URL is unparseable.
+ */
+function deriveAuthHostKey(url: string, base: string | undefined): string | null {
+  try {
+    const { hostname } = new URL(url, base);
+    if (!hostname) return null;
+    return hostname.split('.').slice(-2).join('.');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Flatten any of the three shapes `RequestInit.headers` accepts (a `Headers`
+ * instance, a `[name, value][]` array, or a plain object) into a plain record.
+ */
+function flattenHeaders(h: unknown): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (!h) return headers;
+  const isHeaders = (typeof Headers !== 'undefined' && h instanceof Headers)
+    // Cross-realm / polyfilled Headers still expose forEach.
+    || (!Array.isArray(h) && typeof (h as Headers).forEach === 'function');
+  if (isHeaders) {
+    (h as Headers).forEach((v: string, k: string) => { headers[k] = v; });
+  } else if (Array.isArray(h)) {
+    for (const pair of h as [string, string][]) {
+      if (Array.isArray(pair) && pair.length >= 2) headers[String(pair[0])] = String(pair[1]);
+    }
+  } else if (typeof h === 'object') {
+    for (const [k, v] of Object.entries(h as Record<string, unknown>)) headers[k] = String(v);
+  }
+  return headers;
+}
+
+// ---------------------------------------------------------------------------
 // Fetch interceptor
 // ---------------------------------------------------------------------------
 
@@ -53,8 +103,9 @@ const PATCH_FLAG = '__aggregaytorPatched';
  * Replace `target.fetch` with a wrapper that captures JSON responses.
  *
  * The wrapper is transparent to callers -- it returns the same `Response`
- * object. We call `res.clone().json()` so the original consumer can still
- * read the body.
+ * object, at the same time the real `fetch` resolved it. We `clone()` the
+ * response so the original consumer can still read the body, and read our
+ * clone on a detached promise so the page never waits on our parsing.
  *
  * @param target - The window whose `fetch` will be patched.
  * @param opts   - Callbacks from the adapter.
@@ -77,20 +128,23 @@ export function installFetchInterceptor(
     // requests with the user's live credentials.
     try {
       const req = args[0];
-      if (req instanceof Request) {
+      const base = target.location?.href;
+      let rawUrl = '';
+      let headers: Record<string, string> | null = null;
+
+      if (typeof Request !== 'undefined' && req instanceof Request) {
         // `new Request(url, init)` style -- headers are on the Request object.
-        const headers: Record<string, string> = {};
-        req.headers.forEach((v, k) => { headers[k] = v; });
-        const host = new URL(req.url).hostname.split('.').slice(-2).join('.');
-        captureAuthHeaders(host, headers);
+        rawUrl = req.url;
+        headers = flattenHeaders(req.headers);
       } else if (args[1] && typeof args[1] === 'object' && (args[1] as any).headers) {
         // `fetch(url, { headers })` style -- headers are in the init object.
-        const h = (args[1] as any).headers;
-        const headers: Record<string, string> = {};
-        if (h instanceof Headers) h.forEach((v: string, k: string) => { headers[k] = v; });
-        else if (typeof h === 'object') Object.entries(h).forEach(([k, v]) => { headers[k] = String(v); });
-        const url = String((req as any)?.url || req || '');
-        try { const host = new URL(url).hostname.split('.').slice(-2).join('.'); captureAuthHeaders(host, headers); } catch {}
+        rawUrl = String((req as any)?.url || req || '');
+        headers = flattenHeaders((args[1] as any).headers);
+      }
+
+      if (headers && Object.keys(headers).length) {
+        const host = deriveAuthHostKey(rawUrl, base);
+        if (host) captureAuthHeaders(host, headers);
       }
     } catch {}
 
@@ -98,20 +152,41 @@ export function installFetchInterceptor(
     const res = await originalFetch.apply(target, args);
 
     // --- Response interception ---
+    //
+    // Only the `clone()` happens on the page's critical path; the body read
+    // and the adapter callback are detached.
+    //
+    // Awaiting `clone().json()` here (as this previously did) made the page's
+    // own `await fetch(...)` wait on OUR parse: every matched response added
+    // its full JSON-parse time to the page's latency, and a slow or
+    // never-completing body on a matched URL would hang the page's request
+    // forever. Cloning is synchronous and must still happen before the page
+    // starts reading the body, so it stays inline; everything after it runs
+    // on its own microtask chain and can no longer affect the caller.
     try {
       const url = String((args[0] as any)?.url || args[0] || '');
       // Let the adapter decide if it cares about this URL.
-      if (!opts.shouldInterceptUrl(url)) return res;
-      // Only parse JSON responses -- skip HTML, images, etc.
-      const ct = String(res.headers?.get('content-type') || '').toLowerCase();
-      if (!ct.includes('json')) return res;
-      // Clone before reading so the page's own .json() call still works.
-      const endParse = perf.start('fetch:clone+json');
-      const data = await res.clone().json();
-      endParse();
-      const endCb = perf.start('fetch:onResponse');
-      opts.onFetchResponse(url, data);
-      endCb();
+      if (opts.shouldInterceptUrl(url)) {
+        // Only parse JSON responses -- skip HTML, images, etc.
+        const ct = String(res.headers?.get('content-type') || '').toLowerCase();
+        if (ct.includes('json')) {
+          // Clone before reading so the page's own .json() call still works.
+          const clone = res.clone();
+          void (async () => {
+            try {
+              const endParse = perf.start('fetch:clone+json');
+              const data = await clone.json();
+              endParse();
+              const endCb = perf.start('fetch:onResponse');
+              opts.onFetchResponse(url, data);
+              endCb();
+            } catch {
+              // Interception is best-effort; never surface as an unhandled
+              // rejection on the page.
+            }
+          })();
+        }
+      }
     } catch {
       // Interception is best-effort; never break the page's own fetch.
     }
@@ -160,13 +235,13 @@ export function installXHRInterceptor(
   const originalSend = XHR.prototype.send;
 
   // Patch open() to remember the URL for later use in the load handler.
-  XHR.prototype.open = function (method: string, url: string | URL, ...rest: any[]) {
+  const patchedOpen = XHR.prototype.open = function (method: string, url: string | URL, ...rest: any[]) {
     (this as any).__aggregaytorUrl = String(url || '');
     return (originalOpen as any).apply(this, [method, url, ...rest]);
   };
 
   // Patch send() to attach a response listener before the real send fires.
-  XHR.prototype.send = function (...args: any[]) {
+  const patchedSend = XHR.prototype.send = function (this: XMLHttpRequest, ...args: any[]) {
     this.addEventListener(
       'load',
       () => {
@@ -203,8 +278,11 @@ export function installXHRInterceptor(
   (XHR.prototype as any)[PATCH_FLAG] = true;
 
   return () => {
-    XHR.prototype.open = originalOpen;
-    XHR.prototype.send = originalSend;
+    // Restore only what is still ours. Another extension may have layered its
+    // own patch on top of ours after we installed; blindly assigning
+    // `originalOpen` back would silently uninstall *their* interceptor.
+    if (XHR.prototype.open === patchedOpen) XHR.prototype.open = originalOpen;
+    if (XHR.prototype.send === patchedSend) XHR.prototype.send = originalSend;
     delete (XHR.prototype as any)[PATCH_FLAG];
   };
 }
@@ -279,14 +357,28 @@ export function installWebSocketInterceptor(
   function hookSocket(ws: WebSocket, _source: string): void {
     if (hookedSockets.has(ws)) return;
     hookedSockets.add(ws);
-    // Walk up the prototype chain to get the unpatched EventTarget method,
-    // bypassing our own addEventListener wrapper to avoid infinite recursion.
-    const nativeAddListener = Object.getPrototypeOf(Object.getPrototypeOf(ws))?.addEventListener
-      || EventTarget.prototype.addEventListener;
-    nativeAddListener.call(ws, 'message', (event: MessageEvent) => {
+    // Use EventTarget.prototype.addEventListener directly rather than
+    // `ws.addEventListener`, which would re-enter our own WebSocket.prototype
+    // wrapper. (The previous `getPrototypeOf(getPrototypeOf(ws))` walk landed
+    // on EventTarget.prototype for a plain socket, but on the *patched*
+    // WebSocket.prototype for anything created from a `class X extends
+    // WebSocket`, re-entering the wrapper it was trying to bypass.)
+    const nativeAddListener = EventTarget.prototype.addEventListener;
+    nativeAddListener.call(ws, 'message', (event: Event) => {
       try {
+        // `MessageEvent.data` is `string | ArrayBuffer | Blob` -- a socket
+        // left at the default `binaryType = 'blob'` delivers Blobs. The
+        // `InterceptorOptions.onWebSocketMessage` contract (and every adapter
+        // implementing it) is synchronous and only handles string/ArrayBuffer,
+        // so anything else is dropped here rather than handed across the
+        // boundary as a lie about its type.
+        const data = (event as MessageEvent | undefined)?.data;
+        if (typeof data !== 'string' && !(data instanceof ArrayBuffer)) {
+          perf.count('ws:skippedNonTextFrame');
+          return;
+        }
         const endWs = perf.start('ws:onMessage');
-        opts.onWebSocketMessage(event?.data, _source);
+        opts.onWebSocketMessage(data, _source);
         endWs();
       } catch {
         // Best-effort: never break the page's own WebSocket handling.
@@ -296,32 +388,48 @@ export function installWebSocketInterceptor(
 
   // --- Hook 1: Constructor wrapper ---
   // Catches sockets created AFTER our patch is installed.
-  // We build a wrapper function that calls the real constructor, then hooks
-  // the resulting socket before returning it to the caller.
-  const WrappedWebSocket = function (this: any, ...args: ConstructorParameters<typeof WebSocket>) {
-    const ws = new NativeWebSocket(...args);
-    hookSocket(ws, 'ws-constructor');
-    return ws;
-  } as unknown as typeof WebSocket;
-
-  // The wrapper must look like the real WebSocket to `instanceof` checks and
-  // code that reads static constants like WebSocket.OPEN.
-  WrappedWebSocket.prototype = NativeWebSocket.prototype;
-  Object.defineProperties(WrappedWebSocket, {
-    CONNECTING: { value: NativeWebSocket.CONNECTING },
-    OPEN: { value: NativeWebSocket.OPEN },
-    CLOSING: { value: NativeWebSocket.CLOSING },
-    CLOSED: { value: NativeWebSocket.CLOSED },
+  //
+  // A Proxy with a `construct` trap, rather than a hand-rolled wrapper
+  // function. The trap forwards `newTarget` through `Reflect.construct`, and
+  // everything we do not trap (statics like WebSocket.OPEN, `prototype`,
+  // `name`, `length`, `toString()`, `instanceof`, and the TypeError you get
+  // from calling `WebSocket()` without `new`) is forwarded to the real
+  // constructor automatically.
+  //
+  // The previous plain-function wrapper got three of those wrong: a
+  // `class X extends WebSocket` received a bare WebSocket from `super()`
+  // instead of an X (its prototype chain was silently dropped), calling
+  // `WebSocket()` without `new` quietly succeeded instead of throwing, and
+  // `WebSocket.toString()` no longer read as native code. All three are
+  // observable from the page, which this interceptor must not be.
+  const WrappedWebSocket = new Proxy(NativeWebSocket, {
+    construct(ctor, args, newTarget) {
+      const ws = Reflect.construct(ctor, args, newTarget) as WebSocket;
+      hookSocket(ws, 'ws-constructor');
+      return ws;
+    },
+    get(ctor, prop, receiver) {
+      // Answer the double-patch sentinel from the trap so we never define a
+      // property on the native constructor that would outlive cleanup.
+      if (prop === PATCH_FLAG) return true;
+      return Reflect.get(ctor, prop, receiver);
+    },
   });
-  (WrappedWebSocket as any)[PATCH_FLAG] = true;
   target.WebSocket = WrappedWebSocket;
 
   // --- Hook 2: Prototype addEventListener ---
   // Catches sockets that were created BEFORE our constructor wrapper existed.
   // When the page calls `ws.addEventListener('message', handler)` on a
   // pre-existing socket, we piggyback and hook it.
+  // Note whether `addEventListener` was an OWN property of WebSocket.prototype
+  // before we touched it. Normally it is inherited from EventTarget.prototype,
+  // so restoring by plain assignment would leave behind an own property that
+  // was never there -- a detectable, if benign, footprint on the page.
+  const hadOwnAddListener = Object.prototype.hasOwnProperty.call(
+    NativeWebSocket.prototype, 'addEventListener',
+  );
   const origAddListener = NativeWebSocket.prototype.addEventListener;
-  NativeWebSocket.prototype.addEventListener = function(
+  const patchedAddListener = NativeWebSocket.prototype.addEventListener = function(
     this: WebSocket, type: string,
     listener: EventListenerOrEventListenerObject,
     options?: boolean | AddEventListenerOptions,
@@ -334,15 +442,27 @@ export function installWebSocketInterceptor(
   // Catches the `ws.onmessage = function(e) { ... }` assignment pattern.
   // We intercept the setter on the prototype descriptor and piggyback.
   const origOnMsgDesc = Object.getOwnPropertyDescriptor(NativeWebSocket.prototype, 'onmessage');
-  if (origOnMsgDesc?.set) {
+  let onMsgPatched = false;
+  if (origOnMsgDesc?.set && origOnMsgDesc.configurable) {
+    const origSet = origOnMsgDesc.set;
+    const origGet = origOnMsgDesc.get;
     Object.defineProperty(NativeWebSocket.prototype, 'onmessage', {
       set(fn) {
         if (fn) hookSocket(this, 'ws-proto-onmessage');
-        origOnMsgDesc!.set!.call(this, fn);
+        origSet.call(this, fn);
       },
-      get() { return origOnMsgDesc!.get!.call(this); },
+      // The native descriptor always has a getter, but a page that has already
+      // redefined `onmessage` may have left a setter-only accessor. Falling
+      // back to `undefined` keeps reads from throwing.
+      get: origGet ? function (this: WebSocket) { return origGet.call(this); } : undefined,
+      // Preserve the original attributes. Omitting `enumerable` would silently
+      // flip the native `true` to `false`, changing what the page sees from
+      // for-in / Object.keys on a WebSocket -- exactly the kind of observable
+      // side effect this interceptor must not have.
+      enumerable: origOnMsgDesc.enumerable,
       configurable: true,
     });
+    onMsgPatched = true;
   }
 
   // --- Cleanup ---
@@ -352,8 +472,16 @@ export function installWebSocketInterceptor(
     if (target.WebSocket === WrappedWebSocket) {
       target.WebSocket = NativeWebSocket;
     }
-    NativeWebSocket.prototype.addEventListener = origAddListener;
-    if (origOnMsgDesc) {
+    if (NativeWebSocket.prototype.addEventListener === patchedAddListener) {
+      if (hadOwnAddListener) {
+        NativeWebSocket.prototype.addEventListener = origAddListener;
+      } else {
+        // Restore inheritance from EventTarget.prototype rather than pinning
+        // an own property that did not exist before.
+        delete (NativeWebSocket.prototype as any).addEventListener;
+      }
+    }
+    if (onMsgPatched && origOnMsgDesc) {
       Object.defineProperty(NativeWebSocket.prototype, 'onmessage', origOnMsgDesc);
     }
   };
@@ -382,5 +510,12 @@ export function installAllInterceptors(
     installXHRInterceptor(target, opts),
     installWebSocketInterceptor(target, opts),
   ];
-  return () => cleanups.forEach(fn => fn());
+  return () => {
+    // Isolate each restore: a frozen prototype or a hostile page redefining a
+    // global can make one teardown throw, and that must not leave the other
+    // two interceptors permanently installed on the page.
+    for (const fn of cleanups) {
+      try { fn(); } catch { /* keep tearing down the rest */ }
+    }
+  };
 }

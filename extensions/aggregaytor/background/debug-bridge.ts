@@ -1,16 +1,28 @@
 /**
- * debug-bridge.ts — WebSocket bridge for MCP debug server.
+ * debug-bridge.ts — read-mostly introspection surface for the MCP debug server.
  *
- * Exposes extension internals to the MCP server via WebSocket on port 9222.
- * Only active when debug mode is enabled in settings.
+ * Since service workers can't run a WebSocket server, there is no socket here:
+ * the commands below are reached through the normal message-passing system, via
+ * the service worker's `DEBUG_COMMAND` case.
  *
- * Since service workers can't run a WebSocket server, this uses a
- * chrome.runtime.connectNative or polling approach instead.
- * Alternative: the debug server connects via chrome.debugger API.
+ * SECURITY — this surface IS gated by `authorizeDebugCommand` (called from the
+ * service worker's `DEBUG_COMMAND` case before any handler runs):
  *
- * For now, we expose a REST-like message handler that the MCP server
- * can call via chrome.runtime.sendMessage from a companion extension,
- * or via the existing message passing system.
+ * 1. Sender-origin check (primary): only the extension's own pages — service
+ *    worker, side panel, popup — are trusted (`sender.id === chrome.runtime.id`
+ *    and no `sender.tab`). Content scripts always have `sender.tab` set and are
+ *    refused unconditionally; so are external extensions and web pages. This is
+ *    the real gate: no token can rescue a tab/content-script sender.
+ * 2. Shared-secret token (optional extra guard): if `aggregaytor_debug_token`
+ *    is set in `chrome.storage.local` (set it manually; nothing in the codebase
+ *    generates or persists it), trusted senders must ALSO supply a matching
+ *    `debugToken` on the message. A stored token shorter than 16 chars is
+ *    treated as misconfigured and fails closed (everything refused). When the
+ *    key is unset (the default), the origin check alone governs, so the
+ *    extension's own pages keep working without wiring a token through.
+ *
+ * Handlers stay read-only + bounded (clamped limits, plain-object selector
+ * checks) as defense in depth behind the gate.
  */
 
 import {
@@ -21,35 +33,114 @@ import { getLLMConfig, getLLMRateSettings, getLLMQueueStatus } from './llm.js';
 
 const LOG = '[Aggregaytor:Debug]';
 
+/** Storage key holding the optional shared-secret debug token (set manually). */
+const DEBUG_TOKEN_KEY = 'aggregaytor_debug_token';
+/** Minimum length for a stored token to count as valid configuration. */
+const MIN_DEBUG_TOKEN_LENGTH = 16;
+
+// Warn at most once per SW lifetime so a probing content script can't spam
+// the log. Never include the supplied or stored token in the message.
+let warnedRefusal = false;
+
+/**
+ * Decide whether a DEBUG_COMMAND message may run. See the module docstring
+ * for the full policy. Rule: allow iff the sender is the extension itself
+ * (`sender.id === chrome.runtime.id` and no `sender.tab`); refuse every
+ * tab/content-script or external sender regardless of any token. If a stored
+ * token exists, trusted senders must additionally present it.
+ *
+ * This is deliberately not a hot path (debug commands are rare), so the token
+ * is read via `chrome.storage.local.get` directly rather than the settings
+ * cache; a read failure fails closed.
+ */
+export async function authorizeDebugCommand(
+  sender: chrome.runtime.MessageSender | undefined,
+  suppliedToken: unknown,
+): Promise<boolean> {
+  // Primary gate: sender must be the extension's own pages/worker. Content
+  // scripts have `sender.tab` set; external extensions have a different id.
+  const originTrusted = !!sender && sender.id === chrome.runtime.id && !sender.tab;
+  if (!originTrusted) {
+    if (!warnedRefusal) {
+      warnedRefusal = true;
+      console.warn(`${LOG} DEBUG_COMMAND refused: sender is not a trusted extension page (content-script/tab and external senders are never allowed).`);
+    }
+    return false;
+  }
+
+  // Secondary gate: only enforced when a token has been set manually. Read
+  // defensively — unset/empty means "no token configured", which leaves the
+  // origin check as the sole gate so the extension's own pages keep working.
+  let storedToken: unknown;
+  try {
+    const data = await chrome.storage.local.get(DEBUG_TOKEN_KEY);
+    storedToken = data?.[DEBUG_TOKEN_KEY];
+  } catch {
+    // Storage unreadable — fail closed rather than guessing.
+    if (!warnedRefusal) {
+      warnedRefusal = true;
+      console.warn(`${LOG} DEBUG_COMMAND refused: debug-token storage read failed.`);
+    }
+    return false;
+  }
+  if (typeof storedToken !== 'string' || storedToken.length === 0) return true;
+
+  // A token is configured: it must be sane and the caller must match it.
+  const ok =
+    storedToken.length >= MIN_DEBUG_TOKEN_LENGTH &&
+    typeof suppliedToken === 'string' &&
+    suppliedToken.length === storedToken.length &&
+    suppliedToken === storedToken;
+  if (!ok && !warnedRefusal) {
+    warnedRefusal = true;
+    console.warn(`${LOG} DEBUG_COMMAND refused: debug token missing, too short (<${MIN_DEBUG_TOKEN_LENGTH} chars stored), or mismatched.`);
+  }
+  return ok;
+}
+
+/**
+ * Clamp a caller-supplied `limit` into a sane range. Callers reach this module
+ * through an untrusted message boundary, so an unbounded `limit` would let a
+ * single command pull the entire corpus into the service worker's heap.
+ */
+const MAX_DEBUG_LIMIT = 500;
+function clampLimit(value: unknown, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(Math.floor(n), MAX_DEBUG_LIMIT);
+}
+
 export async function handleDebugCommand(type: string, params: Record<string, any> = {}): Promise<any> {
   switch (type) {
     case 'query_messages': {
       const db = await getDB();
+      const limit = clampLimit(params.limit, 20);
       const selector: Record<string, any> = { docType: 'message' };
       if (params.contactId) selector.contactId = params.contactId;
       if (params.platform) selector.platform = params.platform;
-      const result = await db.find({ selector, limit: params.limit || 20 });
+      const result = await db.find({ selector, limit });
       let docs = result.docs as any[];
       if (params.search) {
-        const q = params.search.toLowerCase();
+        const q = String(params.search).toLowerCase();
         docs = docs.filter((d: any) => d.body?.toLowerCase().includes(q));
       }
-      return { count: docs.length, messages: docs.slice(0, params.limit || 20) };
+      return { count: docs.length, messages: docs.slice(0, limit) };
     }
 
     case 'query_contacts': {
+      const limit = clampLimit(params.limit, MAX_DEBUG_LIMIT);
       let contacts = await getAllContacts();
       if (params.platform) contacts = contacts.filter(c => c.platform === params.platform);
       if (params.search) {
-        const q = params.search.toLowerCase();
+        const q = String(params.search).toLowerCase();
         contacts = contacts.filter(c => c.displayName?.toLowerCase().includes(q));
       }
-      return { count: contacts.length, contacts };
+      return { count: contacts.length, contacts: contacts.slice(0, limit) };
     }
 
     case 'query_threads': {
       const summaries = await getThreadSummaries(params.platform ? { platform: params.platform } : {});
-      return { count: summaries.length, threads: summaries.slice(0, params.limit || 50) };
+      return { count: summaries.length, threads: summaries.slice(0, clampLimit(params.limit, 50)) };
     }
 
     case 'get_thread_meta': {
@@ -101,8 +192,15 @@ export async function handleDebugCommand(type: string, params: Record<string, an
     }
 
     case 'execute_query': {
+      // `selector` crosses an untrusted boundary — reject anything that isn't a
+      // plain object so a string/array can't reach PouchDB's query planner.
+      const selector = params.selector;
+      if (!selector || typeof selector !== 'object' || Array.isArray(selector)) {
+        console.warn(`${LOG} execute_query rejected: selector was ${Array.isArray(selector) ? 'an array' : typeof selector}`);
+        return { error: 'execute_query requires a plain-object selector' };
+      }
       const db = await getDB();
-      const result = await db.find({ selector: params.selector, limit: params.limit || 50 });
+      const result = await db.find({ selector, limit: clampLimit(params.limit, 50) });
       return { count: result.docs.length, docs: result.docs };
     }
 

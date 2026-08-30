@@ -26,9 +26,21 @@ export function seededHash(input: string, seed: number): number {
   return hash >>> 0;
 }
 
+/**
+ * Coerces an option to a positive integer, preserving the historical
+ * `Math.max(floor, value || fallback)` semantics for every finite input.
+ *
+ * Flooring matters: a fractional numHashes reached `new Array(n)` and threw
+ * RangeError, and a non-finite one either threw or (for bands) span forever.
+ */
+export function toIntOption(value: unknown, fallback: number, floor: number): number {
+  const parsed = Math.floor(Number(value));
+  return Math.max(floor, Number.isFinite(parsed) ? parsed || fallback : fallback);
+}
+
 export function buildMinHashSignature(text: string, opts: MinHashOptions = {}): number[] {
-  const numHashes = Math.max(8, Number(opts.numHashes) || 24);
-  const shingleSize = Math.max(1, Number(opts.shingleSize) || 3);
+  const numHashes = toIntOption(opts.numHashes, 24, 8);
+  const shingleSize = toIntOption(opts.shingleSize, 3, 1);
   const tokens = tokenizeIndexText(text, 256);
   const shingles = buildShingles(tokens, shingleSize);
   if (!shingles.length) return [];

@@ -9,15 +9,19 @@
  * https://developers.google.com/drive/api/reference/rest/v3
  *
  * ## Data Flow
- * - backupToDrive()   → exportAllData() → upload JSON to Drive
- * - restoreFromDrive() → download JSON from Drive → importAllData()
+ * - backupToDrive()   → exportAllData(deviceKey) → upload AES-GCM ciphertext to Drive
+ * - restoreFromDrive() → download ciphertext from Drive → importAllData(…, deviceKey)
  * - getDriveBackupStatus() → check last backup time and file info
+ *
+ * Backups are always encrypted with the device-held backup key (see
+ * getOrCreateBackupKey in export-import.ts) so plaintext DMs never sit in
+ * the user's Google Drive.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 declare const chrome: any;
 
-import { exportAllData, importAllData } from './export-import.js';
+import { exportAllData, importAllData, getOrCreateBackupKey } from './export-import.js';
 import { saveOpfsSnapshotData } from './opfs-backup.js';
 
 // Need drive.file scope (already in manifest.json oauth2.scopes)
@@ -197,8 +201,11 @@ async function findBackupFile(folderId: string): Promise<{ id: string; modifiedT
  */
 export async function backupToDrive(): Promise<{ ok: boolean; fileId?: string; error?: string }> {
   try {
-    // 1. Export all data as JSON
-    const jsonData = await exportAllData();
+    // 1. Export all data as an AES-GCM-encrypted envelope. The passphrase is
+    // the device-held backup key (chrome.storage.local), so no plaintext DM
+    // content ever reaches Drive or OPFS. See getOrCreateBackupKey() for the
+    // cross-device restore tradeoff.
+    const jsonData = await exportAllData(await getOrCreateBackupKey());
     await saveOpfsSnapshotData(jsonData, { reason: 'drive-backup' });
 
     // 2. Find or create the backup folder
@@ -207,18 +214,23 @@ export async function backupToDrive(): Promise<{ ok: boolean; fileId?: string; e
     // 3. Search for existing backup file
     const existing = await findBackupFile(folderId);
 
-    // Build multipart body (metadata + content)
-    const boundary = '---aggregaytor-backup-boundary';
+    // Build multipart body (metadata + content). The boundary is randomised
+    // per request so backup content can never collide with the delimiter.
+    const boundary = `aggregaytor-${typeof crypto?.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`}`;
+    // The stored file is ciphertext (an encrypted envelope), so mark it as an
+    // opaque binary artifact rather than readable JSON.
     const metadata = existing
-      ? { name: BACKUP_FILENAME, mimeType: 'application/json' }
-      : { name: BACKUP_FILENAME, mimeType: 'application/json', parents: [folderId] };
+      ? { name: BACKUP_FILENAME, mimeType: 'application/octet-stream' }
+      : { name: BACKUP_FILENAME, mimeType: 'application/octet-stream', parents: [folderId] };
 
     const multipartBody =
       `--${boundary}\r\n` +
       `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
       `${JSON.stringify(metadata)}\r\n` +
       `--${boundary}\r\n` +
-      `Content-Type: application/json\r\n\r\n` +
+      `Content-Type: application/octet-stream\r\n\r\n` +
       `${jsonData}\r\n` +
       `--${boundary}--`;
 
@@ -274,11 +286,12 @@ export async function restoreFromDrive(): Promise<{ ok: boolean; imported?: numb
     );
 
     // driveFetch returns parsed JSON or text depending on content-type.
-    // The backup is a JSON string, so we may need to re-stringify if it was parsed.
+    // The backup is a JSON string (now served as octet-stream, but older
+    // uploads were application/json), so re-stringify if it was parsed.
     const jsonStr = typeof jsonData === 'string' ? jsonData : JSON.stringify(jsonData);
 
-    // 4. Import into the local store
-    const { imported } = await importAllData(jsonStr);
+    // 4. Decrypt with the same device backup key and import into the store
+    const { imported } = await importAllData(jsonStr, await getOrCreateBackupKey());
     await saveOpfsSnapshotData(jsonStr, { reason: 'drive-restore' });
 
     return { ok: true, imported };

@@ -28,23 +28,50 @@
  * Yahoo Mail's SPA to finish its initial render before we start watching.
  */
 
-import { BaseAdapter, walkPayload, extractTimestamp, extractMessageText } from '@aggregaytor/adapter-core';
+import { BaseAdapter, walkPayload, extractTimestamp, extractMessageText, createLogger } from '@aggregaytor/adapter-core';
 import type { Platform, UnifiedMessage, UnifiedContact } from '@aggregaytor/adapter-core';
 
-const LOG = '[Aggregaytor:Yahoo]';
+// Level-gated logger. Bare console.* ran unconditionally inside a page we do
+// not control and could not be silenced.
+const log = createLogger('[Aggregaytor:Yahoo]');
 
 /**
- * URL patterns that indicate a Yahoo Mail API response worth intercepting.
+ * Path prefixes that indicate a Yahoo Mail API response worth intercepting.
  * These cover the primary endpoints Yahoo's web client uses to fetch
- * message lists, thread contents, and search results.
+ * message lists, thread contents, and search results. Only ever tested
+ * AFTER the host check below.
  */
-const YAHOO_API_PATTERNS = [
-  'mail.yahoo.com/ws/v3/',
-  'mail.yahoo.com/api/',
-  'mail.yahoo.com/neo/',
-  'mail.yahoo.com/yql/',
-  'mail.yahoo.com/mc/',
+const YAHOO_API_PATH_PATTERNS = [
+  '/ws/v3/',
+  '/api/',
+  '/neo/',
+  '/yql/',
+  '/mc/',
 ];
+
+/** Hosts whose responses may legitimately be parsed as Yahoo Mail data. */
+const YAHOO_HOST_RE = /(^|\.)mail\.yahoo\.com$/i;
+
+/**
+ * Test whether `url` resolves to a Yahoo Mail host.
+ *
+ * The previous filter matched "mail.yahoo.com/ws/v3/" as a plain SUBSTRING
+ * of the whole URL, so `https://evil.example/mail.yahoo.com/api/x` passed and
+ * the attacker's JSON was parsed into the user's message store. Matching on
+ * the parsed hostname plus the pathname closes that. Relative URLs resolve
+ * against the page origin; anything unparseable is rejected.
+ */
+function isYahooMailApiUrl(url: string): boolean {
+  try {
+    const base = typeof location !== 'undefined' ? location.href : undefined;
+    const parsed = new URL(String(url), base);
+    if (!YAHOO_HOST_RE.test(parsed.hostname)) return false;
+    const path = parsed.pathname.toLowerCase();
+    return YAHOO_API_PATH_PATTERNS.some(p => path.includes(p));
+  } catch {
+    return false;
+  }
+}
 
 /**
  * File extensions and path segments to skip during URL filtering.
@@ -77,7 +104,7 @@ export class YahooAdapter extends BaseAdapter {
    * delay to let Yahoo Mail's SPA finish its initial render cycle.
    */
   async init(): Promise<void> {
-    console.log(`${LOG} Initializing...`);
+    log.info('Initializing...');
 
     // Intercept Yahoo Mail's REST API calls
     this.setupNetworkInterception(window as Window & typeof globalThis);
@@ -86,7 +113,7 @@ export class YahooAdapter extends BaseAdapter {
     const timer = setTimeout(() => this.observeEmailContent(), 5000);
     this.addCleanup(() => clearTimeout(timer));
 
-    console.log(`${LOG} Initialized`);
+    log.info('Initialized');
   }
 
   /**
@@ -108,8 +135,8 @@ export class YahooAdapter extends BaseAdapter {
     // Skip non-message path segments
     if (SKIP_PATH_SEGMENTS.some(seg => s.includes(seg))) return false;
 
-    // Must match at least one Yahoo Mail API pattern
-    return YAHOO_API_PATTERNS.some(p => s.includes(p));
+    // Must be a Yahoo-Mail-hosted API path (host-anchored, not substring)
+    return isYahooMailApiUrl(url);
   }
 
   /**
@@ -138,46 +165,70 @@ export class YahooAdapter extends BaseAdapter {
 
     walkPayload(payload, null, {
       onObject: (obj) => {
-        // Extract body text from known Yahoo fields
-        const body = extractMessageText(obj)
-          || String(obj.snippet || obj.body || obj.textBody || '');
-        if (!body || body.length < 3) return;
-
-        // Extract timestamp from known Yahoo date fields
-        const ts = extractTimestamp(obj)
-          || this.extractYahooTimestamp(obj);
-
-        // Extract participant and identity fields
-        const from = this.extractEmailAddress(obj.from || obj.sender || obj.fromAddress || '');
-        const to = this.extractEmailAddress(obj.to || obj.recipient || obj.toAddress || '');
-        const subject = String(obj.subject || obj.title || '');
-        const threadId = String(
-          obj.conversationId || obj.threadId || obj.thread_id || obj.mid || obj.id || ''
-        );
-
-        // Require at least a sender or thread identifier to be useful
-        if (!from && !threadId) return;
-
-        // Determine direction: outbound if `from` matches one of our selfIds
-        const isSelf = from ? this.selfIds.has(from) : false;
-        const direction = isSelf ? 'out' : 'in';
-        const contactEmail = direction === 'in' ? from : to;
-
-        messages.push({
-          id: `yahoo:${threadId || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          platform: 'yahoo',
-          threadId: `yahoo:${threadId}`,
-          contactId: `yahoo:${contactEmail || threadId}`,
-          direction,
-          body: subject ? `${subject}: ${body.slice(0, 200)}` : body.slice(0, 500),
-          timestamp: ts || new Date().toISOString(),
-          read: false,
-          metadata: { from, to, subject, url },
-        });
+        // Payload objects are untrusted. One unrenderable value — e.g. a
+        // numeric timestamp outside the Date range, which makes the shared
+        // extractTimestamp() throw `RangeError: Invalid time value` — must
+        // not abort the rest of the walk and silently drop every message
+        // later in the same response.
+        try {
+          this.visitPayloadObject(obj, url, messages);
+        } catch (err) {
+          log.debug('Skipped unparseable payload object:', err);
+        }
       },
     });
 
     return messages;
+  }
+
+  /**
+   * Inspect a single object node from an API payload, appending any message
+   * it yields to `messages`.
+   *
+   * Split out of {@link parseApiResponse} so the walker can isolate a throw
+   * to one node instead of losing the remainder of the response.
+   */
+  private visitPayloadObject(
+    obj: Record<string, unknown>,
+    url: string,
+    messages: UnifiedMessage[],
+  ): void {
+    // Extract body text from known Yahoo fields
+    const body = extractMessageText(obj)
+      || String(obj.snippet || obj.body || obj.textBody || '');
+    if (!body || body.length < 3) return;
+
+    // Extract timestamp from known Yahoo date fields
+    const ts = extractTimestamp(obj)
+      || this.extractYahooTimestamp(obj);
+
+    // Extract participant and identity fields
+    const from = this.extractEmailAddress(obj.from || obj.sender || obj.fromAddress || '');
+    const to = this.extractEmailAddress(obj.to || obj.recipient || obj.toAddress || '');
+    const subject = String(obj.subject || obj.title || '');
+    const threadId = String(
+      obj.conversationId || obj.threadId || obj.thread_id || obj.mid || obj.id || ''
+    );
+
+    // Require at least a sender or thread identifier to be useful
+    if (!from && !threadId) return;
+
+    // Determine direction: outbound if `from` matches one of our selfIds
+    const isSelf = from ? this.selfIds.has(from) : false;
+    const direction = isSelf ? 'out' : 'in';
+    const contactEmail = direction === 'in' ? from : to;
+
+    messages.push({
+      id: `yahoo:${threadId || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      platform: 'yahoo',
+      threadId: `yahoo:${threadId}`,
+      contactId: `yahoo:${contactEmail || threadId}`,
+      direction,
+      body: subject ? `${subject}: ${body.slice(0, 200)}` : body.slice(0, 500),
+      timestamp: ts || new Date().toISOString(),
+      read: false,
+      metadata: { from, to, subject, url },
+    });
   }
 
   /**
@@ -210,7 +261,7 @@ export class YahooAdapter extends BaseAdapter {
    * the store layer stays in sync.
    */
   private observeEmailContent(): void {
-    console.log(`${LOG} Setting up DOM observer...`);
+    log.info('Setting up DOM observer...');
 
     const observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
@@ -240,7 +291,15 @@ export class YahooAdapter extends BaseAdapter {
       }
     });
 
-    observer.observe(document.body, { childList: true, subtree: true });
+    // Defensive: `observer.observe(null, ...)` throws. The 5s init delay
+    // normally guarantees a body, but a torn-down or reloading document would
+    // otherwise take the adapter down with it.
+    const root = document.body || document.documentElement;
+    if (!root) {
+      log.warn('No document root yet; skipping DOM observation.');
+      return;
+    }
+    observer.observe(root, { childList: true, subtree: true });
     this.addCleanup(() => observer.disconnect());
   }
 

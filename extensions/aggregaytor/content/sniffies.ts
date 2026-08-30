@@ -74,9 +74,13 @@ adapter.on('messages', (event) => {
     platform: 'sniffies',
     payload: event.payload,
   });
-  // Relay chat timestamps + message body to map filter module for badges + preview
-  for (const m of event.payload as any[]) {
-    if (m.contactId && m.timestamp) {
+  // Relay chat timestamps + message body to map filter module for badges + preview.
+  // The payload comes from adapter parsing of page-controlled API responses, so
+  // never assume it is an array — a non-array here would throw inside the
+  // adapter's emit loop and kill every later listener on the same event.
+  const emitted = Array.isArray(event.payload) ? (event.payload as any[]) : [];
+  for (const m of emitted) {
+    if (m && m.contactId && m.timestamp) {
       const profileId = m.contactId.replace('sniffies:', '');
       window.dispatchEvent(new CustomEvent('__aggregaytor_chat_timestamp', {
         detail: {
@@ -129,6 +133,13 @@ initTextExpander();
 // to MAIN world. Instead it uses postMessage which crosses world boundaries.
 // We listen here in MAIN world and dispatch the appropriate CustomEvents.
 window.addEventListener('message', (event) => {
+  // Only accept posts from THIS window. The bridge posts with
+  // `window.postMessage(..., '*')` from the ISOLATED world of the same frame,
+  // so `event.source === window` holds for every legitimate sender. Without
+  // this check any iframe on the page (including third-party ad/embed frames)
+  // could forge `__aggregaytor_send` and make the extension type + send an
+  // arbitrary chat message as the user.
+  if (event.source !== window) return;
   if (!event.data || typeof event.data !== 'object') return;
   if (event.data.type === '__aggregaytor_block') {
     const pid = event.data.profileId;
@@ -187,10 +198,13 @@ window.addEventListener('message', (event) => {
       try {
         // forceRefreshConversation gates on a hex profileId, so we bypass
         // it and hit the endpoint directly — patched fetch still intercepts.
-        const auth = (window as any).__aggregaytor_captured_auth_sniffies || {};
+        // Auth rides on the session cookie via `credentials: 'include'`; we
+        // deliberately do NOT read captured auth headers off `window.*` —
+        // the host page can read anything we put there (see the MAIN-world
+        // security note in docs/ARCHITECTURE.md).
         await fetch('https://sniffies.com/api/v2/post-authentication/chat-data', {
           method: 'GET',
-          headers: { Accept: 'application/json', ...auth },
+          headers: { Accept: 'application/json' },
           credentials: 'include',
         }).catch(() => {});
       } catch {}
@@ -268,8 +282,14 @@ function fillChatInput(el: HTMLElement, text: string): boolean {
     if ('value' in el) {
       el.focus();
       // Use the native setter so React's value tracker sees the change.
-      const nativeSet = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
-        || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      // The setter MUST come from the element's own prototype — calling
+      // HTMLTextAreaElement's `value` setter on an <input> (or vice versa)
+      // throws "Illegal invocation", which used to make every auto-send
+      // into an <input type="text"> composer fail silently.
+      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
+        : el instanceof HTMLInputElement ? HTMLInputElement.prototype
+        : null;
+      const nativeSet = proto ? Object.getOwnPropertyDescriptor(proto, 'value')?.set : undefined;
       if (nativeSet) nativeSet.call(el, text);
       else (el as any).value = text;
       el.dispatchEvent(new Event('input', { bubbles: true }));

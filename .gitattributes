@@ -1,0 +1,27 @@
+# Normalize line endings to LF for all text files
+* text=auto eol=lf
+
+# Explicit text types
+*.ts text
+*.tsx text
+*.js text
+*.mjs text
+*.cjs text
+*.json text
+*.md text
+*.html text
+*.css text
+*.yaml text
+*.yml text
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# SVG is XML text but should never be diffed as code-reviewable churn
+*.svg text

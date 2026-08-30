@@ -76,6 +76,10 @@ importers:
         version: 3.2.4(@types/debug@4.1.13)
 
   adapters/grindr:
+    dependencies:
+      '@aggregaytor/grindr-lib':
+        specifier: workspace:*
+        version: link:../../packages/grindr-lib
     devDependencies:
       '@aggregaytor/adapter-core':
         specifier: workspace:*
@@ -146,9 +150,15 @@ importers:
       '@aggregaytor/adapter-sniffies':
         specifier: workspace:*
         version: link:../../adapters/sniffies
+      '@aggregaytor/adapter-yahoo':
+        specifier: workspace:*
+        version: link:../../adapters/yahoo
       '@aggregaytor/context-engine':
         specifier: workspace:*
         version: link:../../packages/context-engine
+      '@aggregaytor/grindr-lib':
+        specifier: workspace:*
+        version: link:../../packages/grindr-lib
       '@aggregaytor/store':
         specifier: workspace:*
         version: link:../../packages/store
@@ -195,6 +205,15 @@ importers:
       tsup:
         specifier: ^8.4.0
         version: 8.5.1(postcss@8.5.9)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.1.0
+        version: 3.2.4(@types/debug@4.1.13)
+
+  packages/grindr-lib:
+    devDependencies:
       typescript:
         specifier: ^5.7.0
         version: 5.9.3

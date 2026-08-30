@@ -151,14 +151,15 @@ export const DEFAULT_AUTO_RESPOND_SETTINGS: AutoRespondSettings = {
  * includes organizational flags (archived, hidden, bookmarked), free-form
  * notes, auto-respond configuration, and AI-derived scores.
  *
- * _id format: `thread_meta:{platform}:{contactId}`
+ * _id format: `meta:{contactId}` (see `metaId()` in thread-meta.ts — the
+ * `meta:` prefix is what the `startkey: 'meta:'` range scans rely on)
  *
  * There is exactly one ThreadMetaDoc per contact per platform. It is created
  * lazily the first time the user interacts with thread settings or when the
  * auto-respond system needs to store state.
  */
 export interface ThreadMetaDoc {
-  /** PouchDB document ID -- `thread_meta:{platform}:{contactId}` */
+  /** PouchDB document ID -- `meta:{contactId}` */
   _id: string;
   /** PouchDB revision token */
   _rev?: string;
@@ -228,7 +229,7 @@ export interface ThreadMetaDoc {
  * due time, and a "due" notification at the exact time. Both flags track
  * whether each notification has already fired to avoid duplicates.
  *
- * _id format: `reminder:{contactId}:{timestamp}`
+ * _id format: `reminder:{timestamp}-{random}` (see `createReminder`)
  */
 export interface ReminderDoc {
   /** PouchDB document ID */
@@ -300,7 +301,7 @@ export type AutoRespondStatus = 'pending' | 'generating' | 'draft' | 'approved' 
  * see {@link AutoRespondTier} for details. The status tracks the job through
  * its lifecycle: see {@link AutoRespondStatus}.
  *
- * _id format: `ar:{contactId}:{timestamp}`
+ * _id format: `autoresp:{contactId}:{timestamp}` (see `queueAutoRespond`)
  */
 export interface AutoRespondDoc {
   /** PouchDB document ID */
@@ -340,7 +341,7 @@ export interface AutoRespondDoc {
  * `likeCount`) let the system learn which pictures perform best and prefer
  * them in future auto-responses.
  *
- * _id format: `pic:{uuid}`
+ * _id format: `pic:{timestamp}-{random}` (see `addPicture`)
  */
 export interface PictureDoc {
   /** PouchDB document ID */
@@ -400,7 +401,7 @@ export interface BlockRuleCondition {
  *   - 'archive' -- archive the thread in Aggregaytor
  *   - 'hide'    -- hide the thread from the main list
  *
- * _id format: `blockrule:{uuid}`
+ * _id format: `blockrule:{timestamp}-{random}` (see `createBlockRule`)
  */
 export interface BlockRuleDoc {
   /** PouchDB document ID */

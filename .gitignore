@@ -5,3 +5,7 @@ dist/
 .env
 .env.local
 coverage/
+.claude/worktrees/
+.playwright-mcp/
+.semantic-index/
+.venv/

@@ -523,9 +523,12 @@ function shouldHighlightAttitude(att: string): boolean {
 // ── Text Term Filtering ────────────────────────────────────────────────────
 
 function matchesTerms(text: string, terms: string[]): boolean {
-  if (!text || !terms.length) return false;
+  // `terms` reaches us via settings that originate from page-origin
+  // localStorage / a forgeable postMessage, so never assume it is an array of
+  // strings — a bad value here would throw on every applyFilters tick.
+  if (!text || !Array.isArray(terms) || !terms.length) return false;
   const lower = text.toLowerCase();
-  return terms.some(t => lower.includes(t.toLowerCase()));
+  return terms.some(t => typeof t === 'string' && t !== '' && lower.includes(t.toLowerCase()));
 }
 
 // ── Chat Age Badges ────────────────────────────────────────────────────────
@@ -647,9 +650,15 @@ function undoHideById(id: string): boolean {
   return true;
 }
 
-// Expose on window for bridge access
-(typeof window !== 'undefined' ? window : globalThis as any).__aggregaytor_undoLastHide = undoLastHide;
-(typeof window !== 'undefined' ? window : globalThis as any).__aggregaytor_undoHideById = undoHideById;
+// NOT exposed on window. These used to be assigned to
+// `window.__aggregaytor_undoLastHide` / `__aggregaytor_undoHideById` with a
+// "for bridge access" comment, but the bridge runs in the ISOLATED world and
+// never sees MAIN-world window properties — nothing ever called them. All they
+// did was hand the host page the ability to un-hide arbitrary profiles, which
+// violates the MAIN-world rule in docs/ARCHITECTURE.md ("do NOT expose anything
+// that gives the page additional capabilities"). The bridge drives both paths
+// through events instead: `__aggregaytor_undo_hide` (below) and the in-page
+// undo toast.
 
 // ── Undo-Hide Popup ────────────────────────────────────────────────────────
 // v0.57.65: every manual hide (middle-click marker, hide button on profile,
@@ -795,11 +804,10 @@ function showUndoHidePopup(profileId: string, marker: HTMLElement | null): void 
   dismissBtn.addEventListener('click', cleanup);
 }
 
-// Expose for the bridge (called from middle-click handler in sniffies-bridge)
-// and from the floating panel hide button which lives in ISOLATED world.
-(typeof window !== 'undefined' ? window : globalThis as any).__aggregaytor_showUndoHide = (profileId: string) => {
-  showUndoHidePopup(profileId, idToMarker.get(profileId) || null);
-};
+// NOT exposed on window either (was `__aggregaytor_showUndoHide`). The bridge
+// is ISOLATED-world and could never have reached it; the ISOLATED-world hide
+// buttons already reach us through `__aggregaytor_block_by_map_filter` below,
+// which calls showUndoHidePopup itself.
 
 // Block from floating panel — adds profileId to the blocked set and applies
 window.addEventListener('__aggregaytor_block_by_map_filter', ((event: CustomEvent) => {
@@ -1256,6 +1264,11 @@ function loadSettings(): void {
       const hadPollution = Array.isArray(parsed.blockedIds);
       delete parsed.blockedIds;
       Object.assign(settings, parsed);
+      // Page-origin storage — re-assert the array fields so a hand-edited or
+      // page-written value can't make applyFilters throw on every tick.
+      if (!Array.isArray(settings.excludeTerms)) settings.excludeTerms = [];
+      if (!Array.isArray(settings.includeTerms)) settings.includeTerms = [];
+      if (!(settings.blockedIds instanceof Set)) settings.blockedIds = new Set();
       if (hadPollution) {
         try { localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed)); } catch {}
       }
@@ -1309,6 +1322,14 @@ window.addEventListener('__aggregaytor_map_filter_settings', ((event: CustomEven
   // BLOCKED_KEY remains the single source of truth for blocked profiles.
   const { blockedIds: _ignored, ...filterOnly } = update;
   Object.assign(settings, filterOnly);
+  // The update crosses an untrusted boundary (page-origin localStorage on one
+  // side, a window postMessage any page script can forge on the other), so
+  // re-assert the shape of the only two non-boolean fields. Without this a
+  // single bad value made `settings.excludeTerms.length` throw on every
+  // 5s applyFilters tick and the whole filter pass went dead.
+  if (!Array.isArray(settings.excludeTerms)) settings.excludeTerms = [];
+  if (!Array.isArray(settings.includeTerms)) settings.includeTerms = [];
+  if (!(settings.blockedIds instanceof Set)) settings.blockedIds = new Set();
   // Persist WITHOUT blockedIds so STORAGE_KEY can never contaminate
   // the blocked set on re-read.
   try {
@@ -1504,11 +1525,21 @@ function extractLastActiveFromPartial(p: any): number {
   return 0;
 }
 
-async function fetchPartialsForIds(ids: string[]): Promise<void> {
-  if (!ids.length) return;
+/**
+ * POST a batch of profile IDs to the partials endpoint.
+ *
+ * Returns `true` when a request was actually attempted and `false` when the
+ * call was skipped by the rate limiter. The caller uses that to decide whether
+ * to apply the 30s per-id backoff: penalising IDs from a batch that never left
+ * the browser meant that, with the prefetch tick (4s) and the min request
+ * interval (4s) being equal, ordinary timing jitter pushed most IDs into a 30s
+ * cooldown and attitude backfill crawled.
+ */
+async function fetchPartialsForIds(ids: string[]): Promise<boolean> {
+  if (!ids.length) return false;
   const now = Date.now();
-  if (now < partialsRateLimitUntil) return;
-  if (now - partialsLastRequestTs < PARTIALS_MIN_INTERVAL_MS) return;
+  if (now < partialsRateLimitUntil) return false;
+  if (now - partialsLastRequestTs < PARTIALS_MIN_INTERVAL_MS) return false;
   partialsLastRequestTs = now;
 
   // Try preferred endpoint first, fall back to others on failure.
@@ -1524,7 +1555,7 @@ async function fetchPartialsForIds(ids: string[]): Promise<void> {
       if (res.status === 429) {
         partialsRateLimitUntil = Date.now() + PARTIALS_FAIL_COOLDOWN_MS;
         console.warn('[Aggregaytor:MapFilters] partials 429 — cooling down');
-        return;
+        return true;
       }
       if (!res.ok) continue;
       const data = await res.json();
@@ -1555,7 +1586,7 @@ async function fetchPartialsForIds(ids: string[]): Promise<void> {
         console.log(`[Aggregaytor:MapFilters] Partials: fetched ${attitudeCount} attitudes (of ${ids.length} requested)`);
         requestAnimationFrame(applyFilters);
       }
-      return;
+      return true;
     } catch {
       // Try next endpoint
     }
@@ -1566,6 +1597,7 @@ async function fetchPartialsForIds(ids: string[]): Promise<void> {
     partialsPreferredEndpoint = PARTIALS_ENDPOINTS[(curIdx + 1) % PARTIALS_ENDPOINTS.length];
     partialsEndpointFailCount = 0;
   }
+  return true;
 }
 
 /**
@@ -1610,9 +1642,13 @@ function tickPartialsPrefetch(): void {
     partialsFetchInFlight.add(id);
   }
   if (!batch.length) return;
-  fetchPartialsForIds(batch).finally(() => {
+  fetchPartialsForIds(batch).then((attempted) => {
     for (const id of batch) {
       partialsFetchInFlight.delete(id);
+      // Only back off IDs that were actually asked for. A batch the rate
+      // limiter dropped never reached the network, so penalising it would
+      // just starve the backfill.
+      if (!attempted) continue;
       // If we still don't have attitude after the fetch, back off before retrying
       if (!markerAttitudes.has(id) && !partialsNoAttitude.has(id)) {
         partialsRetryAt.set(id, Date.now() + PARTIALS_FAIL_COOLDOWN_MS);
@@ -1622,6 +1658,10 @@ function tickPartialsPrefetch(): void {
         }
       }
     }
+  }, () => {
+    // fetchPartialsForIds swallows its own errors, but never let an unexpected
+    // rejection strand IDs in partialsFetchInFlight forever.
+    for (const id of batch) partialsFetchInFlight.delete(id);
   });
 }
 

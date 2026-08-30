@@ -62,10 +62,21 @@ function relayMainWorldRequest(
   return true;
 }
 
+// Trust boundary: `__aggregaytor_message` is a plain window CustomEvent, so
+// ANY script on web.grindr.com (including injected/third-party ones) can forge
+// it — not just content/grindr.js. Relaying `detail` verbatim would let the
+// page reach every case of the service worker's message switch. Only the
+// message types content/grindr.js actually emits are forwarded.
+const GRINDR_RELAY_TYPES = new Set(['ADAPTER_MESSAGES', 'ADAPTER_CONTACTS', 'PROFILE_BLOCKED']);
+
 window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
   if (!contextValid || !checkContext()) return;
   const detail = event.detail;
-  if (!detail?.type) return;
+  if (!detail || typeof detail.type !== 'string') return;
+  if (!GRINDR_RELAY_TYPES.has(detail.type)) {
+    console.warn(`${LOG} Dropped relay message with unexpected type: ${detail.type.slice(0, 40)}`);
+    return;
+  }
   try { chrome.runtime.sendMessage(detail).catch(() => {}); }
   catch { contextValid = false; }
 }) as EventListener);
@@ -344,29 +355,29 @@ function attemptBlock(e: MouseEvent): void {
   }).catch(() => {});
 }
 
-document.addEventListener('auxclick', (e) => {
-  if (e.button !== 1) return; // middle-click only
-  attemptBlock(e);
-}, true);
-
-// v0.57.47: redundant `mousedown` capture for middle-click. Some Chrome
-// builds + trackpad gesture configs DO fire mousedown (button:1) but
-// suppress the matching auxclick — the user's "doesn't work anymore"
-// report. Capturing both events with a 150ms dedupe window means we
-// catch whichever fires; if both fire we run the handler exactly once.
+// v0.57.47: redundant `mousedown` + `auxclick` capture for middle-click. Some
+// Chrome builds + trackpad gesture configs DO fire mousedown (button:1) but
+// suppress the matching auxclick — the user's "doesn't work anymore" report.
+// Capturing both events behind one shared dedupe window means we catch
+// whichever fires; if both fire we run the handler exactly once.
+//
+// The dedupe check has to live in BOTH handlers. It previously guarded only
+// `mousedown` while a separate auxclick listener merely re-stamped the
+// timestamp — so a normal mouse (mousedown *then* auxclick) ran attemptBlock
+// twice, double-dispatching __aggregaytor_block_profile and sending two
+// PROFILE_BLOCKED messages per click.
+const MIDDLE_CLICK_DEDUPE_MS = 150;
 let _grindrLastMiddleAt = 0;
-document.addEventListener('mousedown', (e) => {
-  if (e.button !== 1) return;
-  if (Date.now() - _grindrLastMiddleAt < 150) return;
+
+function onMiddleClick(e: MouseEvent): void {
+  if (e.button !== 1) return; // middle-click only
+  if (Date.now() - _grindrLastMiddleAt < MIDDLE_CLICK_DEDUPE_MS) return;
   _grindrLastMiddleAt = Date.now();
   attemptBlock(e);
-}, true);
-// Re-stamp the dedupe window from auxclick too so a normal mouse click
-// chain (mousedown + auxclick) doesn't double-fire attemptBlock.
-document.addEventListener('auxclick', (e) => {
-  if (e.button !== 1) return;
-  _grindrLastMiddleAt = Date.now();
-}, true);
+}
+
+document.addEventListener('mousedown', onMiddleClick, true);
+document.addEventListener('auxclick', onMiddleClick, true);
 
 // Shift+right-click — trackpad-friendly equivalent of middle-click. Only
 // suppresses the native context menu when a strategy actually fired

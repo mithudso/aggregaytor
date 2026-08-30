@@ -13,8 +13,33 @@ function normalizeTerm(value: string): string {
   return String(value || '').trim();
 }
 
-function escapeRegExp(value: string): string {
-  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** True for [a-zA-Z0-9]; '' (a missing neighbour) counts as a word boundary. */
+function isWordChar(char: string): boolean {
+  return (char >= 'a' && char <= 'z')
+    || (char >= 'A' && char <= 'Z')
+    || (char >= '0' && char <= '9');
+}
+
+/**
+ * Term match against an *already lowercased* haystack.
+ *
+ * Equivalent to the previous `(^|[^a-z0-9])term([^a-z0-9]|$)` regex for short
+ * terms, minus the per-call RegExp compile: it walks every occurrence and
+ * accepts the first one whose neighbours are non-alphanumeric or absent.
+ */
+function matchesLoweredText(haystack: string, term: string): boolean {
+  const needle = normalizeTerm(term).toLowerCase();
+  if (!haystack || !needle) return false;
+  if (needle.length > 3) return haystack.includes(needle);
+  let from = 0;
+  for (;;) {
+    const at = haystack.indexOf(needle, from);
+    if (at === -1) return false;
+    const before = at > 0 ? haystack[at - 1] : '';
+    const after = haystack[at + needle.length] ?? '';
+    if (!isWordChar(before) && !isWordChar(after)) return true;
+    from = at + 1;
+  }
 }
 
 export function normalizeEntities(entities: Partial<Entity>[]): Entity[] {
@@ -38,20 +63,17 @@ export function buildSearchTerms(entity: Entity): string[] {
 }
 
 export function termMatchesText(text: string, term: string): boolean {
-  const haystack = String(text || '').toLowerCase();
-  const needle = normalizeTerm(term).toLowerCase();
-  if (!haystack || !needle) return false;
-  if (needle.length <= 3) {
-    return new RegExp(`(^|[^a-z0-9])${escapeRegExp(needle)}([^a-z0-9]|$)`, 'i').test(haystack);
-  }
-  return haystack.includes(needle);
+  return matchesLoweredText(String(text || '').toLowerCase(), term);
 }
 
 export function inferEntityId(entities: Entity[], text: string): string | null {
+  // Lowercased once: going through termMatchesText re-lowercased the whole
+  // text for every term of every entity, i.e. O(entities x terms x |text|).
+  const haystack = String(text || '').toLowerCase();
+  if (!haystack) return null;
   for (const entity of entities) {
-    const terms = buildSearchTerms(entity);
-    for (const term of terms) {
-      if (termMatchesText(text, term)) {
+    for (const term of buildSearchTerms(entity)) {
+      if (matchesLoweredText(haystack, term)) {
         return entity.id;
       }
     }
@@ -78,6 +100,7 @@ export function inferEntityName(entities: Entity[], text: string): string {
  */
 export class EntityStore {
   private cache: Entity[] | null = null;
+  private loading: Promise<Entity[]> | null = null;
   private adapter: EntityStoreAdapter;
   private storageKey: string;
 
@@ -88,14 +111,29 @@ export class EntityStore {
 
   async load(): Promise<Entity[]> {
     if (this.cache) return this.cache;
-    const data = await this.adapter.get(this.storageKey);
-    this.cache = Array.isArray(data) ? normalizeEntities(data as Partial<Entity>[]) : [];
-    return this.cache;
+    // Concurrent callers (several service-worker messages in the same tick)
+    // share one adapter read rather than each issuing their own.
+    if (!this.loading) {
+      this.loading = (async () => {
+        const data = await this.adapter.get(this.storageKey);
+        const loaded = Array.isArray(data) ? normalizeEntities(data as Partial<Entity>[]) : [];
+        // A save that landed while this read was in flight is newer than what
+        // came back, so it wins.
+        if (!this.cache) this.cache = loaded;
+        return this.cache;
+      })();
+      // Clear on settle so a failed read is retried rather than cached.
+      this.loading.catch(() => {}).finally(() => { this.loading = null; });
+    }
+    return this.loading;
   }
 
   async save(entities: Entity[]): Promise<void> {
-    this.cache = normalizeEntities(entities);
-    await this.adapter.set(this.storageKey, this.cache);
+    const normalized = normalizeEntities(entities);
+    await this.adapter.set(this.storageKey, normalized);
+    // Adopted only once the write lands: updating the cache first left the
+    // in-memory copy ahead of storage whenever the adapter threw.
+    this.cache = normalized;
   }
 
   async get(id: string): Promise<Entity | undefined> {
@@ -120,5 +158,8 @@ export class EntityStore {
 
   invalidateCache(): void {
     this.cache = null;
+    // Drop any in-flight read too, so the next load() re-reads the adapter
+    // instead of resolving with data fetched before the invalidation.
+    this.loading = null;
   }
 }

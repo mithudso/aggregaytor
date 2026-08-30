@@ -48,6 +48,27 @@ function toContactDoc(contact: UnifiedContact): ContactDoc {
 }
 
 /**
+ * Merge the fields a fresh adapter scrape must not clobber from the stored
+ * doc onto the incoming one. Shared by the single and batch upsert paths so
+ * they can't drift apart.
+ */
+function mergePreservedContactFields(doc: ContactDoc, prev: ContactDoc): void {
+  (doc as { _rev?: string })._rev = prev._rev;
+  doc.createdAt = prev.createdAt;
+  doc.lastMessageAt = prev.lastMessageAt || doc.lastMessageAt;
+  doc.unreadCount = prev.unreadCount;
+  // Preserve existing avatar if the new payload has none.
+  if (!doc.avatarUrl && prev.avatarUrl) doc.avatarUrl = prev.avatarUrl;
+  // Preserve existing display name if the new payload didn't include one.
+  // Many code paths (chat panel scraper, message-only captures) emit contacts
+  // with displayName: '' — those must NOT clobber a captured real name.
+  if (!doc.displayName && prev.displayName) doc.displayName = prev.displayName;
+  // Merge metadata so message-source updates don't erase profile-source
+  // fields (e.g. bodyType, position) that arrived from a richer payload.
+  doc.metadata = { ...(prev.metadata || {}), ...(doc.metadata || {}) };
+}
+
+/**
  * Insert or update a single contact. Use upsertContacts() for batches.
  */
 export async function upsertContact(
@@ -58,10 +79,7 @@ export async function upsertContact(
   const doc = toContactDoc(contact);
   try {
     const existing = await store.get(doc._id) as ContactDoc;
-    doc._rev = existing._rev;
-    doc.createdAt = existing.createdAt;
-    doc.lastMessageAt = existing.lastMessageAt || doc.lastMessageAt;
-    doc.unreadCount = existing.unreadCount;
+    mergePreservedContactFields(doc, existing);
     await store.put(doc);
   } catch (err: any) {
     if (err.status === 404) {
@@ -106,21 +124,7 @@ export async function upsertContacts(
   for (const doc of docs) {
     const prev = existingMap.get(doc._id);
     if (prev) {
-      // Merge: preserve _rev, original timestamps, and message-managed fields
-      (doc as any)._rev = prev._rev;
-      doc.createdAt = prev.createdAt;
-      doc.lastMessageAt = prev.lastMessageAt || doc.lastMessageAt;
-      doc.unreadCount = prev.unreadCount;
-      // Preserve existing avatar if new one is empty
-      if (!doc.avatarUrl && prev.avatarUrl) doc.avatarUrl = prev.avatarUrl;
-      // Preserve existing display name if the new payload didn't include one.
-      // Many code paths (chat panel scraper, message-only captures) emit
-      // contacts with displayName: '' — those should NOT clobber a previously
-      // captured real name.
-      if (!doc.displayName && prev.displayName) doc.displayName = prev.displayName;
-      // Merge metadata so message-source updates don't erase profile-source
-      // fields (e.g. bodyType, position) that arrived from a richer payload.
-      doc.metadata = { ...(prev.metadata || {}), ...(doc.metadata || {}) };
+      mergePreservedContactFields(doc, prev);
       updated++;
     } else {
       created++;

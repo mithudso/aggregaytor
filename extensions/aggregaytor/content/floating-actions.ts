@@ -32,6 +32,23 @@ let isDragging = false;
 let dragOffset = { x: 0, y: 0 };
 let _dragCleanup: (() => void) | null = null;
 
+/**
+ * chrome.runtime.sendMessage can THROW SYNCHRONOUSLY once the extension is
+ * reloaded/updated mid-session ("Extension context invalidated"). That throw
+ * bypasses any .catch() chained onto the returned promise and lands as an
+ * uncaught error from a click handler. This panel outlives extension reloads
+ * (it sits in the page until the user refreshes), so every send goes through
+ * here. Mirrors safeSendMessage in the per-platform bridges.
+ */
+function safeSend(message: unknown): Promise<any> {
+  try {
+    const p = chrome.runtime.sendMessage(message);
+    return p && typeof p.then === 'function' ? p : Promise.resolve(p);
+  } catch (err) {
+    return Promise.reject(err);
+  }
+}
+
 // ── CSS ──────────────────────────────────────────────────────────────────────
 
 function injectCSS(): void {
@@ -248,7 +265,7 @@ function setupActions(panel: HTMLElement): void {
   // Block/Hide
   panel.querySelector('.fp-block-btn')?.addEventListener('click', () => {
     if (!currentContactId) return;
-    chrome.runtime.sendMessage({
+    safeSend({
       type: 'PROFILE_BLOCKED',
       contactId: currentContactId,
       platform: currentPlatform,
@@ -267,16 +284,23 @@ function setupActions(panel: HTMLElement): void {
     area.style.display = area.style.display === 'none' ? '' : 'none';
   });
 
-  // Notes save (debounced)
+  // Notes save (debounced).
+  // contactId/platform are snapshotted at INPUT time. They live in module
+  // scope and showFloatingPanel rewrites them on every profile change, so
+  // reading them at flush time meant a profile switch inside the 800ms window
+  // saved profile A's note onto profile B's thread_meta.
   let noteTimer: ReturnType<typeof setTimeout> | null = null;
   panel.querySelector('#fp-notes-input')?.addEventListener('input', (e) => {
     if (noteTimer) clearTimeout(noteTimer);
+    const forContactId = currentContactId;
+    const forPlatform = currentPlatform;
+    const notes = (e.target as HTMLTextAreaElement).value;
     noteTimer = setTimeout(() => {
-      const notes = (e.target as HTMLTextAreaElement).value;
-      chrome.runtime.sendMessage({
+      if (!forContactId) return;
+      safeSend({
         type: 'UPSERT_THREAD_META',
-        contactId: currentContactId,
-        platform: currentPlatform,
+        contactId: forContactId,
+        platform: forPlatform,
         updates: { notes },
       }).catch(() => {});
       const status = panel.querySelector('#fp-status') as HTMLElement;
@@ -293,7 +317,7 @@ function setupActions(panel: HTMLElement): void {
       panel.querySelectorAll('.fp-star').forEach((s, i) => {
         s.classList.toggle('active', i < newRating);
       });
-      chrome.runtime.sendMessage({
+      safeSend({
         type: 'SET_RATING',
         contactId: currentContactId,
         platform: currentPlatform,
@@ -308,7 +332,7 @@ function setupActions(panel: HTMLElement): void {
 async function populatePanel(panel: HTMLElement, contactId: string, platform: string): Promise<void> {
   // Load thread meta (notes, rating)
   try {
-    const res = await chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId });
+    const res = await safeSend({ type: 'GET_THREAD_META', contactId });
     const meta = res?.meta || {};
 
     // Set notes
@@ -331,13 +355,20 @@ async function populatePanel(panel: HTMLElement, contactId: string, platform: st
   // Load quick phrases (top 3)
   try {
     const data = await chrome.storage.local.get('aggregaytor_quick_phrases');
-    const phrases = (data.aggregaytor_quick_phrases || ['Hey there!', "What's up?", 'Looking?']).slice(0, 3);
+    // Stored phrases are user data of unknown shape (older builds, hand edits,
+    // a partially-written sync). Coerce to strings before any .replace/.length
+    // so one bad row can't throw the whole panel's phrase section away.
+    const raw = data.aggregaytor_quick_phrases;
+    const phrases: string[] = (Array.isArray(raw) && raw.length ? raw : ['Hey there!', "What's up?", 'Looking?'])
+      .filter((p: unknown) => typeof p === 'string' && p !== '')
+      .slice(0, 3);
     const container = panel.querySelector('#fp-phrases') as HTMLElement;
     if (container) {
-      const escAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      // One escaper: escaping the quote as well is harmless in text position
+      // and required in attribute position, so both sinks can share it.
+      const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
       container.innerHTML = phrases.map((p: string) =>
-        `<button class="fp-phrase-btn" title="${escAttr(p)}">${p.length > 20 ? escHtml(p.slice(0, 18)) + '...' : escHtml(p)}</button>`
+        `<button class="fp-phrase-btn" title="${esc(p)}">${esc(p.length > 20 ? p.slice(0, 18) + '...' : p)}</button>`
       ).join('');
       container.querySelectorAll('.fp-phrase-btn').forEach((btn, i) => {
         btn.addEventListener('click', () => {

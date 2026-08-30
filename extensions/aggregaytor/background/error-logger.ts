@@ -59,17 +59,39 @@ function scheduleFlush(): void {
   }, 1000);
 }
 
+// Entries arrive from untrusted contexts (content scripts forward errors via
+// the LOG_ERROR message), so every free-form field is bounded before it lands
+// in chrome.storage.local. `context` is the only object-shaped field, so it
+// gets a serialized-size budget rather than a string slice: without one, a
+// single caller could park megabytes per entry × MAX_ENTRIES in storage.
+const MAX_CONTEXT_BYTES = 4000;
+function boundContext(context: unknown): Record<string, unknown> | undefined {
+  if (context == null) return undefined;
+  if (typeof context !== 'object' || Array.isArray(context)) {
+    return { value: String(context).slice(0, MAX_CONTEXT_BYTES) };
+  }
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(context) || '';
+  } catch {
+    // Cyclic or otherwise unserializable — it would fail the storage write too.
+    return { _unserializable: true };
+  }
+  if (serialized.length <= MAX_CONTEXT_BYTES) return context as Record<string, unknown>;
+  return { _truncated: true, preview: serialized.slice(0, MAX_CONTEXT_BYTES) };
+}
+
 /** Append an error entry. Caps at MAX_ENTRIES with FIFO eviction. */
 export async function logError(entry: Omit<ErrorLogEntry, 'ts'> & { ts?: string }): Promise<void> {
   await rehydrate();
   const full: ErrorLogEntry = {
     ts: entry.ts || new Date().toISOString(),
-    source: entry.source,
+    source: String(entry.source || 'unknown').slice(0, 100),
     level: entry.level,
     message: String(entry.message || '').slice(0, 2000), // cap length defensively
     stack: entry.stack ? String(entry.stack).slice(0, 4000) : undefined,
-    url: entry.url,
-    context: entry.context,
+    url: entry.url ? String(entry.url).slice(0, 1000) : undefined,
+    context: boundContext(entry.context),
   };
   buffer.push(full);
   if (buffer.length > MAX_ENTRIES) {
@@ -112,7 +134,10 @@ export async function exportErrorLog(): Promise<{ id: number | null; count: numb
   // Reading the blob to a base64 data URL avoids the worker's missing URL
   // object-URL support.
   const dataUrl = await blobToDataUrl(blob);
-  if (!dataUrl) return { id: null, count: buffer.length, filename };
+  if (!dataUrl) {
+    console.warn('[Aggregaytor:ErrorLog] export failed: could not read log blob as a data URL');
+    return { id: null, count: buffer.length, filename };
+  }
   try {
     const id = await chrome.downloads.download({
       url: dataUrl,
@@ -121,6 +146,9 @@ export async function exportErrorLog(): Promise<{ id: number | null; count: numb
     });
     return { id, count: buffer.length, filename };
   } catch (err) {
+    // console.warn (not console.error) on purpose: console.error is patched by
+    // installGlobalErrorCapture and would re-enter this module.
+    console.warn('[Aggregaytor:ErrorLog] export download failed:', (err as Error)?.message || err);
     return { id: null, count: buffer.length, filename };
   }
 }

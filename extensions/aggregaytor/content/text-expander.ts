@@ -87,8 +87,14 @@ let shortcutMap = new Map<string, string>();
 
 function rebuildMap(): void {
   shortcutMap.clear();
+  // `substitutions` can come from page-origin localStorage or from a
+  // CustomEvent that any page script could forge, so treat every entry as
+  // untrusted — a null/!object row must not throw out of here.
+  if (!Array.isArray(substitutions)) return;
   for (const s of substitutions) {
-    if (s.shortcut && s.phrase) shortcutMap.set(s.shortcut.toLowerCase(), s.phrase);
+    if (s && typeof s.shortcut === 'string' && typeof s.phrase === 'string' && s.shortcut && s.phrase) {
+      shortcutMap.set(s.shortcut.toLowerCase(), s.phrase);
+    }
   }
 }
 
@@ -117,14 +123,20 @@ function tryExpand(input: HTMLTextAreaElement | HTMLInputElement): boolean {
 
   // Replace the shortcut with the phrase
   const newVal = val.slice(0, wordStart) + phrase + ' ' + val.slice(cursorPos);
-  // Use native setter to work with React/Angular
-  const nativeSet = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
-    || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+  // Use native setter to work with React/Angular. The setter must come from
+  // the element's OWN prototype — HTMLTextAreaElement's `value` setter throws
+  // "Illegal invocation" when called on an <input>, which previously made
+  // expansion fail on every <input type="text"> composer.
+  const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
+    : HTMLInputElement.prototype;
+  const nativeSet = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
   if (nativeSet) nativeSet.call(input, newVal);
   else input.value = newVal;
-  // Move cursor to end of inserted phrase
+  // Move cursor to end of inserted phrase. setSelectionRange throws on input
+  // types that don't support selection (number, email, date…), so it must not
+  // be allowed to abort the expansion that already succeeded.
   const newPos = wordStart + phrase.length + 1;
-  input.setSelectionRange(newPos, newPos);
+  try { input.setSelectionRange(newPos, newPos); } catch {}
   // Dispatch events so React/Angular picks up the change
   input.dispatchEvent(new Event('input', { bubbles: true }));
   input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -203,11 +215,19 @@ window.addEventListener('__aggregaytor_text_expander_settings', ((event: CustomE
 // ── Initialization ─────────────────────────────────────────────────────────
 
 export function initTextExpander(): void {
-  // Load from localStorage (synced from chrome.storage via bridge)
+  // Load from localStorage (synced from chrome.storage via bridge).
+  // localStorage is page-origin storage — the host page can write anything to
+  // this key, so the parsed value must be validated before use. A non-array
+  // here used to throw out of rebuildMap() and abort the rest of the MAIN-world
+  // module init (auto-send + cross-world message handler never registered).
   try {
     const raw = localStorage.getItem('aggregaytor_text_substitutions');
-    if (raw) {
-      substitutions = JSON.parse(raw);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(parsed)) {
+      substitutions = parsed.filter(
+        (s): s is Substitution =>
+          !!s && typeof s.shortcut === 'string' && typeof s.phrase === 'string',
+      );
     } else {
       substitutions = DEFAULT_SUBSTITUTIONS;
       localStorage.setItem('aggregaytor_text_substitutions', JSON.stringify(substitutions));

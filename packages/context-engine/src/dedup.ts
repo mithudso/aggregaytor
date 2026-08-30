@@ -23,6 +23,10 @@ export function dedupeContextRecords(
   const exactSeen = new Map<string, string>();
   const bucketMap = new Map<string, string[]>();
   const deduped: ContextRecord[] = [];
+  // id -> kept record, so candidate lookup is O(1). A linear scan of `deduped`
+  // per candidate made the near-duplicate pass quadratic in the kept-record
+  // count on top of the per-record candidate fan-out.
+  const keptById = new Map<string, ContextRecord>();
   const duplicateMap = new Map<string, { duplicate_of: string; duplicate_kind: 'exact' | 'near' }>();
   const ordered = [...(Array.isArray(records) ? records : [])]
     .sort((a, b) => recordSpecificityScore(b) - recordSpecificityScore(a));
@@ -49,7 +53,7 @@ export function dedupeContextRecords(
 
     let nearDuplicateOf = '';
     for (const candidateId of candidates) {
-      const candidate = deduped.find(item => item.id === candidateId);
+      const candidate = keptById.get(candidateId);
       if (!candidate) continue;
       const signatureScore = estimateSignatureSimilarity(
         record.minhash_signature,
@@ -75,6 +79,9 @@ export function dedupeContextRecords(
 
     exactSeen.set(record.exact_hash, record.id!);
     deduped.push(record);
+    // First-wins, matching the `deduped.find(...)` this replaced: if two kept
+    // records somehow share an id, the earlier one stays the candidate.
+    if (!keptById.has(record.id!)) keptById.set(record.id!, record);
     for (const bucket of record.lsh_buckets || []) {
       if (!bucketMap.has(bucket)) bucketMap.set(bucket, []);
       bucketMap.get(bucket)!.push(record.id!);

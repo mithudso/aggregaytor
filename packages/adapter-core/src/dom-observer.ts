@@ -7,6 +7,17 @@
 
 import type { DOMExtractorOptions } from './types.js';
 
+/**
+ * Watch a container for newly-inserted message elements.
+ *
+ * If `opts.rootSelector` does not match yet (common on SPAs that render the
+ * chat pane lazily), a temporary observer on `<body>` waits for it to appear
+ * and then attaches the real observer.
+ *
+ * @param target - The document to observe.
+ * @param opts   - Selectors and the new-element callback.
+ * @returns A cleanup function that disconnects every observer this created.
+ */
 export function createDOMExtractor(
   target: Document,
   opts: DOMExtractorOptions,
@@ -20,23 +31,30 @@ export function createDOMExtractor(
   let cleanup: (() => void) | null = null;
 
   function attachObserver(element: Element) {
+    // Defensive: never orphan a previously-attached observer by overwriting
+    // `cleanup` with a second one.
+    cleanup?.();
     const observer = new MutationObserver((mutations) => {
-      const newElements: Element[] = [];
+      // A Set, not an array: within one mutation batch an added node can match
+      // `messageSelector` itself *and* be a descendant of another added node,
+      // and the same element can be reported by more than one mutation record.
+      // Emitting it twice makes downstream extraction parse it twice.
+      const newElements = new Set<Element>();
       for (const mutation of mutations) {
         for (const node of mutation.addedNodes) {
           if (node.nodeType !== Node.ELEMENT_NODE) continue;
           const el = node as Element;
           if (el.matches(opts.messageSelector)) {
-            newElements.push(el);
+            newElements.add(el);
           }
           const descendants = el.querySelectorAll(opts.messageSelector);
           for (const desc of descendants) {
-            newElements.push(desc);
+            newElements.add(desc);
           }
         }
       }
-      if (newElements.length) {
-        opts.onNewElements(newElements);
+      if (newElements.size) {
+        opts.onNewElements([...newElements]);
       }
     });
     observer.observe(element, {
@@ -56,7 +74,11 @@ export function createDOMExtractor(
         attachObserver(found);
       }
     });
-    bodyObserver.observe(target.body || target.documentElement, {
+    // At document-start there may be neither <body> nor <html> yet; observing
+    // `null` throws, which would take down the adapter's whole init().
+    const bodyTarget = target.body || target.documentElement;
+    if (!bodyTarget) return () => {};
+    bodyObserver.observe(bodyTarget, {
       childList: true,
       subtree: true,
     });

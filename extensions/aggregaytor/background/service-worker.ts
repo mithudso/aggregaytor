@@ -22,11 +22,11 @@ import {
   saveOpfsSnapshotData, getOpfsSnapshotStatus, restoreFromOpfsSnapshot, deleteOpfsSnapshot,
 } from '@aggregaytor/store';
 import type { ThreadSummary, AutoRespondSettings, ProfileFeatures, ReminderDoc } from '@aggregaytor/store';
-import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS, clearLLMCaches, queryContacts, getDeprecationWarnings, generateConversationSummary, setProviderModelOverride, getEffectiveModelForProvider, getAllProviderModels, getAllProviderKeys } from './llm.js';
+import { generateSuggestions, generateAutoResponse, generateGreeting, generateNickname as llmNickname, extractDossierFields, localDossierExtraction, getLLMConfig, saveLLMConfig, getLLMRateSettings, saveLLMRateSettings, getLLMQueueStatus, getLLMOptimizationStats, getPersonalitySettings, savePersonalitySettings, deriveStyleGuide, PERSONALITY_PRESETS, clearLLMCaches, queryContacts, getDeprecationWarnings, generateConversationSummary, setProviderModelOverride, getDefaultModel, getAllProviderModels, getAllProviderKeys } from './llm.js';
 import type { ContactQueryRow } from './llm.js';
 import { seedIndex, indexMessages, removeFromIndex, clearIndex, searchMessages as fulltextSearch, isIndexReady, getIndexSize, getEvictedCount, getLastEvictionAt, getLifetimeStats, SEARCH_INDEX_MAX_DOCS } from './search-index.js';
 import { getDossier, upsertDossier, setAutoExtractedField } from '@aggregaytor/store';
-import { handleDebugCommand } from './debug-bridge.js';
+import { handleDebugCommand, authorizeDebugCommand } from './debug-bridge.js';
 import { logError, getErrorLog, clearErrorLog, exportErrorLog, installGlobalErrorCapture } from './error-logger.js';
 import {
   getFFState, saveFFState, updateFFFilters, addToIgnoreList, getRunState, setRunState,
@@ -59,6 +59,11 @@ const swPerf: Record<string, { calls: number; totalMs: number; maxMs: number }> 
 // hidden / blockedByThem / favorited / bookmarked (the "blocked list").
 const DB_PURGE_THRESHOLD_BYTES = 1 * 1024 * 1024 * 1024; // 1 GiB
 const PURGE_COOLDOWN_MS = 10 * 60_000; // don't re-purge within 10 min
+
+// How long BROADCAST_TO_FAVORITES waits after an SPA navigation before typing
+// the message, so it lands in the recipient's thread rather than the previous
+// one. Same order of magnitude as sendMessageToTab's post-navigation settle.
+const BROADCAST_SPA_SETTLE_MS = 1500;
 
 // v0.57.62: rough byte estimate for a JS value via JSON serialization length.
 // Used by GET_MEMORY_BREAKDOWN to surface order-of-magnitude offenders. We
@@ -367,9 +372,11 @@ async function runAutoMaintenance(): Promise<void> {
   const sinceLastCompact = now - maintenanceState.lastCompactAt;
   const ONE_DAY = 24 * 60 * 60_000;
   const SEVEN_DAYS = 7 * ONE_DAY;
-  if (maintenanceState.lastCompactAt === 0) {
-    // First boot ever — don't compact immediately, wait for one of the conditions
-  }
+  // NOTE on the never-compacted case (lastCompactAt === 0): `sinceLastCompact`
+  // is then `now`, i.e. enormous, so the mutation-gated rule below fires as
+  // soon as 1000 mutations have accumulated. That IS the intended first
+  // compaction trigger. The 7-day rule additionally requires lastCompactAt > 0
+  // so it can't fire on a fresh profile with no mutation history.
   if (sinceLastCompact > ONE_DAY && maintenanceState.mutationsSinceCompact > 1000) {
     shouldCompact = true;
     reasons.push(`>1d since compact + ${maintenanceState.mutationsSinceCompact} mutations`);
@@ -544,13 +551,13 @@ const PLATFORM_URLS: Record<string, (contactId: string) => string> = {
   yahoo: () => `https://mail.yahoo.com/`,
 };
 
-chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg: any, sender, sendResponse) => {
   // Wrap in try/catch so a synchronous throw in handleMessage's dispatch
   // (e.g. a malformed msg object hitting a switch branch) cannot take down
   // the service worker. Any error — sync or async — turns into a structured
   // `{ ok: false, error }` response so the UI can surface it.
   try {
-    handleMessage(msg)
+    handleMessage(msg, sender)
       .then(sendResponse)
       .catch(err => {
         console.warn(`${LOG} Message handler failed for type=${msg?.type}:`, err);
@@ -563,7 +570,9 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
   return true;
 });
 
-async function handleMessage(msg: any): Promise<any> {
+// `sender` is only consulted by the DEBUG_COMMAND case (sender-origin gate);
+// every other case ignores it, so callers in tests may omit it.
+async function handleMessage(msg: any, sender?: chrome.runtime.MessageSender): Promise<any> {
   switch (msg.type) {
     // ── Performance stats ──
     case 'GET_SW_PERF': {
@@ -666,9 +675,14 @@ async function handleMessage(msg: any): Promise<any> {
     case 'GET_MESSAGES_BY_CONTACT': {
       let msgs = await getMessagesByContact(msg.contactId, { limit: msg.limit || 200 });
 
-      // For non-global-chat contacts, also include their messages from global chat
-      // (tagged by metadata.senderId matching the profile ID)
-      if (msg.contactId !== 'sniffies:global-chat') {
+      // For non-global-chat SNIFFIES contacts, also include their messages from
+      // global chat (tagged by metadata.senderId matching the profile ID).
+      //
+      // Scoped to sniffies: global chat is a Sniffies-only feed, so running
+      // this for grindr/gmail/etc. threads both burned a 500-doc scan per
+      // thread open and risked splicing in the wrong messages, since a bare
+      // numeric Grindr id can collide with a Sniffies senderId.
+      if (String(msg.contactId || '').startsWith('sniffies:') && msg.contactId !== 'sniffies:global-chat') {
         const profileId = msg.contactId.replace(/^[a-z]+:/, '');
         if (profileId) {
           const globalMsgs = await getMessagesByContact('sniffies:global-chat', { limit: 500 });
@@ -710,10 +724,12 @@ async function handleMessage(msg: any): Promise<any> {
       // incrementally by handleIncomingMessages writes.
       //
       // SLOW PATH: substring scan over the newest `limit*20` PouchDB docs.
-      // Used as a fallback when FlexSearch isn't available or when the
-      // query returns fewer results than requested (the index is capped
-      // at SEARCH_INDEX_MAX_DOCS so older messages need the PouchDB scan
-      // to be searchable at all).
+      // Used ONLY when FlexSearch is unavailable (seed failed, tokenizer
+      // threw) — i.e. when fulltextSearch() returns null. A successful but
+      // short result set does NOT trigger it: the index is capped at
+      // SEARCH_INDEX_MAX_DOCS, so messages evicted past that cap are simply
+      // not full-text searchable. GET_SEARCH_INDEX_INFO surfaces the evicted
+      // count so the UI can warn about that blind spot.
       const db = await getDB();
       const q = String(msg.query || '').toLowerCase().trim();
       const limit = Math.min(Math.max(msg.limit || 50, 1), 500);
@@ -1029,22 +1045,13 @@ async function handleMessage(msg: any): Promise<any> {
     case 'FF_BUILD_CANDIDATES': {
       const state = await getFFState();
       const allContacts = await getAllContacts();
-      // Build "has messages" set — one allDocs scan over msg:* keys.
       const db = await getDB();
-      const r = await db.allDocs({ startkey: 'msg:', endkey: 'msg:￿', limit: 5000 });
+      // Build the "has messages" set with a projected Mango find. A message
+      // doc's _id (msg:{platform}:{messageId}) doesn't carry the contactId, so
+      // a keys-only allDocs can't answer this — an earlier attempt to do that
+      // scanned 5000 rows into an empty loop and threw the result away. The
+      // fields:['contactId'] projection keeps the payload small.
       const hasMessages = new Set<string>();
-      for (const row of r.rows) {
-        const id = row.id || '';
-        // msg:{platform}:{messageId} — we can't easily extract contactId from key alone.
-        // We need the doc. allDocs without include_docs won't give us contactId.
-        // Use a separate query to flag contacts that HAVE any messages: the existing
-        // chatActivityCache already maintains exactly this info, populated from
-        // GET_CHAT_ACTIVITY scans. If absent, fall back to a per-platform query.
-      }
-      // Simpler: iterate metas and flag contacts whose meta exists OR messageCount > 0.
-      // Even simpler: the contact's lastSeen + a meta record means we've at least
-      // SEEN them; we need to specifically check whether ANY message doc exists.
-      // We'll do a Mango find limited to docType:'message' with fields:['contactId'].
       try {
         const found = await db.find({
           selector: { docType: 'message' },
@@ -1070,29 +1077,15 @@ async function handleMessage(msg: any): Promise<any> {
         mapFilterSettings = got?.aggregaytor_map_filter_settings || {};
       } catch {}
 
-      // Preference scorer — uses the existing predictPreference model
-      const scorer = (c: any) => {
-        try {
-          const md = c.metadata || {};
-          const features: any = {
-            bodyType: String(md.bodyType || ''), position: String(md.position || ''),
-            age: String(md.age || ''), ethnicity: String(md.ethnicity || ''),
-            height: String(md.height || ''),
-            profileTextLength: String(md.profileText || md.aboutMe || md.bio || '').length,
-            profileTextKeywords: [],
-            hasPhoto: c.avatarUrl ? 1 : 0,
-            photoCount: Array.isArray(md.photos) ? md.photos.length : 0,
-            distance: String(md.distance || ''),
-            conversationLength: 0, responseRate: 0,
-          };
-          // predictPreference returns 0..1 — sync only on already-trained models;
-          // for an unscored contact we get 0.5 which we treat as neutral.
-          // Awaited at top of FF_BUILD_CANDIDATES would make this a hot path,
-          // so we fire-and-forget and use a synchronous default. This is a
-          // ranking heuristic, not a hard gate.
-          return 0.5;
-        } catch { return 0.5; }
-      };
+      // Preference scorer. rankCandidates() needs a SYNCHRONOUS scorer, but
+      // predictPreference() is async, so every contact currently scores the
+      // neutral 0.5 — which passes the respectPreferences gate (< 0.2 rejects)
+      // and contributes nothing to ranking. The previous version built a full
+      // ProfileFeatures object per contact and then discarded it unused, doing
+      // that allocation once per contact across the entire address book.
+      // Wiring in real scores needs an async pre-pass over the candidate set;
+      // until then, return the neutral constant directly.
+      const scorer = (_c: any) => 0.5;
 
       const buildStats = (md: any) => {
         const parts: string[] = [];
@@ -1176,30 +1169,19 @@ async function handleMessage(msg: any): Promise<any> {
       // Map provider → API key from the multi-provider key store, plus
       // the currently-active provider's apiKey if the multi-store is
       // missing it.
-      const keys = await getAllProviderKeys();
+      // Both getAllProviderKeys() and getAllProviderModels() return the objects
+      // held in llm.ts's settings cache. Spread them before writing, or the
+      // additions below leak into that cache — which previously made an unsaved
+      // key look persisted, and (worse) made a DEFAULT model read back later as
+      // if the user had pinned it as a per-provider override.
+      const keys = { ...(await getAllProviderKeys()) };
       if (cfg.provider && cfg.apiKey && !keys[cfg.provider]) keys[cfg.provider] = cfg.apiKey;
       const getKey = (p: string) => keys[p];
-      // Map provider → current effective model (override > active model > default)
-      const overrides = await getAllProviderModels();
-      const getModel = (p: string) => {
-        if (overrides[p]) return overrides[p];
-        if (p === cfg.provider && cfg.model) return cfg.model;
-        // Fall back to the in-memory DEFAULT_MODELS via getEffectiveModelForProvider
-        // (sync wrapper). We can't await per-call inside the closure cleanly,
-        // so we pass the per-provider override map and let the closure pick.
-        return '';
-      };
-      // For providers without an override, we need the default. Build that
-      // up-front from the supported provider list using the synchronous
-      // getDefaultModel exported alongside the override helpers.
-      const allProviders = Object.keys(keys);
-      for (const p of allProviders) {
-        if (!getModel(p)) {
-          // Pull the default synchronously via the LLMConfig fallback.
-          // getDefaultModel is exported in llm.ts.
-          // eslint-disable-next-line @typescript-eslint/no-var-requires
-          const { getDefaultModel } = await import('./llm.js');
-          overrides[p] = overrides[p] || getDefaultModel(p as any);
+      // Map provider → current effective model (override > active model > default).
+      const overrides = { ...(await getAllProviderModels()) };
+      for (const p of Object.keys(keys)) {
+        if (!overrides[p] && !(p === cfg.provider && cfg.model)) {
+          overrides[p] = getDefaultModel(p as any);
         }
       }
       const finalGetModel = (p: string) => overrides[p] || (p === cfg.provider ? cfg.model : '') || '';
@@ -1343,15 +1325,17 @@ async function handleMessage(msg: any): Promise<any> {
       const localKeyNames = await new Promise<string[]>((resolve) => {
         try { chrome.storage.local.get(null, (all) => resolve(Object.keys(all || {}))); } catch { resolve([]); }
       });
+      // Probe every key in parallel. Serially awaiting one getBytesInUse per
+      // key meant a profile with a few hundred storage keys paid a few hundred
+      // sequential IPC round-trips inside a single diagnostic handler.
       const localKeys: Record<string, number> = {};
-      for (const k of localKeyNames) {
+      await Promise.all(localKeyNames.map(async (k) => {
         try {
-          const b = await new Promise<number>((res) => {
+          localKeys[k] = await new Promise<number>((res) => {
             try { chrome.storage.local.getBytesInUse([k], (n) => res(n || 0)); } catch { res(0); }
           });
-          localKeys[k] = b;
         } catch { localKeys[k] = 0; }
-      }
+      }));
       // session is small so JSON-len-stringify is fine, but skip large values
       // (>100KB) to bound the response size — the panel only cares about
       // counting and the top-N display caps to 8 anyway.
@@ -1388,7 +1372,7 @@ async function handleMessage(msg: any): Promise<any> {
       let heapBytes: number | null = null;
       try {
         if ((performance as any).measureUserAgentSpecificMemory) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+           
           const m: any = await Promise.race([
             (performance as any).measureUserAgentSpecificMemory(),
             new Promise((res) => setTimeout(() => res(null), 1500)),
@@ -1993,17 +1977,31 @@ async function handleMessage(msg: any): Promise<any> {
       return { ok: true, tasks };
     }
     case 'SYNC_TASK_TO_CALENDAR': {
-      // Create a Google Calendar event from a task
+      // Create a Google Calendar event from a task.
+      //
+      // createCalendarEvent takes POSITIONAL args
+      // (contactId, platform, title, startTime, durationMinutes, location?, notes?).
+      // This call site passed a single options OBJECT, so every parameter after
+      // `contactId` arrived as undefined: `new Date(undefined)` produced an
+      // Invalid Date and .toISOString() threw a RangeError, meaning this handler
+      // could never once have created an event. Callers pass an optional `endAt`,
+      // so derive the duration from it and fall back to 60 minutes.
       try {
-        const event = await createCalendarEvent({
-          contactId: msg.contactId || '',
-          platform: msg.platform || 'sniffies',
-          title: msg.title,
-          startTime: msg.dueAt,
-          endTime: msg.endAt || new Date(new Date(msg.dueAt).getTime() + 3600000).toISOString(),
-          location: msg.location || '',
-          notes: msg.notes || '',
-        });
+        const startTime = msg.dueAt;
+        const startMs = new Date(startTime).getTime();
+        const endMs = msg.endAt ? new Date(msg.endAt).getTime() : NaN;
+        const durationMinutes = Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs
+          ? Math.round((endMs - startMs) / 60_000)
+          : 60;
+        const event = await createCalendarEvent(
+          msg.contactId || '',
+          (msg.platform || 'sniffies') as Platform,
+          msg.title,
+          startTime,
+          durationMinutes,
+          msg.location || '',
+          msg.notes || '',
+        );
         // Update the task with the calendar event ID
         if (event && msg.taskId) {
           await updateTask(msg.taskId, { calendarEventId: event.googleEventId || event._id });
@@ -2158,13 +2156,13 @@ async function handleMessage(msg: any): Promise<any> {
                 doublelist: 'doublelist.com', adam4adam: 'adam4adam.com',
               };
               if (tab.url.includes(platformHosts[platform] || '___none___')) {
-                await chrome.tabs.sendMessage(tab.id, {
-                  type: 'SEND_AUTO_RESPONSE',
-                  text: msg.message,
-                  contactId,
-                }).catch(() => {});
-                // Navigate to the conversation first. Guard against an
-                // unmapped platform (would yield 'about:blank' before).
+                // Navigate to the recipient's conversation BEFORE sending.
+                // The old order sent SEND_AUTO_RESPONSE first and navigated
+                // afterwards, so every broadcast message was typed into
+                // whatever thread the tab happened to be showing — i.e. the
+                // previous recipient's, or none at all. The comment already
+                // said "navigate first"; only the code disagreed.
+                // Guard against an unmapped platform (would yield 'about:blank').
                 const navUrl = PLATFORM_URLS[platform]?.(contactId) || '';
                 if (navUrl) {
                   await chrome.tabs.sendMessage(tab.id, {
@@ -2172,7 +2170,16 @@ async function handleMessage(msg: any): Promise<any> {
                     url: navUrl,
                     path: new URL(navUrl).pathname,
                   }).catch(() => {});
+                  // Let the SPA swap the thread in before we type into it.
+                  // Mirrors the settle window sendMessageToTab() already uses
+                  // after an in-page navigation.
+                  await new Promise(r => setTimeout(r, BROADCAST_SPA_SETTLE_MS));
                 }
+                await chrome.tabs.sendMessage(tab.id, {
+                  type: 'SEND_AUTO_RESPONSE',
+                  text: msg.message,
+                  contactId,
+                }).catch(() => {});
                 sent++;
                 recipientSent = true;
                 // Wait between sends to avoid rate limiting
@@ -3207,8 +3214,18 @@ async function handleMessage(msg: any): Promise<any> {
       return { ok: true, warnings: getDeprecationWarnings() };
     }
 
-    // Debug commands (from MCP server or dev tools)
-    case 'DEBUG_COMMAND': return { ok: true, result: await handleDebugCommand(msg.command, msg.params) };
+    // Debug commands (from the extension's own pages / SW inspector console
+    // only). Gated by authorizeDebugCommand: the sender must be the extension
+    // itself (sender.id === chrome.runtime.id and no sender.tab — content
+    // scripts and external extensions are refused unconditionally), and if a
+    // token is stored under `aggregaytor_debug_token` the message must also
+    // carry a matching `debugToken`. See debug-bridge.ts for the full policy.
+    case 'DEBUG_COMMAND': {
+      if (!(await authorizeDebugCommand(sender, msg.debugToken))) {
+        return { ok: false, error: 'debug command refused: not authorized' };
+      }
+      return { ok: true, result: await handleDebugCommand(msg.command, msg.params) };
+    }
 
     default: return { ok: false, error: `Unknown: ${msg.type}` };
   }
@@ -3532,14 +3549,23 @@ async function runBlockRules(newMessages: UnifiedMessage[]): Promise<void> {
   const rules = await getAllBlockRules();
   if (!rules.length) return;
 
-  const contactIds = new Set(newMessages.filter(m => m.direction === 'in').map(m => m.contactId));
-  for (const contactId of contactIds) {
+  // Keep each contact's OWN platform. This used to pass newMessages[0].platform
+  // for every contact in the batch, which is only correct because callers
+  // happen to hand us a single-platform batch — a latent mis-routing waiting on
+  // the first mixed batch.
+  const platformByContact = new Map<string, Platform>();
+  for (const m of newMessages) {
+    if (m.direction === 'in' && !platformByContact.has(m.contactId)) {
+      platformByContact.set(m.contactId, m.platform);
+    }
+  }
+  for (const [contactId, platform] of platformByContact) {
     const messages = await getMessagesByContact(contactId, { limit: 50 });
     const meta = await getThreadMeta(contactId);
     const actions = evaluateRules(rules, messages, meta);
     for (const { rule, action } of actions) {
       console.log(`${LOG} Block rule "${rule.name}" triggered for ${contactId} → ${action}`);
-      await executeAction(contactId, newMessages[0].platform, action, rule._id);
+      await executeAction(contactId, platform, action, rule._id);
     }
   }
 }
@@ -3829,8 +3855,12 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
           if (Date.now() - lastReload < SW_RECYCLE_COOLDOWN_MS) break;
           // Don't recycle mid-compaction — that aborts the heavy IDB op
           // halfway and users would have to redo it.
-          const compactStatus = await chrome.storage.session.get('aggregaytor_compact_status').catch(() => null);
-          const cs: any = compactStatus?.aggregaytor_compact_status;
+          // Must read the SAME key setCompactStatus writes. This used to read
+          // 'aggregaytor_compact_status' (no _v1 suffix), which never exists —
+          // so the "don't recycle mid-compaction" guard silently never fired
+          // and a 12h-uptime SW could reload itself halfway through a compact.
+          const compactStatus = await chrome.storage.session.get(COMPACT_STATUS_KEY).catch(() => null);
+          const cs: any = compactStatus?.[COMPACT_STATUS_KEY];
           if (cs?.state === 'running') {
             console.log(`${LOG} SW recycle deferred — compaction in progress`);
             break;
@@ -3907,8 +3937,11 @@ async function processReminders(): Promise<void> {
 async function updateBadgeCount(): Promise<void> {
   try {
     const count = await getUnreadCount();
-    chrome.action.setBadgeText({ text: count > 0 ? String(count) : '' });
-    chrome.action.setBadgeBackgroundColor({ color: '#FF6B6B' });
+    // Awaited so a rejected badge write lands in the catch below instead of
+    // escaping as an unhandled rejection (which the global capture would then
+    // log as a mystery top-level error).
+    await chrome.action.setBadgeText({ text: count > 0 ? String(count) : '' });
+    await chrome.action.setBadgeBackgroundColor({ color: '#FF6B6B' });
   } catch (err) {
     // v0.57.15: previously swallowed silently. Badge updates failing
     // chronically can mask real DB issues (corrupt PouchDB, unloaded
@@ -4024,13 +4057,19 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => 
 // ── Right-click context menu ────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({ id: 'open-settings', title: 'Settings', contexts: ['action'] });
-  chrome.contextMenus.create({ id: 'open-all-sites', title: 'Open all sites', contexts: ['action'] });
-  chrome.contextMenus.create({ id: 'sync-pics', title: 'Sync profile pictures', contexts: ['action'] });
-  chrome.contextMenus.create({ id: 'sep1', type: 'separator', contexts: ['action'] });
-  chrome.contextMenus.create({ id: 'toggle-autorespond', title: 'Toggle auto-respond all', contexts: ['action'] });
-  chrome.contextMenus.create({ id: 'sep2', type: 'separator', contexts: ['action'] });
-  chrome.contextMenus.create({ id: 'open-archive', title: 'View archive', contexts: ['action'] });
+  // removeAll() first: onInstalled also fires on 'update', and creating an item
+  // whose id already exists fails with an unchecked runtime.lastError instead
+  // of throwing — so duplicate-id failures were invisible.
+  chrome.contextMenus.removeAll(() => {
+    void chrome.runtime.lastError; // nothing to recover from; just don't leave it unchecked
+    chrome.contextMenus.create({ id: 'open-settings', title: 'Settings', contexts: ['action'] });
+    chrome.contextMenus.create({ id: 'open-all-sites', title: 'Open all sites', contexts: ['action'] });
+    chrome.contextMenus.create({ id: 'sync-pics', title: 'Sync profile pictures', contexts: ['action'] });
+    chrome.contextMenus.create({ id: 'sep1', type: 'separator', contexts: ['action'] });
+    chrome.contextMenus.create({ id: 'toggle-autorespond', title: 'Toggle auto-respond all', contexts: ['action'] });
+    chrome.contextMenus.create({ id: 'sep2', type: 'separator', contexts: ['action'] });
+    chrome.contextMenus.create({ id: 'open-archive', title: 'View archive', contexts: ['action'] });
+  });
 
   // Seed the Global Chat contact so it always appears in the inbox
   upsertContact({
@@ -4124,24 +4163,9 @@ const DEFAULT_ENRICH_STATE: EnrichState = {
   noFeatures: 0, failed: 0, startedAt: 0, lastTickAt: 0, lastError: null,
 };
 
-/** Stamp enrichmentAttempted=true on a contact so the needs-enrich filter
- *  stops selecting it. Used on failure paths where we can't extract features
- *  but also don't want to loop on the same dead ID. */
-async function markEnrichmentAttempted(cid: string, platform: Platform): Promise<void> {
-  try {
-    const existing = await getContact(`contact:${cid}`);
-    if (!existing) return;
-    await upsertContact({
-      id: cid, platform,
-      platformUserId: cid.replace(/^[a-z]+:/, ''),
-      displayName: existing.displayName || '',
-      profileUrl: existing.profileUrl || '',
-      avatarUrl: existing.avatarUrl || '',
-      lastSeen: existing.lastSeen || new Date().toISOString(),
-      metadata: { ...(existing.metadata || {}), enrichmentAttempted: true, enrichmentGotFeatures: false },
-    });
-  } catch {}
-}
+// (Removed: markEnrichmentAttempted. Its two call sites were both inside
+// runEnrichTick's result loop and did a getContact + upsertContact per failed
+// row; the stamp is now queued into that tick's single bulk write instead.)
 const ENRICH_STORAGE_KEY = 'aggregaytor_enrich_blocked_state';
 // 40 profiles per tick × ~1.3s per call = ~52s of work per minute, leaving
 // an ~8s buffer before the next alarm. That gives 40/min = 2400/hour, which
@@ -4400,6 +4424,44 @@ async function runEnrichTick(): Promise<void> {
     let enriched = state.enriched, failed = state.failed, processed = state.processed;
     let noFeatures = state.noFeatures || 0;
     let sessionDead = false;
+
+    // Collect every write and flush the batch through ONE upsertContacts()
+    // (allDocs + bulkDocs) at the end. This loop used to do a getContact() plus
+    // an upsertContact() per row — up to 2 × ENRICH_BATCH_SIZE (80) sequential
+    // PouchDB round-trips per tick — which is exactly the N-call per-doc
+    // pattern the store's batch helpers exist to avoid. `contacts` was already
+    // fetched above, so it doubles as the existing-doc lookup and the
+    // per-row reads disappear entirely.
+    //
+    // Safe to batch here because every write is purely ADDITIVE
+    // (existing metadata spread first, then new fields). upsertContacts merges
+    // `{...prev.metadata, ...doc.metadata}`, so it must never be used where a
+    // metadata key needs to be REMOVED — see UNHIDE_ALL_PLATFORM, which deletes
+    // md.isBlocked and therefore has to keep using upsertContact per doc.
+    const existingById = new Map<string, any>();
+    for (const c of contacts as any[]) if (c?._id) existingById.set(c._id, c);
+    const pendingWrites: UnifiedContact[] = [];
+    let enrichedDelta = 0;
+    let noFeaturesDelta = 0;
+
+    /** Stamp enrichmentAttempted on a row we couldn't extract features from, so
+     *  the needs-enrich filter stops re-selecting the same dead id. Skips ids
+     *  with no stored contact, matching the old markEnrichmentAttempted(). */
+    const queueAttemptOnly = (rowId: string): void => {
+      const existing = existingById.get(`${platformCfg.contactPrefix}${rowId}`);
+      if (!existing) return;
+      pendingWrites.push({
+        id: `${platformCfg.idPrefix}${rowId}`,
+        platform: platform as Platform,
+        platformUserId: String(rowId).replace(/^[a-z]+:/, ''),
+        displayName: existing.displayName || '',
+        profileUrl: existing.profileUrl || '',
+        avatarUrl: existing.avatarUrl || '',
+        lastSeen: existing.lastSeen || new Date().toISOString(),
+        metadata: { ...(existing.metadata || {}), enrichmentAttempted: true, enrichmentGotFeatures: false },
+      });
+    };
+
     for (const row of (payload.results || [])) {
       if (row.status === 401 || row.status === 403) {
         sessionDead = true;
@@ -4409,7 +4471,7 @@ async function runEnrichTick(): Promise<void> {
       if (!row.ok || !row.data) {
         failed++;
         // Still mark it attempted so we don't loop on the same dead id.
-        await markEnrichmentAttempted(`${platformCfg.idPrefix}${row.id}`, platform as Platform);
+        queueAttemptOnly(row.id);
         continue;
       }
 
@@ -4418,7 +4480,7 @@ async function runEnrichTick(): Promise<void> {
         : extractGrindrMetadata(row.data);
       if (!md) {
         failed++;
-        await markEnrichmentAttempted(`${platformCfg.idPrefix}${row.id}`, platform as Platform);
+        queueAttemptOnly(row.id);
         continue;
       }
 
@@ -4429,37 +4491,47 @@ async function runEnrichTick(): Promise<void> {
       const gotFeatures = !!(md.bodyType || md.position || md.age || md.ethnicity
         || md.height || md.profileText || md.aboutMe || md.lookingFor);
 
-      try {
-        const existing = await getContact(`${platformCfg.contactPrefix}${row.id}`);
-        let avatarUrl = md.__avatarUrl || '';
-        delete md.__avatarUrl;
-        // CRITICAL: stamp enrichmentAttempted so this contact drops out of
-        // the needs-enrich pool regardless of whether we got real features
-        // or an empty shell. Previous version re-selected the same "enriched"
-        // contacts every tick forever because Grindr sometimes returns 200
-        // with near-empty profile data for blocked users.
-        const mergedMd = {
+      const existing = existingById.get(`${platformCfg.contactPrefix}${row.id}`);
+      const avatarUrl = md.__avatarUrl || '';
+      delete md.__avatarUrl;
+      // CRITICAL: stamp enrichmentAttempted so this contact drops out of
+      // the needs-enrich pool regardless of whether we got real features
+      // or an empty shell. Previous version re-selected the same "enriched"
+      // contacts every tick forever because Grindr sometimes returns 200
+      // with near-empty profile data for blocked users.
+      pendingWrites.push({
+        id: `${platformCfg.idPrefix}${row.id}`,
+        platform: platform as Platform,
+        platformUserId: row.id,
+        displayName: md.displayName || existing?.displayName || '',
+        profileUrl: existing?.profileUrl || (platform === 'sniffies'
+          ? `https://sniffies.com/profile/${row.id}`
+          : `https://web.grindr.com/chat/${row.id}`),
+        avatarUrl: avatarUrl || existing?.avatarUrl || '',
+        lastSeen: new Date().toISOString(),
+        metadata: {
           ...(existing?.metadata || {}),
           ...md,
           enrichmentAttempted: true,
           enrichmentGotFeatures: gotFeatures,
-        };
-        await upsertContact({
-          id: `${platformCfg.idPrefix}${row.id}`,
-          platform: platform as Platform,
-          platformUserId: row.id,
-          displayName: md.displayName || existing?.displayName || '',
-          profileUrl: existing?.profileUrl || (platform === 'sniffies'
-            ? `https://sniffies.com/profile/${row.id}`
-            : `https://web.grindr.com/chat/${row.id}`),
-          avatarUrl: avatarUrl || existing?.avatarUrl || '',
-          lastSeen: new Date().toISOString(),
-          metadata: mergedMd,
-        });
-        if (gotFeatures) enriched++;
-        else noFeatures++;
-      } catch {
-        failed++;
+        },
+      });
+      if (gotFeatures) enrichedDelta++;
+      else noFeaturesDelta++;
+    }
+
+    // Single bulk flush. A bulk write is all-or-nothing from our accounting's
+    // point of view, so on failure we discard the optimistic deltas and count
+    // those rows as failed — they keep no enrichmentAttempted stamp and get
+    // retried on the next tick, same as the old per-row failure path.
+    if (pendingWrites.length) {
+      try {
+        await upsertContacts(pendingWrites);
+        enriched += enrichedDelta;
+        noFeatures += noFeaturesDelta;
+      } catch (err) {
+        failed += enrichedDelta + noFeaturesDelta;
+        console.warn(`${LOG} enrich bulk write failed for ${pendingWrites.length} contact(s):`, (err as Error)?.message || err);
       }
     }
 

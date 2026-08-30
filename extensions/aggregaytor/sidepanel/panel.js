@@ -297,6 +297,16 @@ function renderInboxDisabledPlaceholder() {
   }
 }
 
+// Monotonic generation counter for loadThreads(). Several independent triggers
+// (NEW_MESSAGES debounce, filter/sort changes, platform chips, recovery
+// actions, post-action reloads) can start overlapping GET_THREAD_SUMMARIES
+// scans whose durations differ by seconds. Without this guard the LAST
+// response to arrive wins, not the last request issued — so an older, broader
+// scan could overwrite a newer filtered render (and clobber allThreadMeta with
+// stale rows). Each call claims a sequence number and bails if it has been
+// superseded before it gets to mutate shared state.
+let _loadThreadsSeq = 0;
+
 async function loadThreads() {
   // v0.57.74: respect the "disable unified inbox" preference. Skips the
   // GET_THREAD_SUMMARIES + GET_ALL_THREAD_META queries entirely (the two
@@ -306,9 +316,11 @@ async function loadThreads() {
     renderInboxDisabledPlaceholder();
     return;
   }
+  const seq = ++_loadThreadsSeq;
   // Always fetch ALL summaries (no platform filter) so unread badge counts
   // are correct across all platforms. Filter client-side for display.
   const container = document.getElementById('thread-list');
+  if (!container) return;
   if (!container.querySelector('.thread-item') && !container.querySelector('.skeleton-item')) {
     container.innerHTML = Array(5).fill(0).map(() => `
       <div class="skeleton-item"><div class="skeleton-avatar"></div>
@@ -330,6 +342,9 @@ async function loadThreads() {
       withTimeout(chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} }), 60000, 'GET_THREAD_SUMMARIES'),
       withTimeout(chrome.runtime.sendMessage({ type: 'GET_ALL_THREAD_META' }), 60000, 'GET_ALL_THREAD_META'),
     ]);
+    // A newer loadThreads() started while we were awaiting — drop this
+    // response rather than letting it overwrite the newer one's state.
+    if (seq !== _loadThreadsSeq) return;
     if (metaRes?.ok) {
       allThreadMeta.clear();
       for (const m of metaRes.metas || []) allThreadMeta.set(m.contactId, m);
@@ -348,18 +363,18 @@ async function loadThreads() {
       // v0.57.52: clean load → reset auto-escalation ladder.
       _inboxFailureCount = 0;
       const all = threadRes.summaries;
-      // Filter by active platforms for display, but use ALL for badge counts
-      let filtered;
-      if (currentPlatform === 'all' || activePlatforms.size === 0) {
-        filtered = all;
-      } else if (currentPlatform === 'archived') {
-        filtered = all.filter(s => allThreadMeta.get(s.contactId)?.archived);
-      } else if (activePlatforms.size > 0) {
-        // Multi-select: show threads from any active platform
-        filtered = all.filter(s => activePlatforms.has(s.platform));
-      } else {
-        filtered = all;
-      }
+      // Filter by active platforms for display, but use ALL for badge counts.
+      //
+      // Only two reachable cases: no platform chips selected (which is what
+      // both the "All" and "Archived" chips leave behind — they call
+      // activePlatforms.clear()) → show everything and let applyFilters()
+      // handle the archived/unarchived split; or one-or-more chips selected →
+      // multi-select union. The former `currentPlatform === 'archived'` and
+      // trailing `else` branches were unreachable dead code: the size===0 test
+      // above already caught every case they claimed to handle.
+      const filtered = activePlatforms.size === 0
+        ? all
+        : all.filter(s => activePlatforms.has(s.platform));
       renderThreads(sortThreads(applyFilters(filtered)));
       // #15 Per-platform unread badges — computed from ALL threads, not filtered
       const platformUnread = {};
@@ -390,6 +405,9 @@ async function loadThreads() {
       });
     }
   } catch (err) {
+    // Superseded loads that fail are irrelevant — reporting them would replace
+    // the newer render with an error card.
+    if (seq !== _loadThreadsSeq) return;
     console.error('[Panel] Load error:', err);
     renderInboxLoadError(String(err?.message || err || 'unknown error'));
   }
@@ -789,7 +807,11 @@ function renderThreads(summaries) {
     totalUnread += unread;
 
     let badges = '';
-    if (meta.rating > 0) badges += '<span class="meta-badge rating">' + '★'.repeat(meta.rating) + '</span>';
+    // Clamp: String.repeat throws RangeError for a negative or absurdly large
+    // count, and thread_meta is import-controlled (IMPORT_ALL_DATA). An
+    // unclamped value took down the entire inbox render, not just one row.
+    const ratingStars = Math.min(5, Math.max(0, Math.floor(Number(meta.rating) || 0)));
+    if (ratingStars > 0) badges += '<span class="meta-badge rating">' + '★'.repeat(ratingStars) + '</span>';
     if (meta.deletedChatCount > 0) badges += `<span class="meta-badge deleted" title="${meta.deletedChatCount} deleted messages">🗑${meta.deletedChatCount}</span>`;
     if (meta.bookmarked) badges += '<span class="meta-badge bookmarked">🔖</span>';
     if (meta.autoRespondEnabled) badges += '<span class="meta-badge autorespond">🤖</span>';
@@ -1000,7 +1022,7 @@ async function loadHoverPreview(contactId, platform, previewEl, threadEl) {
       ${meta.notes ? `<div class="hp-notes">${esc(truncate(meta.notes, 80))}</div>` : ''}
       <div class="hp-messages">
         ${sorted.length ? sorted.map(m => `
-          <div class="hp-msg ${m.direction}">
+          <div class="hp-msg ${esc(m.direction)}">
             <span class="hp-msg-dir">${m.direction === 'out' ? 'You' : 'Them'}:</span>
             ${esc(truncate(m.body, 60))}
             <span class="hp-msg-time">${formatMsgTime(m.timestamp)}</span>
@@ -1240,7 +1262,7 @@ async function loadProfileInfo(contactId) {
       </div>
       ${pics.length > 1 ? `<div class="profile-pics">${pics.map(p => `<div class="profile-pic"><img src="${esc(p)}" alt=""></div>`).join('')}</div>` : ''}
       ${renderStarRating(contactId, contact?.platform || currentThread?.platform || '', meta.rating || 0)}
-      ${meta.deletedChatCount ? `<div style="font-size:10px;color:#ef4444;margin-top:4px">🗑 ${meta.deletedChatCount} deleted messages</div>` : ''}
+      ${meta.deletedChatCount ? `<div style="font-size:10px;color:#ef4444;margin-top:4px">🗑 ${Number(meta.deletedChatCount) || 0} deleted messages</div>` : ''}
       ${!avatar ? `<button class="sync-pic-btn" id="sync-this-pic">📷 Sync photos for this profile</button>` : ''}
       ${meta.notes ? `<div style="font-size:11px;color:#9ca3af;margin-top:4px;border-top:1px solid rgba(255,255,255,0.06);padding-top:4px">📝 ${esc(meta.notes)}</div>` : ''}
     `;
@@ -1313,7 +1335,7 @@ function renderSentiment(s) {
   };
   el.innerHTML = barHtml('Interest', s.interest) + barHtml('Engaged', s.engagement) +
     barHtml('Commit', s.commitment) +
-    (s.signals?.length ? `<div class="sentiment-signals">${s.signals.slice(0, 3).join(' | ')}</div>` : '');
+    (s.signals?.length ? `<div class="sentiment-signals">${s.signals.slice(0, 3).map(esc).join(' | ')}</div>` : '');
 }
 
 function renderPreference(p) {
@@ -1395,6 +1417,24 @@ function renderHeaderActions() {
   });
 }
 
+/**
+ * Read the persisted "hidden message ids" set. localStorage can hold a
+ * truncated/corrupted value (quota eviction, a half-written JSON.stringify, a
+ * hand-edited key), and an unguarded JSON.parse there used to throw straight
+ * out of renderMessages() — blanking the entire thread view with no way to
+ * recover short of clearing site data. Treat unreadable state as "nothing
+ * hidden" and drop the bad value so it can't keep breaking every render.
+ */
+function readHiddenMsgIds() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem('aggregaytor_hidden_msgs') || '[]');
+    return new Set(Array.isArray(parsed) ? parsed : []);
+  } catch {
+    try { localStorage.removeItem('aggregaytor_hidden_msgs'); } catch {}
+    return new Set();
+  }
+}
+
 function renderMessages(messages) {
   const container = document.getElementById('message-list');
   if (!messages?.length) {
@@ -1409,7 +1449,7 @@ function renderMessages(messages) {
     currentThread?.contactId?.includes('group') ||
     isMultiSenderThread(sorted);
 
-  const hiddenMsgs = new Set(JSON.parse(localStorage.getItem('aggregaytor_hidden_msgs') || '[]'));
+  const hiddenMsgs = readHiddenMsgIds();
 
   if (isGlobalChat) {
     container.innerHTML = sorted.map(msg => renderGlobalChatMessage(msg)).join('');
@@ -1436,8 +1476,8 @@ function renderMessages(messages) {
       return `${sep}<div class="msg-wrapper${hidden ? ' msg-hidden' : ''}" data-msg-id="${esc(msg._id || msg.id || '')}">
         <span class="msg-toggle" title="${hidden ? 'Show' : 'Hide'}">${hidden ? '+' : '−'}</span>
         ${isFromGC ? '<div class="msg-gc-tag">🌐 from Global Chat</div>' : ''}
-        <div class="msg-bubble ${dir}">${esc(msg.body || '')}</div>
-        <div class="msg-time ${dir}">${formatMsgTime(msg.timestamp)}</div>
+        <div class="msg-bubble ${esc(dir)}">${esc(msg.body || '')}</div>
+        <div class="msg-time ${esc(dir)}">${formatMsgTime(msg.timestamp)}</div>
         <div class="msg-hidden-label" style="display:${hidden ? 'block' : 'none'}">Message hidden</div>
       </div>`;
     }).join('');
@@ -1460,7 +1500,7 @@ function renderMessages(messages) {
       btn.textContent = hidden ? '+' : '−';
       wrapper.querySelector('.msg-hidden-label').style.display = hidden ? 'block' : 'none';
       // Persist hidden state
-      const set = new Set(JSON.parse(localStorage.getItem('aggregaytor_hidden_msgs') || '[]'));
+      const set = readHiddenMsgIds();
       if (hidden) set.add(msgId); else set.delete(msgId);
       // v0.57.28: cap at 1000 entries with FIFO eviction to prevent unbounded growth
       if (set.size > 1000) {
@@ -1469,7 +1509,9 @@ function renderMessages(messages) {
         set.clear();
         for (const id of trimmed) set.add(id);
       }
-      localStorage.setItem('aggregaytor_hidden_msgs', JSON.stringify([...set]));
+      // Guarded: a QuotaExceededError here would propagate out of the click
+      // handler as an uncaught exception (and get force-logged to the SW).
+      try { localStorage.setItem('aggregaytor_hidden_msgs', JSON.stringify([...set])); } catch {}
     });
   });
 }
@@ -1551,16 +1593,16 @@ async function toggleDraftPanel() {
   panel.innerHTML = drafts.map(d => {
     const name = d.contactId.replace(/^[a-z]+:/, '').slice(0, 12);
     return `
-      <div class="draft-item ${d.tier}">
+      <div class="draft-item ${esc(d.tier)}">
         <div class="draft-header">
           <span>${esc(name)} (${d.platform})</span>
-          <span class="draft-tier ${d.tier}">${d.tier}</span>
+          <span class="draft-tier ${esc(d.tier)}">${esc(d.tier)}</span>
         </div>
-        <div class="draft-body" contenteditable="true" data-id="${d._id}">${esc(d.generatedResponse)}</div>
+        <div class="draft-body" contenteditable="true" data-id="${esc(d._id)}">${esc(d.generatedResponse)}</div>
         ${d.suggestedPictureTag ? `<div style="font-size:10px;color:#6b7280">Picture: ${esc(d.suggestedPictureTag)}</div>` : ''}
         <div class="draft-actions">
-          <button class="draft-btn approve" data-approve-draft="${d._id}">Approve & Send</button>
-          <button class="draft-btn reject" data-reject-draft="${d._id}">Reject</button>
+          <button class="draft-btn approve" data-approve-draft="${esc(d._id)}">Approve &amp; Send</button>
+          <button class="draft-btn reject" data-reject-draft="${esc(d._id)}">Reject</button>
         </div>
       </div>`;
   }).join('');
@@ -1734,7 +1776,7 @@ async function loadDossier() {
       const val = d[f.key];
       const displayVal = f.isArray ? (Array.isArray(val) ? val.join(', ') : String(val || '')) : String(val ?? '');
       const autoInfo = d.autoExtracted?.[f.key];
-      const badge = autoInfo ? `<span class="auto-badge" title="Auto-extracted ${autoInfo.extractedAt}">⚡</span>` : '';
+      const badge = autoInfo ? `<span class="auto-badge" title="Auto-extracted ${esc(autoInfo.extractedAt)}">⚡</span>` : '';
 
       if (f.type === 'select') {
         const options = f.options.map(o => `<option value="${o}"${displayVal === o || (displayVal === 'true' && o === 'Yes') || (displayVal === 'false' && o === 'No') ? ' selected' : ''}>${o || '—'}</option>`).join('');
@@ -1835,7 +1877,7 @@ async function loadReminders() {
   list.innerHTML = res.reminders.map(r => `
     <div class="reminder-item">
       <span>${esc(r.note)} — ${new Date(r.dueAt).toLocaleString()}</span>
-      <button class="reminder-delete" data-id="${r._id}">✕</button>
+      <button class="reminder-delete" data-id="${esc(r._id)}">✕</button>
     </div>
   `).join('');
   list.querySelectorAll('.reminder-delete').forEach(btn => {
@@ -1914,7 +1956,16 @@ function readFilters() {
 for (const id of ['filter-search', 'filter-body', 'filter-position', 'filter-deletes', 'filter-distance']) {
   document.getElementById(id).addEventListener('change', readFilters);
 }
-document.getElementById('filter-search').addEventListener('input', readFilters);
+// Debounced: `readFilters` ends in loadThreads(), and GET_THREAD_SUMMARIES is
+// the heaviest SW query in the codebase (documented as scanning up to 5000
+// messages on a cold cache). Firing it on every keystroke both hammered the SW
+// and made the render order depend on which in-flight scan happened to finish
+// last. 250ms keeps typing responsive while collapsing a burst into one query.
+let _filterSearchTimer = null;
+document.getElementById('filter-search').addEventListener('input', () => {
+  clearTimeout(_filterSearchTimer);
+  _filterSearchTimer = setTimeout(readFilters, 250);
+});
 for (const id of ['filter-responded', 'filter-recent', 'filter-bookmarked', 'filter-unread', 'filter-newchats', 'filter-favorites']) {
   document.getElementById(id).addEventListener('change', readFilters);
 }
@@ -2069,7 +2120,14 @@ chrome.runtime.onMessage.addListener((message) => {
     // Flash the screen and play alert sound
     document.body.style.animation = 'commitFlash 0.5s ease 3';
     setTimeout(() => { document.body.style.animation = ''; }, 1600);
-    try { new Audio('data:audio/wav;base64,UklGRlQFAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YTAFAABkAGQA').play(); } catch {}
+    // HTMLMediaElement.play() returns a promise that REJECTS on a decode
+    // failure or an autoplay-policy block; the surrounding try/catch only
+    // catches the synchronous construction. Without the .catch() the rejection
+    // is unhandled and gets forwarded to the SW error log on every alert.
+    try {
+      new Audio('data:audio/wav;base64,UklGRlQFAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YTAFAABkAGQA')
+        .play().catch(() => {});
+    } catch {}
   }
 });
 
@@ -2150,7 +2208,7 @@ async function showSessionDialog() {
     const to = new Date(Date.now() + deadline * 3600_000).toISOString();
     const res = await chrome.runtime.sendMessage({ type: 'GET_AVAILABLE_SLOTS', from, to });
     if (res?.ok && res.slots?.length) {
-      slotsEl.innerHTML = res.slots.map(s => `<span class="slot">${s.label}</span>`).join('');
+      slotsEl.innerHTML = res.slots.map(s => `<span class="slot">${esc(s.label)}</span>`).join('');
     } else {
       slotsEl.innerHTML = '<span style="color:#6b7280">No calendar connected or all slots free</span>';
     }
@@ -2216,7 +2274,31 @@ function platformIcon(platform) {
 
 function stripPrefix(id) { return String(id || '').replace(/^[a-z]+:/, ''); }
 function truncate(str, len) { return !str ? '' : str.length > len ? str.slice(0, len) + '...' : str; }
-function esc(text) { const d = document.createElement('div'); d.textContent = String(text || ''); return d.innerHTML; }
+// SECURITY: this is the only escaper used before interpolating
+// platform-derived strings (displayName, avatarUrl, contactId, message
+// bodies, notes) into innerHTML. It MUST be safe in BOTH text and
+// double/single-quoted attribute contexts — most call sites are attributes
+// (`src="${esc(url)}"`, `data-contact-id="${esc(id)}"`, `title="${esc(x)}"`).
+//
+// The old implementation was `div.textContent = s; return div.innerHTML`,
+// which relies on HTML text-node serialization. That escapes & < > but
+// deliberately does NOT escape " or ' — so any profile field containing a
+// double quote broke out of its attribute and injected arbitrary markup
+// (iframes, exfiltrating <img src>, attributes that hijack this panel's own
+// delegated data-action handlers). MV3's default CSP blocks inline handlers
+// and inline <script>, so this was HTML injection rather than script
+// execution, but it is still attacker-controlled markup in a privileged
+// extension page. Escape the quotes explicitly.
+function esc(text) {
+  // NOTE: `|| ''` (not `?? ''`) is deliberate — it preserves the previous
+  // implementation's coercion of 0/false to '' so no call site's output shifts.
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 /**
  * Build a compact stats line from contact metadata for display in the thread
@@ -2353,7 +2435,11 @@ document.getElementById('gallery-overlay').addEventListener('click', (e) => {
   }
 });
 
-document.getElementById('btn-gallery').addEventListener('click', () => {
+// Thread-view "🖼 Photos" toolbar button — loads THIS contact's photos.
+// (Was #btn-gallery, which collided with the header gallery button; the
+// duplicate id meant this listener was silently bound to the header button
+// and the toolbar button did nothing.)
+document.getElementById('btn-thread-gallery')?.addEventListener('click', () => {
   if (currentThread) openGallery(currentThread.contactId, currentThread.displayName || stripPrefix(currentThread.contactId));
 });
 
@@ -2399,6 +2485,11 @@ function openSettings() {
 
 function closeSettings() {
   settingsOpen = false;
+  // The Memory tab's 5s auto-refresh was only stopped by switching to another
+  // settings tab. Closing the panel outright left it polling
+  // GET_MEMORY_BREAKDOWN forever — waking the SW every 5s for a UI nobody can
+  // see, which is exactly the memory/CPU pressure that tab exists to diagnose.
+  stopMemoryAutoRefresh();
   document.body.classList.remove('view-settings');
   document.body.classList.add('view-inbox');
   document.getElementById('header-title').innerHTML = `<span class="version-tag">v${(chrome.runtime.getManifest?.().version || '0.0').replace(/\.\d+$/, '')}</span>`;
@@ -2423,7 +2514,7 @@ async function loadInlineSettings() {
     if (res?.ok) {
       const sel = document.getElementById('sp-personality');
       sel.innerHTML = res.presets.map(p =>
-        `<option value="${p.id}"${p.id === res.personality.preset ? ' selected' : ''}>${p.label}</option>`
+        `<option value="${esc(p.id)}"${p.id === res.personality.preset ? ' selected' : ''}>${esc(p.label)}</option>`
       ).join('');
       document.getElementById('sp-preset-desc').textContent = res.presets.find(p => p.id === res.personality.preset)?.description || '';
       document.getElementById('sp-custom-instructions').value = res.personality.customInstructions || '';
@@ -2901,7 +2992,9 @@ document.getElementById('sp-purge-now')?.addEventListener('click', async () => {
   }
   if (status) {
     const detail = res.deletedCount === 0
-      ? `No purge needed — DB at ${fmtMb(res.beforeBytes)} is below the 1 GB cap.${res.reason ? ` (${esc(res.reason)})` : ''}`
+      // NOTE: `detail` is assigned via textContent below, so it must NOT be
+      // HTML-escaped here — esc() would surface literal &amp;/&quot; to the user.
+      ? `No purge needed — DB at ${fmtMb(res.beforeBytes)} is below the 1 GB cap.${res.reason ? ` (${res.reason})` : ''}`
       : `✓ Deleted ${res.deletedCount.toLocaleString()} messages · ${fmtMb(res.beforeBytes)} → ${fmtMb(res.afterBytes)} · ${res.iterations} iterations · ${res.elapsedMs}ms${res.hitSafetyCap ? ' · safety cap hit' : ''}. ${res.protectedCount} contacts protected.`;
     status.textContent = detail;
     status.style.color = res.deletedCount === 0 ? '#9ca3af' : '#22c55e';
@@ -2958,7 +3051,7 @@ async function loadBlockRules() {
     <div style="display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:11px">
       <span style="font-size:10px" title="${statusLabel}">${statusDot}</span>
       <span style="flex:1">${esc(r.name)}</span>
-      <span style="color:#6b7280;font-size:9px" title="Times this rule has triggered">${r.executedCount} triggered</span>
+      <span style="color:#6b7280;font-size:9px" title="Times this rule has triggered">${Number(r.executedCount) || 0} triggered</span>
       <button type="button" class="settings-btn" data-toggle-rule="${esc(r._id)}" data-enabled="${!r.enabled}" style="font-size:10px;padding:2px 6px;width:auto">${toggleLabel}</button>
       <button type="button" class="settings-btn" style="border-color:rgba(239,68,68,0.3);color:#f87171;font-size:10px;padding:2px 6px;width:auto" data-delete-rule="${esc(r._id)}">✕</button>
     </div>`;
@@ -3030,10 +3123,10 @@ async function loadPictures() {
     if (!res?.ok || !res.pictures?.length) { grid.innerHTML = '<div class="settings-info">No pictures yet.</div>'; return; }
     grid.innerHTML = res.pictures.map(p => `
       <div style="position:relative;aspect-ratio:1;border-radius:6px;overflow:hidden;background:rgba(255,255,255,0.05)">
-        ${p.thumbnail ? `<img src="${p.thumbnail}" style="width:100%;height:100%;object-fit:cover" alt="">` : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#6b7280">${p.tag}</div>`}
-        <span style="position:absolute;top:2px;left:2px;font-size:8px;padding:1px 4px;border-radius:3px;background:rgba(59,130,246,0.5);color:white">${p.tag}</span>
-        <span style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.7);font-size:8px;padding:1px 3px;color:#9ca3af">${p.sentCount}s ${p.responseCount}r ${p.likeCount}l</span>
-        <button style="position:absolute;top:2px;right:2px;background:rgba(239,68,68,0.7);border:none;color:white;width:14px;height:14px;border-radius:50%;font-size:9px;cursor:pointer;display:none" data-del-pic="${p._id}">&times;</button>
+        ${p.thumbnail ? `<img src="${esc(p.thumbnail)}" style="width:100%;height:100%;object-fit:cover" alt="">` : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#6b7280">${esc(p.tag)}</div>`}
+        <span style="position:absolute;top:2px;left:2px;font-size:8px;padding:1px 4px;border-radius:3px;background:rgba(59,130,246,0.5);color:white">${esc(p.tag)}</span>
+        <span style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.7);font-size:8px;padding:1px 3px;color:#9ca3af">${Number(p.sentCount) || 0}s ${Number(p.responseCount) || 0}r ${Number(p.likeCount) || 0}l</span>
+        <button style="position:absolute;top:2px;right:2px;background:rgba(239,68,68,0.7);border:none;color:white;width:14px;height:14px;border-radius:50%;font-size:9px;cursor:pointer;display:none" data-del-pic="${esc(p._id)}">&times;</button>
       </div>
     `).join('');
     grid.querySelectorAll('[data-del-pic]').forEach(btn => {
@@ -3163,7 +3256,8 @@ async function loadCalendarStatus() {
     const res = await chrome.runtime.sendMessage({ type: 'GET_CALENDAR_SETTINGS' });
     if (res?.ok) {
       const s = res.settings;
-      document.getElementById('sp-cal-booking-url').value = s.bookingUrl || '';
+      const bookingEl = document.getElementById('sp-cal-booking-url');
+      if (bookingEl) bookingEl.value = s.bookingUrl || '';
       document.getElementById('sp-cal-prep').value = s.prepTimeMinutes || 30;
       document.getElementById('sp-cal-travel').value = s.travelTimeMinutes || 15;
       if (s.bookingUrl) {
@@ -3174,7 +3268,7 @@ async function loadCalendarStatus() {
   } catch {}
 }
 document.getElementById('sp-cal-save')?.addEventListener('click', async () => {
-  const bookingUrl = document.getElementById('sp-cal-booking-url').value.trim();
+  const bookingUrl = (document.getElementById('sp-cal-booking-url')?.value || '').trim();
   const status = document.getElementById('sp-cal-status');
 
   // Extract the scheduling iframe URL if they pasted the full iframe embed
@@ -3409,21 +3503,30 @@ function renderPhrasePanel() {
     `<button class="phrase-item" data-phrase-idx="${i}">${esc(p)}</button>`
   ).join('');
   list.querySelectorAll('.phrase-item').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const text = quickPhrases[parseInt(btn.dataset.phraseIdx)];
+    btn.addEventListener('click', async () => {
+      const text = quickPhrases[parseInt(btn.dataset.phraseIdx, 10)];
       if (!text || !currentThread) return;
       // Put in the response input and auto-send
       const input = document.getElementById('response-input');
       input.value = text;
       input.dispatchEvent(new Event('input', { bubbles: true }));
-      // Send via platform
-      chrome.runtime.sendMessage({
+      document.getElementById('phrase-panel').style.display = 'none';
+      // Send via platform.
+      //
+      // KNOWN GAP: the service worker's handleMessage() switch has no
+      // 'SEND_AUTO_RESPONSE_DIRECT' case (verified against
+      // background/service-worker.ts — the only tab-send path is the internal
+      // sendMessageToTab() → 'SEND_AUTO_RESPONSE' relay, which nothing exposes
+      // as a message type). This used to swallow the failure with
+      // `.catch(() => {})`, so the phrase silently never sent and the button
+      // looked like it worked. spSend surfaces the no-response/error case as a
+      // toast until an SW handler is added.
+      await spSend({
         type: 'SEND_AUTO_RESPONSE_DIRECT',
         text,
         contactId: currentThread.contactId,
         platform: currentThread.platform,
-      }).catch(() => {});
-      document.getElementById('phrase-panel').style.display = 'none';
+      });
     });
   });
 }
@@ -3928,12 +4031,19 @@ function loadGrindrFilterSettings() {
     if (s.neverChattedFilter) document.getElementById('gf-chatted-mode').value = s.neverChattedFilter;
     if (s.keywordFilter) document.getElementById('gf-keyword-mode').value = s.keywordFilter;
     if (s.keywords?.length) document.getElementById('gf-keywords').value = s.keywords.join('\n');
+    // Coerce to a number before building the selector: these come back from
+    // chrome.storage, and a non-numeric value would produce an invalid CSS
+    // selector and throw a SyntaxError inside this storage callback.
     (s.ethnicityValues || []).forEach(v => {
-      const el = document.querySelector(`[data-eth="${v}"]`);
+      const n = Number(v);
+      if (!Number.isFinite(n)) return;
+      const el = document.querySelector(`[data-eth="${n}"]`);
       if (el) el.checked = true;
     });
     (s.genderValues || []).forEach(v => {
-      const el = document.querySelector(`[data-gender="${v}"]`);
+      const n = Number(v);
+      if (!Number.isFinite(n)) return;
+      const el = document.querySelector(`[data-gender="${n}"]`);
       if (el) el.checked = true;
     });
   });
@@ -4486,11 +4596,21 @@ document.getElementById('btn-camera')?.addEventListener('click', () => {
   alert('Camera feature coming soon');
 });
 
-// Gallery button — open gallery overlay
+// Header gallery button — opens the overlay. When a thread is open it shows
+// that contact's photos; otherwise it opens empty rather than re-showing the
+// previously-rendered contact's grid (which is what it used to do, because it
+// only flipped `display` and never touched #gallery-grid).
 document.getElementById('btn-gallery')?.addEventListener('click', () => {
-  // Open the gallery overlay if it exists
-  const gallery = document.getElementById('gallery-overlay');
-  if (gallery) gallery.style.display = '';
+  if (currentThread) {
+    openGallery(currentThread.contactId, currentThread.displayName || stripPrefix(currentThread.contactId));
+    return;
+  }
+  const overlay = document.getElementById('gallery-overlay');
+  const grid = document.getElementById('gallery-grid');
+  if (!overlay) return;
+  document.getElementById('gallery-title').textContent = 'Photos';
+  if (grid) grid.innerHTML = '<div class="gallery-empty">Open a conversation to see that profile\'s photos.</div>';
+  overlay.style.display = '';
 });
 
 // ── Global search ───────────────────────────────────────────────────────────
@@ -5016,12 +5136,9 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') checkConnectionStatus();
 });
 
-// #3 Avatar error fallback — delegated event listener
-document.addEventListener('error', (e) => {
-  if (e.target?.tagName === 'IMG' && e.target.classList.contains('avatar-img')) {
-    e.target.style.display = 'none';
-  }
-}, true);
+// #3 Avatar error fallback: handled by the global IMG error listener
+// registered near the top of this file, which already hides ANY broken <img>
+// (a strict superset of the .avatar-img case this used to duplicate).
 
 // ── AI Query ──────────────────────────────────────────────────────────────
 // Natural-language search over contacts using LLM + profile context.
@@ -5409,7 +5526,7 @@ function ffRenderCandidates() {
       <div style="flex:1;min-width:0">
         <div style="font-size:11px;color:#e7e9ea;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
           ${esc(c.displayName || stripPrefix(c.contactId))}
-          ${c.distance && c.distance < 9999 ? `<span style="color:#9ca3af;font-size:10px">— ${c.distance} mi</span>` : ''}
+          ${c.distance && c.distance < 9999 ? `<span style="color:#9ca3af;font-size:10px">— ${esc(c.distance)} mi</span>` : ''}
         </div>
         <div style="font-size:10px;color:#9ca3af;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.stats || '(no stats)')}</div>
       </div>
@@ -5484,7 +5601,7 @@ async function ffPoll() {
         <div style="display:flex;align-items:center;gap:8px;padding:4px;border-bottom:1px solid rgba(255,255,255,0.04)">
           ${c.avatarUrl ? `<img src="${esc(c.avatarUrl)}" alt="" style="width:24px;height:24px;border-radius:50%;object-fit:cover">` : `<div style="width:24px;height:24px;border-radius:50%;background:rgba(255,255,255,0.05)"></div>`}
           <div style="flex:1;font-size:10px;color:#9ca3af;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-            ${esc(c.displayName || stripPrefix(c.contactId))} · ${c.distance < 9999 ? c.distance + 'mi · ' : ''}${esc(c.stats || '')}
+            ${esc(c.displayName || stripPrefix(c.contactId))} · ${c.distance < 9999 ? esc(c.distance) + 'mi · ' : ''}${esc(c.stats || '')}
           </div>
         </div>`).join('') || '<div style="color:#6b7280;font-size:11px;padding:8px;text-align:center">Queue empty</div>';
     }

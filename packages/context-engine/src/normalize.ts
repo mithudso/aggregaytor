@@ -20,14 +20,35 @@ const COMMON_REPLACEMENTS = new Map<string, string>([
   ['\u2026', '...'],
 ]);
 
-const COMMON_MOJIBAKE_RE = /(Ã.|â.|ðŸ|Â[^\s]|â€™|â€œ|â€\u009d|â€"|â€")/;
+/**
+ * Mojibake sniffer for UTF-8 text that was decoded as Latin-1.
+ *
+ * `\u00c3.` / `\u00e2.` / `\u00c2[^\s]` are the mangled lead bytes and `\u00f0\u0178`
+ * is the emoji-plane lead pair. Longer sequences (the mangled forms of the
+ * curly quotes and dashes) need no alternative of their own: each is `\u00e2`
+ * followed by a non-newline character, so `\u00e2.` already matches them.
+ */
+const COMMON_MOJIBAKE_RE = /\u00c3.|\u00e2.|\u00f0\u0178|\u00c2[^\s]/;
+
+/**
+ * Single-pass matcher for every COMMON_REPLACEMENTS key.
+ *
+ * Built from the map so the two cannot drift. Each key is emitted as a \uXXXX
+ * escape so no key can ever be read as character-class syntax.
+ */
+const COMMON_REPLACEMENT_RE = new RegExp(
+  `[${[...COMMON_REPLACEMENTS.keys()]
+    .map(char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`)
+    .join('')}]`,
+  'g',
+);
 
 export function applyCommonReplacements(text: string): string {
-  let value = String(text || '');
-  for (const [from, to] of COMMON_REPLACEMENTS.entries()) {
-    value = value.split(from).join(to);
-  }
-  return value;
+  const value = String(text || '');
+  // One scan rather than one split/join pass per map entry. Equivalent to the
+  // sequential passes because no replacement *output* (' ', '', "'", '"', '-',
+  // '...') is itself a key, so passes could never cascade into each other.
+  return value.replace(COMMON_REPLACEMENT_RE, char => COMMON_REPLACEMENTS.get(char)!);
 }
 
 export function maybeRepairMojibake(text: string): string {

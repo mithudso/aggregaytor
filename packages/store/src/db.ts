@@ -93,6 +93,13 @@ class AggregaytorDexie extends Dexie {
 
   constructor(name: string) {
     super(name);
+    // NOTE: IndexedDB has no boolean key type, so the `read`, `[docType+read]`
+    // and `[docType+read+timestamp]` declarations below never index anything —
+    // records with a boolean `read` are simply skipped by the indexer. Reads on
+    // `read` therefore fall back to a `docType` scan + JS filter (see
+    // `seedFindCandidates`). The declarations are kept because dropping them
+    // requires a schema version bump (data migration); do not add new
+    // boolean-keyed indexes.
     this.version(1).stores({
       docs: [
         '&_id',
@@ -262,6 +269,9 @@ async function maybeWriteMigrationFlag(key: string): Promise<void> {
   } catch {}
 }
 
+/** Write the legacy corpus in slices so one huge IDB transaction isn't built. */
+const LEGACY_MIGRATION_CHUNK = 500;
+
 async function migrateLegacyPouchData(store: DexieStoreDatabase, legacyName: string): Promise<void> {
   const migrationKey = `${actualDbName(legacyName)}_legacy_migrated`;
   if (await maybeReadMigrationFlag(migrationKey)) return;
@@ -270,6 +280,10 @@ async function migrateLegacyPouchData(store: DexieStoreDatabase, legacyName: str
     return;
   }
 
+  // Only mark the migration done when the copy actually succeeded. Writing the
+  // flag after a failed copy would orphan the user's entire pre-Dexie history
+  // (the flag makes every later getDB() skip the migration).
+  let copied = true;
   try {
     const pouchModule = await import('pouchdb-browser');
     const PouchDB = pouchModule.default;
@@ -282,15 +296,20 @@ async function migrateLegacyPouchData(store: DexieStoreDatabase, legacyName: str
         delete doc._rev;
         return doc;
       });
-    if (docs.length) {
-      await store.bulkDocs(docs);
+    try {
+      for (let i = 0; i < docs.length; i += LEGACY_MIGRATION_CHUNK) {
+        await store.bulkDocs(docs.slice(i, i + LEGACY_MIGRATION_CHUNK));
+      }
+    } catch (err) {
+      copied = false;
+      console.warn('[Aggregaytor:Store] legacy migration write failed; will retry on next open:', err);
     }
     try { await legacyDb.close(); } catch {}
   } catch {
-    // Fresh installs won't have a legacy PouchDB database.
+    // Fresh installs won't have a legacy PouchDB database (or the module).
   }
 
-  await maybeWriteMigrationFlag(migrationKey);
+  if (copied) await maybeWriteMigrationFlag(migrationKey);
 }
 
 class DexieStoreDatabase implements StoreDatabase {
@@ -318,22 +337,54 @@ class DexieStoreDatabase implements StoreDatabase {
     return result;
   }
 
+  /**
+   * Write a batch of documents.
+   *
+   * One batched read plus at most two batched writes, regardless of batch size
+   * — the read happens inside the transaction so the read-modify-write stays
+   * atomic against a concurrent `bulkDocs` touching the same ids.
+   *
+   * Merge semantics deliberately differ from PouchDB: a stored doc is merged
+   * (`{ ...existing, ...incoming }`) rather than replaced, so fields omitted by
+   * the caller survive. Callers that need a field removed must write an
+   * explicit empty/null value.
+   */
   async bulkDocs<T extends StoreDoc = StoreDoc>(docs: T[]): Promise<StorePutResult[]> {
     if (!docs.length) return [];
-    const results: StorePutResult[] = [];
+    let results: StorePutResult[] = [];
     await this.db.transaction('rw', this.db.docs, async () => {
+      const uniqueIds = [...new Set(docs.map(doc => doc._id))];
+      const fetched = await this.db.docs.bulkGet(uniqueIds);
+      // Tracks the in-transaction state of each id so repeated ids inside one
+      // batch chain onto each other exactly like the old per-doc loop did.
+      const current = new Map<string, StoreDoc | undefined>();
+      uniqueIds.forEach((id, index) => current.set(id, fetched[index] || undefined));
+
+      const puts = new Map<string, StoreDoc>();
+      const deletes = new Set<string>();
+      const batchResults: StorePutResult[] = [];
+
       for (const incoming of docs) {
-        const existing = await this.db.docs.get(incoming._id);
+        const existing = current.get(incoming._id);
         const rev = nextRevision(existing?._rev);
         if (incoming._deleted) {
-          await this.db.docs.delete(incoming._id);
+          current.set(incoming._id, undefined);
+          puts.delete(incoming._id);
+          deletes.add(incoming._id);
         } else {
-          await this.db.docs.put({ ...(existing || {}), ...incoming, _rev: rev });
+          const merged: StoreDoc = { ...(existing || {}), ...incoming, _rev: rev };
+          current.set(incoming._id, merged);
+          deletes.delete(incoming._id);
+          puts.set(incoming._id, merged);
         }
-        this.updateSeq++;
-        results.push({ ok: true, id: incoming._id, rev });
+        batchResults.push({ ok: true, id: incoming._id, rev });
       }
+
+      if (deletes.size) await this.db.docs.bulkDelete([...deletes]);
+      if (puts.size) await this.db.docs.bulkPut([...puts.values()]);
+      results = batchResults;
     });
+    this.updateSeq += results.length;
     return results;
   }
 
@@ -370,8 +421,10 @@ class DexieStoreDatabase implements StoreDatabase {
       collection = this.db.docs.orderBy(':id');
     }
 
-    let rows = await (opts.descending ? collection.reverse() : collection).toArray();
-    if (opts.limit) rows = rows.slice(0, opts.limit);
+    let query = opts.descending ? collection.reverse() : collection;
+    // Push the limit into IndexedDB instead of materialising every row first.
+    if (opts.limit) query = query.limit(opts.limit);
+    const rows = await query.toArray();
     return {
       total_rows: totalRows,
       rows: rows.map((doc: StoreDoc) => ({
@@ -396,52 +449,67 @@ class DexieStoreDatabase implements StoreDatabase {
     const timestampRange = getSelectorOperatorValue(selector, 'timestamp');
     const scheduledAtRange = getSelectorOperatorValue(selector, 'scheduledAt');
 
+    // A fast-path index only encodes *some* of the selector's fields; `find()`
+    // still filters the rows it returns. Pushing `limit` down to IndexedDB is
+    // therefore only safe when the index covers every selector field —
+    // otherwise the limit truncates the candidate set BEFORE that filter runs
+    // and the query silently under-returns.
+    const selectorFields = Object.keys(selector);
+    const pushDownLimit = (covered: string[]): number | undefined =>
+      selectorFields.every(field => covered.includes(field)) ? request.limit : undefined;
+
+    const materialize = (
+      collection: Dexie.Collection<StoreDoc, string>,
+      descending: boolean,
+      covered: string[],
+    ): Promise<StoreDoc[]> => {
+      const ordered = descending ? collection.reverse() : collection;
+      const max = pushDownLimit(covered);
+      return max ? ordered.limit(max).toArray() : ordered.toArray();
+    };
+
     if (platform && timestampDirection) {
       const range = getRangeBounds(timestampRange || {});
-      let collection = this.db.docs.where('[docType+platform+timestamp]').between(
+      const collection = this.db.docs.where('[docType+platform+timestamp]').between(
         [docType, platform, range.lower],
         [docType, platform, range.upper],
         !range.lowerOpen,
         !range.upperOpen,
       );
-      if (timestampDirection === 'desc') collection = collection.reverse();
-      return request.limit ? collection.limit(request.limit).toArray() : collection.toArray();
+      return materialize(collection, timestampDirection === 'desc', ['docType', 'platform', 'timestamp']);
     }
 
     if (contactId && timestampDirection) {
       const range = getRangeBounds(timestampRange || {});
-      let collection = this.db.docs.where('[docType+contactId+timestamp]').between(
+      const collection = this.db.docs.where('[docType+contactId+timestamp]').between(
         [docType, contactId, range.lower],
         [docType, contactId, range.upper],
         !range.lowerOpen,
         !range.upperOpen,
       );
-      if (timestampDirection === 'desc') collection = collection.reverse();
-      return request.limit ? collection.limit(request.limit).toArray() : collection.toArray();
+      return materialize(collection, timestampDirection === 'desc', ['docType', 'contactId', 'timestamp']);
     }
 
     if (status && scheduledAtDirection) {
       const range = getRangeBounds(scheduledAtRange || {});
-      let collection = this.db.docs.where('[docType+status+scheduledAt]').between(
+      const collection = this.db.docs.where('[docType+status+scheduledAt]').between(
         [docType, status, range.lower],
         [docType, status, range.upper],
         !range.lowerOpen,
         !range.upperOpen,
       );
-      if (scheduledAtDirection === 'desc') collection = collection.reverse();
-      return request.limit ? collection.limit(request.limit).toArray() : collection.toArray();
+      return materialize(collection, scheduledAtDirection === 'desc', ['docType', 'status', 'scheduledAt']);
     }
 
     if (timestampDirection) {
       const range = getRangeBounds(timestampRange || {});
-      let collection = this.db.docs.where('[docType+timestamp]').between(
+      const collection = this.db.docs.where('[docType+timestamp]').between(
         [docType, range.lower],
         [docType, range.upper],
         !range.lowerOpen,
         !range.upperOpen,
       );
-      if (timestampDirection === 'desc') collection = collection.reverse();
-      return request.limit ? collection.limit(request.limit).toArray() : collection.toArray();
+      return materialize(collection, timestampDirection === 'desc', ['docType', 'timestamp']);
     }
 
     return null;

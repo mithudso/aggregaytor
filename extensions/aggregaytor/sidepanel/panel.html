@@ -568,6 +568,12 @@
       <div class="settings-section">
         <h3 class="settings-heading">Google Calendar</h3>
         <div class="settings-info">Set availability preferences for the auto-responder.</div>
+        <!-- Required by panel.js loadCalendarStatus() / #sp-cal-save. Without it
+             the save handler threw on `.value` and no calendar setting persisted. -->
+        <label class="settings-label">Booking page URL (or paste the full embed &lt;iframe&gt;):
+          <input type="text" id="sp-cal-booking-url" class="settings-input" autocomplete="off"
+                 placeholder="https://calendar.google.com/calendar/appointments/..." style="margin-top:2px">
+        </label>
         <label class="settings-label">Prep time (min): <input type="number" id="sp-cal-prep" value="30" class="settings-num"></label>
         <label class="settings-label">Travel time (min): <input type="number" id="sp-cal-travel" value="15" class="settings-num"></label>
         <button class="settings-btn" id="sp-cal-save">Save Calendar Settings</button>
@@ -786,8 +792,10 @@
     <!-- Thread toolbar -->
     <div class="thread-toolbar">
       <button class="toolbar-btn" id="btn-resync" title="Re-fetch this conversation from the platform — pulls in any messages the extension may have missed">↻ Resync</button>
-      <button class="toolbar-btn" id="btn-gallery" title="View all photos for this contact — profile pictures and any shared images">🖼 Photos</button>
-      <button class="toolbar-btn" id="btn-export" title="Copy this conversation to clipboard as plain text for sharing or saving">📋 Export</button>
+      <!-- id must NOT collide with the header #btn-gallery button: getElementById
+           returns only the first match, which left this button with no listener. -->
+      <button class="toolbar-btn" id="btn-thread-gallery" title="View all photos for this contact — profile pictures and any shared images">🖼 Photos</button>
+      <button class="toolbar-btn" id="btn-export" title="Download this conversation as a plain-text .txt file for sharing or saving">📋 Export</button>
       <button class="toolbar-btn" id="btn-thread-search" title="Search within this conversation for specific words or phrases">🔍 Search</button>
       <button class="toolbar-btn" id="btn-add-task" title="Create a to-do task linked to this contact (e.g. 'Follow up with...'). Keyboard: Shift+T">☑ Task</button>
       <button class="toolbar-btn" id="btn-archive-thread" title="Archive this conversation — moves it to the 📦 Archive tab and hides from the main inbox">📦 Archive</button>

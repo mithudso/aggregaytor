@@ -159,9 +159,11 @@ export async function upsertMessages(
     }
   }
 
-  // Also check for content-hash duplicates — messages with different IDs
-  // but identical content (same person, same text, same ~10 min window).
-  // This catches cross-source duplicates that have different platform message IDs.
+  // Content-hash guard. NOTE the scope: `existing` only holds docs whose _id
+  // is in THIS batch, so this cannot detect a stored duplicate that lives
+  // under a different _id — catching those would need a contentHash index.
+  // What it does catch is a re-ID'd message arriving alongside its previous
+  // id in the same batch, which would otherwise be inserted twice.
   const existingHashes = new Set<string>();
   for (const row of existing.rows) {
     if ('error' in row) continue;
@@ -185,7 +187,7 @@ export async function upsertMessages(
       updated++;
       toWrite.push(doc);
     } else if (existingHashes.has(doc.contentHash)) {
-      // Different ID but same content hash — skip (it's a duplicate)
+      // Another id in this same batch already carries this content — skip.
       continue;
     } else {
       created++;
@@ -205,11 +207,15 @@ export async function upsertMessages(
 }
 
 /**
- * Get all messages in a thread, sorted oldest-first (chronological order).
+ * Get the most recent messages in a thread, returned oldest-first
+ * (chronological order) so the chat view can render them top-to-bottom.
  *
- * Uses the (docType, threadId) index for the Mango query, then sorts
- * client-side by timestamp since PouchDB's sort capabilities are limited
- * to indexed fields.
+ * The (docType, threadId) index has no timestamp component, so the store
+ * returns the whole thread in `_id` order. The limit must therefore be applied
+ * AFTER sorting by timestamp — applying it inside the query (as this used to)
+ * kept the lexicographically-smallest `_id`s, which for adapters whose message
+ * ids aren't chronological meant a long thread rendered an arbitrary slice
+ * instead of its newest messages.
  *
  * @param threadId  The thread to fetch messages for.
  * @param opts.limit  Maximum number of messages to return (default 100).
@@ -223,12 +229,13 @@ export async function getMessagesByThread(
   const result = await store.find({
     selector: { docType: 'message', threadId },
     sort: [{ docType: 'asc' }, { threadId: 'asc' }],
-    limit: opts?.limit || 100,
   });
-  // Client-side sort: oldest first (ascending timestamp) for chat display
-  return (result.docs as MessageDoc[]).sort(
+  const limit = opts?.limit || 100;
+  const sorted = (result.docs as MessageDoc[]).sort(
     (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
   );
+  // Keep the newest `limit` messages, still in ascending order.
+  return sorted.length > limit ? sorted.slice(sorted.length - limit) : sorted;
 }
 
 /**
@@ -423,10 +430,12 @@ export function invalidateUnreadCountCache(): void {
 // archived / hidden / blockedByThem (the user's "blocked list") so the
 // retention semantics for explicit blocks aren't disturbed.
 //
-// Compaction is run after each batch of deletes so the rev-tree garbage
-// is actually released — without that, deleted docs stay in the rev tree
-// and the size doesn't drop. The compact() call inside the loop is the
-// reason this is bounded by elapsed time, not just doc count.
+// `store.compact()` is a no-op on the Dexie backend (there is no rev tree to
+// collapse — deletes free their rows immediately), but it is still called so
+// the loop keeps working if the store is ever swapped back to a revisioned
+// backend. Space is reclaimed asynchronously by the browser, so
+// `navigator.storage.estimate()` usually lags the deletes by a tick; the
+// iteration/elapsed caps below exist so a lagging estimate can't spin.
 //
 // Returns a summary object the caller can log + show in a notification.
 
@@ -448,8 +457,12 @@ export interface PurgeResult {
  * A contact is "blocked" if any of its thread_meta flags is set: archived,
  * hidden, blockedByThem, or favorited (favorited is treated as a manual
  * keep-forever flag too — same intent as "I care about this person").
+ *
+ * Returns `null` when the metadata lookup fails. Callers MUST treat that as
+ * "protect everything" and skip the purge entirely — an empty set would mean
+ * "nothing is protected" and let the purge delete blocked-list history.
  */
-async function getProtectedContactIds(db: StoreDatabase): Promise<Set<string>> {
+async function getProtectedContactIds(db: StoreDatabase): Promise<Set<string> | null> {
   const out = new Set<string>();
   try {
     const result = await db.allDocs({
@@ -465,11 +478,8 @@ async function getProtectedContactIds(db: StoreDatabase): Promise<Set<string>> {
       }
     }
   } catch (err) {
-    // Defensive — if meta lookup fails we err on the side of caution and
-    // protect EVERYTHING, which means the purge loop exits without
-    // deleting anything. Better than accidentally deleting blocked-list
-    // history.
-    console.warn('[Aggregaytor:Store] getProtectedContactIds failed:', err);
+    console.warn('[Aggregaytor:Store] getProtectedContactIds failed; skipping purge:', err);
+    return null;
   }
   return out;
 }
@@ -511,6 +521,16 @@ export async function purgeOldestMessages(
   }
 
   const protectedIds = await getProtectedContactIds(store);
+  if (!protectedIds) {
+    // We could not determine which contacts are protected, so we cannot
+    // safely delete anything. Bail out; the next mem-gc tick retries.
+    return {
+      ranAt, thresholdBytes, beforeBytes, afterBytes: beforeBytes,
+      deletedCount: 0, protectedCount: 0, iterations: 0,
+      elapsedMs: Date.now() - t0, hitSafetyCap: false,
+      reason: 'thread metadata unavailable — purge skipped to protect blocked history',
+    };
+  }
   let deletedCount = 0;
   let iterations = 0;
   const BATCH = 500;
@@ -531,22 +551,18 @@ export async function purgeOldestMessages(
     // Find oldest BATCH messages globally. Uses the (docType, timestamp)
     // index added in db.ts so this is O(log n) seek + linear scan over
     // BATCH rows — not a full table scan.
-    const found = await store.find({
+    const found = await store.find<MessageDoc>({
       selector: { docType: 'message', timestamp: { $gt: '' } },
       sort: [{ docType: 'asc' }, { timestamp: 'asc' }],
       limit: BATCH,
-    } as any);
+    });
     if (!found.docs.length) break;
 
     // Filter out messages from protected (blocked / archived / hidden /
     // favorited / bookmarked) contacts.
     const toDelete: Array<{ _id: string; _rev?: string; _deleted: true }> = [];
-    let skipped = 0;
-    for (const m of found.docs as any[]) {
-      if (protectedIds.has(String(m.contactId))) {
-        skipped++;
-        continue;
-      }
+    for (const m of found.docs) {
+      if (protectedIds.has(String(m.contactId))) continue;
       toDelete.push({ _id: m._id, _rev: m._rev, _deleted: true });
     }
 
@@ -562,6 +578,9 @@ export async function purgeOldestMessages(
 
     await store.bulkDocs(toDelete);
     deletedCount += toDelete.length;
+    // Deleted messages may have been unread, so the memoized badge count is
+    // now stale.
+    invalidateUnreadCountCache();
 
     // Compact every few iterations so the rev-tree garbage actually
     // releases. Compact is expensive; running it every 5 batches gives

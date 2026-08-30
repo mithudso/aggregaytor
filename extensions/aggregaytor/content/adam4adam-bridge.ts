@@ -42,6 +42,19 @@ function checkContext(): boolean {
   catch { if (contextValid) { console.warn(`${LOG} Context invalidated`); contextValid = false; } return false; }
 }
 
+const HTML_ESCAPES: Record<string, string> = {
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+};
+
+/** Escape untrusted text before it goes into an innerHTML template.
+ *  The floating panel interpolates the URL-derived username and the user's
+ *  stored quick phrases; both used to land in markup raw, so a `"` in a phrase
+ *  broke out of `title="…"` and a `<img onerror>` in either ran in page
+ *  context. */
+function escapeHtml(text: unknown): string {
+  return String(text ?? '').replace(/[&<>"']/g, c => HTML_ESCAPES[c]);
+}
+
 // ── Local Hide Filter ──────────────────────────────────────────────────────
 // A4A has a native block feature but the endpoint is behind a CSRF-protected
 // form that's fragile to change and varies by account tier. For reliable
@@ -329,12 +342,12 @@ setTimeout(() => { selfHeal(); applyHideFilter(); }, 3000);
 //
 // Bridge content scripts run in the ISOLATED world, so assigning to
 // `window.foo` only exposes the helper to the extension's console
-// context — not to the page's default console where users actually
-// type. We mirror the helpers into MAIN world via a one-shot injected
-// <script> so `__aggregaytor_a4a_reset()` works straight from the
-// regular DevTools prompt. The MAIN-world stubs use localStorage
-// (shared across worlds) and a CustomEvent to ping the bridge so the
-// in-memory blocklist + DOM hide state stay in sync.
+// context — not to the page's default console where users actually type.
+// The MAIN-world counterparts live in content/adam4adam.ts (see the
+// v0.57.39 note below for why they are NOT injected from here); those
+// page-side stubs use localStorage (shared across worlds) plus the
+// __aggregaytor_a4a_console_* CustomEvents handled below, so the
+// in-memory blocklist + DOM hide state stay in sync with the bridge.
 (window as any).__aggregaytor_a4a_reset = function(): void {
   clearA4ABlocklist();
 };
@@ -371,11 +384,23 @@ window.addEventListener('__aggregaytor_a4a_console_unhide_all', () => {
 // on the ISOLATED-world window (immediately above) for the rare case
 // where the user switches the DevTools execution context.
 
-// Relay MAIN world adapter events to service worker
+// Relay MAIN world adapter events to service worker.
+//
+// Trust boundary: `__aggregaytor_message` is a plain window CustomEvent, so
+// ANY script on adam4adam.com can forge it — not just content/adam4adam.js.
+// Relaying `detail` verbatim would let the page reach every case of the
+// service worker's message switch. Only the message types content/adam4adam.js
+// actually emits are forwarded.
+const A4A_RELAY_TYPES = new Set(['ADAPTER_MESSAGES', 'ADAPTER_CONTACTS', 'ADAPTER_ERROR']);
+
 window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
   if (!contextValid || !checkContext()) return;
   const detail = event.detail;
-  if (!detail?.type) return;
+  if (!detail || typeof detail.type !== 'string') return;
+  if (!A4A_RELAY_TYPES.has(detail.type)) {
+    console.warn(`${LOG} Dropped relay message with unexpected type: ${detail.type.slice(0, 40)}`);
+    return;
+  }
   try { chrome.runtime.sendMessage(detail).catch(() => {}); }
   catch { contextValid = false; }
 }) as EventListener);
@@ -486,6 +511,18 @@ try {
 // block, notes, rating, quick phrases, reminder.
 const FP_ID = 'aggregaytor-a4a-fp';
 let fpUsername = '';
+// Removes the document-level mousemove/mouseup drag listeners belonging to the
+// currently mounted panel. Without this every showFloatingPanel() call (once
+// per navigation, and A4A is a multi-page site) leaked a fresh pair of
+// document listeners that closed over the detached panel element.
+let fpDragCleanup: (() => void) | null = null;
+
+/** Remove the floating panel and everything it registered on `document`. */
+function destroyFloatingPanel(): void {
+  fpDragCleanup?.();
+  fpDragCleanup = null;
+  document.getElementById(FP_ID)?.remove();
+}
 
 function injectFpStyles(): void {
   if (document.getElementById('aggregaytor-a4a-fp-css')) return;
@@ -513,20 +550,29 @@ function injectFpStyles(): void {
 function showFloatingPanel(username: string): void {
   if (!username || !contextValid) return;
   if (document.getElementById(FP_ID) && fpUsername === username) return;
-  document.getElementById(FP_ID)?.remove();
+  destroyFloatingPanel();
   fpUsername = username;
 
   injectFpStyles();
   const panel = document.createElement('div');
   panel.id = FP_ID;
   let pos = { x: 20, y: 120 };
-  try { const s = localStorage.getItem('aggregaytor_a4a_fp_pos'); if (s) pos = JSON.parse(s); } catch {}
+  try {
+    const s = localStorage.getItem('aggregaytor_a4a_fp_pos');
+    const saved = s ? JSON.parse(s) : null;
+    // Validate: a malformed/legacy entry (pre-NaN-guard writes stored
+    // `{"x":null}`) would render the panel at `NaNpx` i.e. top-left, or
+    // `undefinedpx` i.e. unpositioned.
+    if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+      pos = { x: saved.x, y: saved.y };
+    }
+  } catch {}
   panel.style.left = `${pos.x}px`; panel.style.top = `${pos.y}px`;
   if (localStorage.getItem('aggregaytor_a4a_fp_collapsed') === 'true') panel.classList.add('collapsed');
 
   panel.innerHTML = `
     <div class="fp-header">
-      <span class="fp-header-title">⚡ ${username}</span>
+      <span class="fp-header-title">⚡ ${escapeHtml(username)}</span>
       <div class="fp-header-btns">
         <button class="fp-header-btn fp-minimize-btn" title="Minimize">−</button>
         <button class="fp-header-btn fp-close-btn" title="Close">×</button>
@@ -547,7 +593,9 @@ function showFloatingPanel(username: string): void {
     </div>`;
   document.body.appendChild(panel);
 
-  // Drag
+  // Drag. The move/up listeners live on `document` (so the drag survives the
+  // cursor leaving the panel), which means they outlive the panel unless we
+  // explicitly tear them down — see fpDragCleanup / destroyFloatingPanel.
   let dragging = false, dx = 0, dy = 0;
   panel.querySelector('.fp-header')!.addEventListener('mousedown', (e: Event) => {
     const me = e as MouseEvent;
@@ -557,22 +605,31 @@ function showFloatingPanel(username: string): void {
     dx = me.clientX - r.left; dy = me.clientY - r.top;
     me.preventDefault();
   });
-  document.addEventListener('mousemove', (e: MouseEvent) => {
+  const onDragMove = (e: MouseEvent) => {
     if (!dragging) return;
     panel.style.left = `${Math.max(0, e.clientX - dx)}px`;
     panel.style.top = `${Math.max(0, e.clientY - dy)}px`;
-  });
-  document.addEventListener('mouseup', () => {
+  };
+  const onDragEnd = () => {
     if (!dragging) return;
     dragging = false;
-    try { localStorage.setItem('aggregaytor_a4a_fp_pos', JSON.stringify({ x: parseInt(panel.style.left), y: parseInt(panel.style.top) })); } catch {}
-  });
+    const x = parseInt(panel.style.left, 10);
+    const y = parseInt(panel.style.top, 10);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    try { localStorage.setItem('aggregaytor_a4a_fp_pos', JSON.stringify({ x, y })); } catch {}
+  };
+  document.addEventListener('mousemove', onDragMove);
+  document.addEventListener('mouseup', onDragEnd);
+  fpDragCleanup = () => {
+    document.removeEventListener('mousemove', onDragMove);
+    document.removeEventListener('mouseup', onDragEnd);
+  };
 
   panel.querySelector('.fp-minimize-btn')!.addEventListener('click', () => {
     const c = panel.classList.toggle('collapsed');
     try { localStorage.setItem('aggregaytor_a4a_fp_collapsed', String(c)); } catch {}
   });
-  panel.querySelector('.fp-close-btn')!.addEventListener('click', () => panel.remove());
+  panel.querySelector('.fp-close-btn')!.addEventListener('click', () => destroyFloatingPanel());
 
   panel.querySelector('.fp-block-btn')!.addEventListener('click', () => {
     blockedUsernames.add(fpUsername.toLowerCase());
@@ -591,7 +648,7 @@ function showFloatingPanel(username: string): void {
     // Go back to the previous page so the now-blocked profile stops being
     // the active view (mirrors the Sniffies/Grindr block flow).
     if (window.history.length > 1) window.history.back();
-    panel.remove();
+    destroyFloatingPanel();
   });
 
   panel.querySelector('.fp-reminder-btn')!.addEventListener('click', () => {
@@ -667,7 +724,10 @@ function showFloatingPanel(username: string): void {
       const phrases = (data.aggregaytor_quick_phrases || ['Hey', "What's up?"]).slice(0, 3);
       const c = panel.querySelector('#fp-phrases') as HTMLElement;
       if (!c) return;
-      c.innerHTML = phrases.map((p: string) => `<button class="fp-phrase-btn" title="${p}">${p.length > 18 ? p.slice(0, 16) + '…' : p}</button>`).join('');
+      c.innerHTML = phrases.map((p: string) => {
+        const label = p.length > 18 ? p.slice(0, 16) + '…' : p;
+        return `<button class="fp-phrase-btn" title="${escapeHtml(p)}">${escapeHtml(label)}</button>`;
+      }).join('');
       c.querySelectorAll('.fp-phrase-btn').forEach((btn, i) => {
         btn.addEventListener('click', () => {
           window.dispatchEvent(new CustomEvent('__aggregaytor_send_message', {
@@ -700,7 +760,7 @@ function checkUrlChange() {
     } catch {}
     showFloatingPanel(username);
   } else {
-    document.getElementById(FP_ID)?.remove();
+    destroyFloatingPanel();
     fpUsername = '';
     try {
       chrome.runtime.sendMessage({ type: 'PROFILE_CLOSED', platform: 'adam4adam' }).catch(() => {});

@@ -2,7 +2,7 @@
  * calendar.ts — Google Calendar integration: OAuth, availability, event creation.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 declare const chrome: any;
 
 import type { Platform } from '@aggregaytor/adapter-core';
@@ -76,6 +76,29 @@ export async function saveCalendarToken(token: CalendarToken): Promise<void> {
 }
 
 /**
+ * A stored token is usable only while it has an access token and hasn't
+ * expired. There is no refresh token (chrome.identity owns refresh), so an
+ * expired token can only ever produce 401s — checking here avoids the
+ * pointless request and lets the caller degrade the same way it would on a
+ * missing token.
+ */
+function isTokenUsable(token: CalendarToken | null): token is CalendarToken {
+  return !!token?.accessToken && (!token.expiresAt || token.expiresAt > Date.now());
+}
+
+/**
+ * Forget a token the API just rejected, so the settings UI stops reporting
+ * "connected" and the user is prompted to re-authenticate.
+ */
+async function clearRejectedToken(): Promise<void> {
+  try {
+    await storageSet(CAL_TOKEN_KEY, null);
+  } catch (err) {
+    console.warn('[Calendar] Could not clear rejected token:', err);
+  }
+}
+
+/**
  * Get free/busy slots from Google Calendar.
  */
 export async function getAvailableSlots(
@@ -84,7 +107,7 @@ export async function getAvailableSlots(
 ): Promise<TimeSlot[]> {
   const settings = await getCalendarSettings();
   const token = await getCalendarToken();
-  if (!settings.enabled || !token?.accessToken) return [];
+  if (!settings.enabled || !isTokenUsable(token)) return [];
 
   try {
     const res = await fetch('https://www.googleapis.com/calendar/v3/freeBusy', {
@@ -100,6 +123,7 @@ export async function getAvailableSlots(
       }),
     });
 
+    if (res.status === 401) await clearRejectedToken();
     if (!res.ok) throw new Error(`Calendar API ${res.status}`);
     const data = await res.json();
     const busy = data?.calendars?.[settings.calendarId || 'primary']?.busy || [];
@@ -112,6 +136,9 @@ export async function getAvailableSlots(
   }
 }
 
+/** A free gap shorter than this isn't worth offering as a meetup slot. */
+const MIN_SLOT_MS = 30 * 60_000;
+
 function invertBusyToFree(
   from: string, to: string,
   busy: Array<{ start: string; end: string }>,
@@ -122,32 +149,27 @@ function invertBusyToFree(
   let cursor = new Date(from).getTime();
   const end = new Date(to).getTime();
 
+  const pushSlot = (startMs: number, endMs: number): void => {
+    if (endMs - startMs < MIN_SLOT_MS) return;
+    slots.push({
+      start: new Date(startMs).toISOString(),
+      end: new Date(endMs).toISOString(),
+      label: formatSlotLabel(startMs, endMs),
+    });
+  };
+
   // Sort busy periods
   const sorted = [...busy].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
 
   for (const period of sorted) {
     const busyStart = new Date(period.start).getTime() - bufferMs; // need buffer before
-    if (cursor < busyStart) {
-      const slotDuration = busyStart - cursor;
-      if (slotDuration >= 30 * 60_000) { // minimum 30 min slot
-        slots.push({
-          start: new Date(cursor).toISOString(),
-          end: new Date(busyStart).toISOString(),
-          label: formatSlotLabel(cursor, busyStart),
-        });
-      }
-    }
+    if (cursor < busyStart) pushSlot(cursor, busyStart);
     cursor = Math.max(cursor, new Date(period.end).getTime());
   }
 
-  // Final slot after last busy period
-  if (cursor < end) {
-    slots.push({
-      start: new Date(cursor).toISOString(),
-      end: new Date(end).toISOString(),
-      label: formatSlotLabel(cursor, end),
-    });
-  }
+  // Final slot after last busy period — held to the same minimum as the gaps
+  // above, which it previously bypassed.
+  if (cursor < end) pushSlot(cursor, end);
 
   return slots;
 }
@@ -171,7 +193,7 @@ export async function createCalendarEvent(
 ): Promise<CalendarEventDoc | null> {
   const settings = await getCalendarSettings();
   const token = await getCalendarToken();
-  if (!settings.enabled || !token?.accessToken) return null;
+  if (!settings.enabled || !isTokenUsable(token)) return null;
 
   const start = new Date(startTime);
   const end = new Date(start.getTime() + durationMinutes * 60_000);
@@ -203,6 +225,7 @@ export async function createCalendarEvent(
       },
     );
 
+    if (res.status === 401) await clearRejectedToken();
     if (!res.ok) throw new Error(`Calendar create ${res.status}`);
     const event = await res.json();
 

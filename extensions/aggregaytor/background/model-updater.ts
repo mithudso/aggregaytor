@@ -28,6 +28,11 @@
 
 const STATE_KEY = 'aggregaytor_model_updater_v1';
 
+/** Per-provider /models request budget. Generous — this is a daily background
+ *  sweep, not an interactive call — but finite so one hung endpoint can't
+ *  stall the (sequential) provider loop forever. */
+const MODELS_FETCH_TIMEOUT_MS = 15_000;
+
 export interface ModelSuggestion {
   provider: string;
   current: string;        // what the user / default is using now
@@ -95,10 +100,19 @@ const FAMILY_RULES: Record<string, FamilyRule> = {
     },
   },
   // Anthropic: prefer haiku family. Version is the 'X-Y' or 'X' segment.
+  //
+  // The rank regex must be ANCHORED and must cap the minor segment at 3
+  // digits. With the old unanchored `(?:-(\d+))?` the greedy minor group
+  // swallowed a bare 8-digit date snapshot: `claude-haiku-5-20260301` parsed
+  // as major=5, minor=20260301 and scored ~20,260,801 — so any dated snapshot
+  // outranked every real newer version (a hypothetical claude-haiku-9-0 would
+  // have lost to claude-haiku-4-20991231). Anchoring forces the regex to
+  // backtrack the minor group to empty so the date lands in group 4, where it
+  // contributes a sub-1.0 tiebreak as intended.
   anthropic: {
     pattern: /^claude-(?:haiku|sonnet)-(\d+)(?:-(\d+))?(?:-(\d{8}))?$/i,
     rank: (id) => {
-      const m = id.match(/claude-(haiku|sonnet)-(\d+)(?:-(\d+))?(?:-(\d{8}))?/i);
+      const m = id.match(/^claude-(haiku|sonnet)-(\d+)(?:-(\d{1,3}))?(?:-(\d{8}))?$/i);
       if (!m) return 0;
       const tier = m[1].toLowerCase() === 'haiku' ? 1000 : 100; // prefer haiku for the cheap tier
       const major = parseInt(m[2], 10) * 100;
@@ -245,30 +259,41 @@ async function checkProvider(
   if (ep.alwaysUseFallback && ep.staticFallbackModels) {
     ids = ep.staticFallbackModels;
     usedFallback = true;
-  } else try {
-    const headers: Record<string, string> = ep.headers ? ep.headers(apiKey) : {};
-    headers['Accept'] = 'application/json';
-    const res = await fetch(ep.url(apiKey), { method: 'GET', headers });
-    if (!res.ok) {
-      throw new Error(`${provider} /models returned ${res.status}`);
-    }
-    const json = await res.json();
-    ids = ep.extract(json);
-  } catch (err) {
-    // v0.57.56: classify the failure. Fetch errors that surface as
-    // TypeError with no status are almost always CORS or network-level
-    // (browser blocks before the request even leaves). For providers
-    // we know block CORS (Anthropic), fall back to the static model
-    // list and continue. For others, propagate so the caller surfaces
-    // the error to the user.
-    const msg = (err as Error).message || String(err);
-    const isCorsLike = err instanceof TypeError && /failed to fetch|network/i.test(msg);
-    if (isCorsLike && ep.staticFallbackModels) {
-      ids = ep.staticFallbackModels;
-      usedFallback = true;
-      console.log(`[Aggregaytor:ModelUpdater] ${provider} /models blocked by CORS, using static fallback (${ids.length} models)`);
-    } else {
-      throw err;
+  } else {
+    try {
+      const headers: Record<string, string> = ep.headers ? ep.headers(apiKey) : {};
+      headers['Accept'] = 'application/json';
+      // Bound the request: this runs on a background alarm with no user
+      // waiting, and an unbounded fetch would hold the whole provider sweep
+      // (which is sequential) open indefinitely against a hung endpoint.
+      const res = await fetch(ep.url(apiKey), {
+        method: 'GET',
+        headers,
+        signal: typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+          ? AbortSignal.timeout(MODELS_FETCH_TIMEOUT_MS)
+          : undefined,
+      });
+      if (!res.ok) {
+        throw new Error(`${provider} /models returned ${res.status}`);
+      }
+      const json = await res.json();
+      ids = ep.extract(json);
+    } catch (err) {
+      // v0.57.56: classify the failure. Fetch errors that surface as
+      // TypeError with no status are almost always CORS or network-level
+      // (browser blocks before the request even leaves). For providers
+      // we know block CORS (Anthropic), fall back to the static model
+      // list and continue. For others, propagate so the caller surfaces
+      // the error to the user.
+      const msg = (err as Error).message || String(err);
+      const isCorsLike = err instanceof TypeError && /failed to fetch|network/i.test(msg);
+      if (isCorsLike && ep.staticFallbackModels) {
+        ids = ep.staticFallbackModels;
+        usedFallback = true;
+        console.log(`[Aggregaytor:ModelUpdater] ${provider} /models blocked by CORS, using static fallback (${ids.length} models)`);
+      } else {
+        throw err;
+      }
     }
   }
 

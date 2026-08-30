@@ -115,33 +115,37 @@ export function searchFieldedIndex(
   };
   const documents = Array.isArray(indexRecord.documents) ? indexRecord.documents : [];
 
-  const filtered = documents
-    .filter(doc => !wantedSegments.size || wantedSegments.has(doc.segment))
-    .filter(doc => isDocumentWithinAge(doc, maxAgeDaysBySegment));
+  // Filter and score in one pass over `{ doc, score }` pairs. Copying every
+  // surviving document up front (`{ ...doc, score }`) cloned the whole index on
+  // every search; only the handful actually returned needs a copy.
+  const scored: Array<{ doc: IndexDocument; score: number }> = [];
+  for (const doc of documents) {
+    if (wantedSegments.size && !wantedSegments.has(doc.segment)) continue;
+    if (!isDocumentWithinAge(doc, maxAgeDaysBySegment)) continue;
+    if (!queryTokens.length) {
+      scored.push({ doc, score: doc.base_rank || 0 });
+      continue;
+    }
+    const score = scoreIndexDocument(doc, queryTokens, weights);
+    if (score > 0) scored.push({ doc, score });
+  }
 
-  const ranked = filtered
-    .map(doc => ({
-      ...doc,
-      score: queryTokens.length
-        ? scoreIndexDocument(doc, queryTokens, weights)
-        : (doc.base_rank || 0),
-    }))
-    .filter(doc => (queryTokens.length ? doc.score! > 0 : true))
-    .sort((a, b) => {
-      if (b.score! !== a.score!) return b.score! - a.score!;
-      const aTs = Date.parse(a.event_date || a.updated_at || '') || 0;
-      const bTs = Date.parse(b.event_date || b.updated_at || '') || 0;
-      return bTs - aTs;
-    });
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    const aTs = Date.parse(a.doc.event_date || a.doc.updated_at || '') || 0;
+    const bTs = Date.parse(b.doc.event_date || b.doc.updated_at || '') || 0;
+    return bTs - aTs;
+  });
 
   const modules: IndexDocument[] = [];
   const chunks: IndexDocument[] = [];
-  for (const doc of ranked) {
+  for (const { doc, score } of scored) {
     if (doc.kind === 'chunk') {
-      if (chunks.length < maxChunks) chunks.push(doc);
+      if (chunks.length < maxChunks) chunks.push({ ...doc, score });
       continue;
     }
-    if (modules.length < maxResults) modules.push(doc);
+    if (modules.length < maxResults) modules.push({ ...doc, score });
+    if (modules.length >= maxResults && chunks.length >= maxChunks) break;
   }
 
   return { query_tokens: queryTokens, modules, chunks };
