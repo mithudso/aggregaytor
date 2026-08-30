@@ -135,7 +135,13 @@ export interface AdapterConfig {
   interceptXHR: boolean;
   /** Wrap `WebSocket` constructor + prototype to capture frames. */
   interceptWebSocket: boolean;
-  /** Use a MutationObserver on the DOM as a fallback message source. */
+  /**
+   * Use a MutationObserver on the DOM as a fallback message source.
+   *
+   * Advisory only: `BaseAdapter` does not act on this flag. Adapters that
+   * scrape the DOM call `createDOMExtractor` themselves from `init()`; this
+   * field exists so they can branch on it.
+   */
   observeDOM: boolean;
 }
 
@@ -171,7 +177,14 @@ export interface InterceptorOptions {
    */
   onXHRResponse: (url: string, data: unknown) => void;
   /**
-   * Called for every incoming WebSocket `message` event.
+   * Called for every incoming WebSocket `message` event whose payload is text
+   * or an `ArrayBuffer`.
+   *
+   * `MessageEvent.data` can also be a `Blob` (the default `binaryType`), but
+   * this callback is synchronous and a Blob can only be read asynchronously,
+   * so the interceptor drops those frames rather than passing a value the
+   * declared type does not cover.
+   *
    * @param data   - Raw frame data (string or ArrayBuffer).
    * @param source - Debug tag indicating how the socket was intercepted
    *                 (`'ws-constructor'`, `'ws-proto-addEventListener'`, etc.).
@@ -221,6 +234,6 @@ export interface DOMExtractorOptions {
    * @param elements - The newly added message DOM elements.
    */
   onNewElements: (elements: Element[]) => void;
-  /** Whether to observe the entire subtree of the root (default: false). */
+  /** Whether to observe the entire subtree of the root (default: `true`). */
   subtree?: boolean;
 }

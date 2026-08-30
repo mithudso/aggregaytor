@@ -197,7 +197,19 @@ async function runMigration(): Promise<void> {
     }
   }
 
-  // Send to service worker
+  // Send to service worker.
+  //
+  // This is a ONE-SHOT migration: once MIGRATION_DONE_KEY is set we never look
+  // at the legacy localStorage again. So the done-marker must only be written
+  // when the hand-off actually succeeded. This script runs at document_start,
+  // which is exactly when the MV3 service worker is most likely to still be
+  // spinning up — sendMessage then rejects with "Receiving end does not
+  // exist", and the previous code swallowed that, marked the migration
+  // complete, and silently dropped every bookmark, note and timestamp the
+  // user had in sniffiesplus. On failure we now leave the marker unset so the
+  // next page load retries.
+  let allDelivered = true;
+
   if (contacts.length) {
     try {
       await chrome.runtime.sendMessage({
@@ -206,6 +218,7 @@ async function runMigration(): Promise<void> {
         payload: contacts,
       });
     } catch (e) {
+      allDelivered = false;
       console.warn('[Aggregaytor] Failed to send migrated contacts:', e);
     }
   }
@@ -218,8 +231,14 @@ async function runMigration(): Promise<void> {
         payload: messages,
       });
     } catch (e) {
+      allDelivered = false;
       console.warn('[Aggregaytor] Failed to send migrated messages:', e);
     }
+  }
+
+  if (!allDelivered) {
+    console.warn('[Aggregaytor] Migration NOT marked done — service worker did not accept the payload; will retry on next page load');
+    return;
   }
 
   // Mark as done

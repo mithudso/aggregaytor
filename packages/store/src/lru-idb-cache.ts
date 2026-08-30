@@ -72,43 +72,81 @@ interface CacheEntry<V> {
 // known store on first open and create them all up-front.
 const _dbConnections = new Map<string, Promise<IDBDatabase>>();
 const _knownStores = new Map<string, Set<string>>();
+// Opens are serialized per dbName. Two concurrent opens that each pick their
+// own version number race each other: the lower-version request fails with
+// VersionError, and its in-flight connection leaks and then blocks every
+// later upgrade.
+const _openChains = new Map<string, Promise<unknown>>();
 
-async function getCacheDb(dbName: string, storeName: string): Promise<IDBDatabase> {
-  // Track every store we've ever wanted so the next open creates them all.
-  let stores = _knownStores.get(dbName);
-  if (!stores) { stores = new Set(); _knownStores.set(dbName, stores); }
-  stores.add(storeName);
-
-  // If we already have an open DB, check whether it has the requested store.
-  // If yes, return it. If no, close+reopen with a higher version to add it.
-  const existingP = _dbConnections.get(dbName);
-  if (existingP) {
-    const existing = await existingP;
-    if (existing.objectStoreNames.contains(storeName)) return existing;
-    // Need to upgrade. Close the existing connection and reopen.
-    existing.close();
-    _dbConnections.delete(dbName);
-  }
-
-  const p = new Promise<IDBDatabase>((resolve, reject) => {
-    // Always bump version when we have new stores. The version number is
-    // (1 + number of distinct stores) so concurrent opens converge.
-    const version = stores!.size + 1;
-    const req = indexedDB.open(dbName, version);
+function openIdb(dbName: string, version?: number, stores?: Set<string>): Promise<IDBDatabase> {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const req = version === undefined ? indexedDB.open(dbName) : indexedDB.open(dbName, version);
     req.onupgradeneeded = (): void => {
       const db = req.result;
-      for (const name of stores!) {
+      for (const name of stores || []) {
         if (!db.objectStoreNames.contains(name)) {
           db.createObjectStore(name, { keyPath: 'k' });
         }
       }
     };
-    req.onsuccess = (): void => resolve(req.result);
+    req.onsuccess = (): void => {
+      const db = req.result;
+      // Another context upgrading this database would be blocked by our open
+      // handle; step aside so it can proceed and reopen lazily on next use.
+      db.onversionchange = (): void => {
+        db.close();
+        _dbConnections.delete(dbName);
+      };
+      resolve(db);
+    };
     req.onerror = (): void => reject(req.error);
     req.onblocked = (): void => reject(new Error('IDB upgrade blocked by another connection'));
   });
-  _dbConnections.set(dbName, p);
-  return p;
+}
+
+/**
+ * Open `dbName` ensuring every store in `stores` exists.
+ *
+ * The version is derived from the database's ACTUAL current version rather
+ * than from the number of stores this process happens to know about. A
+ * service-worker restart that instantiates fewer caches than the previous run
+ * created stores would otherwise request a LOWER version than the stored one,
+ * which fails with VersionError and disables the cold tier for the session.
+ */
+async function openWithStores(dbName: string, stores: Set<string>): Promise<IDBDatabase> {
+  const db = await openIdb(dbName);
+  const missing = [...stores].some(name => !db.objectStoreNames.contains(name));
+  if (!missing) return db;
+  const nextVersion = db.version + 1;
+  db.close();
+  return openIdb(dbName, nextVersion, stores);
+}
+
+async function getCacheDb(dbName: string, storeName: string): Promise<IDBDatabase> {
+  // Track every store we've ever wanted so the next upgrade creates them all.
+  let stores = _knownStores.get(dbName);
+  if (!stores) { stores = new Set(); _knownStores.set(dbName, stores); }
+  stores.add(storeName);
+
+  const knownStores = stores;
+  const previous = _openChains.get(dbName) || Promise.resolve();
+  const chained = previous.catch(() => { /* a failed open must not wedge the chain */ }).then(async () => {
+    const existingP = _dbConnections.get(dbName);
+    if (existingP) {
+      try {
+        const existing = await existingP;
+        if (existing.objectStoreNames.contains(storeName)) return existing;
+        // Needs an upgrade — release our handle first so it isn't blocked.
+        existing.close();
+      } catch { /* the previous open failed; fall through and retry */ }
+      _dbConnections.delete(dbName);
+    }
+    const opened = await openWithStores(dbName, knownStores);
+    _dbConnections.set(dbName, Promise.resolve(opened));
+    return opened;
+  });
+  _openChains.set(dbName, chained.catch(() => { /* chain link only */ }));
+  return chained;
 }
 
 export class LruIdbCache<V> {
@@ -118,13 +156,18 @@ export class LruIdbCache<V> {
   // write-through cheap when callers do many sequential .set()s.
   private pendingWrites = new Map<string, CacheEntry<V>>();
   private writeFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Resolvers for every `set()` awaiting the next cold-tier flush. */
+  private flushWaiters: Array<() => void> = [];
 
   constructor(opts: LruIdbCacheOptions) {
+    // Defaults are applied AFTER the spread: spreading `opts` last would let an
+    // explicitly-undefined option (e.g. `{ ttlMs: config.ttl }` where ttl is
+    // undefined) overwrite the default with undefined.
     this.opts = {
-      maxItemsTotal: opts.maxItems * 4,
-      ttlMs: 0,
-      dbName: DB_NAME,
       ...opts,
+      maxItemsTotal: opts.maxItemsTotal ?? opts.maxItems * 4,
+      ttlMs: opts.ttlMs ?? 0,
+      dbName: opts.dbName ?? DB_NAME,
     };
   }
 
@@ -176,43 +219,65 @@ export class LruIdbCache<V> {
   }
 
   /**
-   * Set a value. Mem write is synchronous; cold write is queued and flushed
-   * 50ms later (or sooner under pressure). Returns immediately — the
-   * promise the caller awaits is resolved by the queue flush.
+   * Set a value. The mem write is immediate; the cold write joins a batch
+   * flushed 50ms after the FIRST pending write.
+   *
+   * Every caller waiting on that batch is resolved when it lands. The timer is
+   * deliberately not restarted by later `set()`s: rescheduling used to drop
+   * the previous timer, stranding that caller's promise unresolved forever
+   * (and letting a steady write stream postpone the flush indefinitely).
    */
   async set(key: string, value: V): Promise<void> {
     const entry: CacheEntry<V> = { v: value, ts: Date.now() };
     this.memSet(key, entry);
     this.pendingWrites.set(key, entry);
-    return new Promise((resolve) => {
-      if (this.writeFlushTimer) {
-        // Already scheduled — caller can stack onto the same flush.
-        // We resolve when the next flush completes.
-        const prev = this.writeFlushTimer;
-        clearTimeout(prev);
+    return new Promise<void>((resolve) => {
+      this.flushWaiters.push(resolve);
+      if (!this.writeFlushTimer) {
+        this.writeFlushTimer = setTimeout(() => { void this.flushPendingWrites(); }, 50);
       }
-      this.writeFlushTimer = setTimeout(async () => {
-        this.writeFlushTimer = null;
-        const batch = Array.from(this.pendingWrites.entries());
-        this.pendingWrites.clear();
-        try {
-          await this.coldSetBatch(batch);
-        } catch (err) {
-          console.warn('[LruIdbCache] cold flush failed:', err);
-        }
-        resolve();
-      }, 50);
     });
+  }
+
+  /** Drain `pendingWrites` into the cold tier and release every waiter. */
+  private async flushPendingWrites(): Promise<void> {
+    if (this.writeFlushTimer) {
+      clearTimeout(this.writeFlushTimer);
+      this.writeFlushTimer = null;
+    }
+    const batch = Array.from(this.pendingWrites.entries());
+    this.pendingWrites.clear();
+    const waiters = this.flushWaiters;
+    this.flushWaiters = [];
+    try {
+      await this.coldSetBatch(batch);
+    } catch (err) {
+      console.warn('[LruIdbCache] cold flush failed:', err);
+    }
+    for (const resolve of waiters) resolve();
   }
 
   async delete(key: string): Promise<void> {
     this.mem.delete(key);
+    // Drop any queued write for this key, or the pending flush would
+    // resurrect it in the cold tier straight after the delete.
+    this.pendingWrites.delete(key);
     await this.coldDelete(key);
   }
 
   /** Drop every entry from BOTH tiers. */
   async clear(): Promise<void> {
     this.mem.clear();
+    // Same hazard as delete(): a queued flush would write entries back after
+    // the store was cleared.
+    this.pendingWrites.clear();
+    if (this.writeFlushTimer) {
+      clearTimeout(this.writeFlushTimer);
+      this.writeFlushTimer = null;
+    }
+    const waiters = this.flushWaiters;
+    this.flushWaiters = [];
+    for (const resolve of waiters) resolve();
     await this.coldClear();
   }
 

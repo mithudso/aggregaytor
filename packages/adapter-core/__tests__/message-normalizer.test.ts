@@ -90,11 +90,15 @@ describe('parseRelativeTimeString', () => {
   it('parses hours', () => {
     const result = parseRelativeTimeString('2h');
     expect(result).toBeGreaterThan(Date.now() - 3 * 3600000);
+    // Upper bound: without it, a function that ignored the unit and returned
+    // Date.now() would still pass.
+    expect(result).toBeLessThanOrEqual(Date.now() - 2 * 3600000);
   });
 
   it('parses days', () => {
     const result = parseRelativeTimeString('3d');
     expect(result).toBeGreaterThan(Date.now() - 4 * 86400000);
+    expect(result).toBeLessThanOrEqual(Date.now() - 3 * 86400000);
   });
 
   it('returns null for unparseable input', () => {

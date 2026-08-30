@@ -7,6 +7,8 @@ describe('isGlobalChatEvent', () => {
   });
 
   it('matches all exact entries in GLOBAL_CHAT_EVENTS', () => {
+    // Guard: an empty set would make the loop below vacuously pass.
+    expect(GLOBAL_CHAT_EVENTS.size).toBeGreaterThan(0);
     for (const name of GLOBAL_CHAT_EVENTS) {
       expect(isGlobalChatEvent(name)).toBe(true);
     }
@@ -51,6 +53,8 @@ describe('isGlobalChatEvent', () => {
 
 describe('isPresenceEvent', () => {
   it('matches all exact entries in PRESENCE_EVENTS', () => {
+    // Guard: an empty set would make the loop below vacuously pass.
+    expect(PRESENCE_EVENTS.size).toBeGreaterThan(0);
     for (const name of PRESENCE_EVENTS) {
       expect(isPresenceEvent(name)).toBe(true);
     }

@@ -21,9 +21,13 @@
     "@aggregaytor/adapter-core": "workspace:*",
     "@aggregaytor/context-engine": "workspace:*"
   },
+  "dependencies": {
+    "@aggregaytor/grindr-lib": "workspace:*"
+  },
   "devDependencies": {
     "@aggregaytor/adapter-core": "workspace:*",
     "@aggregaytor/context-engine": "workspace:*",
+    "@aggregaytor/grindr-lib": "workspace:*",
     "tsup": "^8.4.0",
     "typescript": "^5.7.0",
     "vitest": "^3.1.0"

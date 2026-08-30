@@ -125,9 +125,13 @@ export function indexGrindrProfile(obj: Record<string, unknown>): void {
   const profile: GrindrProfile = {
     profileId: pid,
     ethnicity: Number(obj.ethnicity || 0),
-    genders: ((obj.genders || []) as any[]).map(g =>
-      typeof g === 'object' ? Number(g.id || 0) : Number(g || 0)
-    ),
+    // Array.isArray guard: this runs over every object in every grindr.com
+    // JSON response, so a non-array `genders` (or a null entry) would throw
+    // and abort indexing for the whole response body.
+    genders: Array.isArray(obj.genders)
+      ? (obj.genders as unknown[]).map(g =>
+          (g && typeof g === 'object') ? Number((g as any).id || 0) : Number(g || 0))
+      : [],
     sexualPosition: Number(obj.sexualPosition || 0),
     hasChattedInLast24Hrs: !!obj.hasChattedInLast24Hrs,
     aboutMe: String(obj.aboutMe || ''),
@@ -245,16 +249,57 @@ function applyFilters(): void {
 
 // ── Settings ───────────────────────────────────────────────────────────────
 
+/**
+ * Coerce an arbitrary object into the subset of GrindrFilterSettings it
+ * validly specifies, dropping anything malformed.
+ *
+ * Both callers are untrusted: localStorage can hold a stale/corrupt shape (the
+ * bridge writes the raw incoming settings object to the same key), and the
+ * `__aggregaytor_grindr_filter_settings` event is a plain window CustomEvent
+ * that any script on the page can forge. Before this, a `keywords` that wasn't
+ * an array of strings threw a TypeError inside applyFilters — which runs on a
+ * 3s interval, so it threw forever.
+ */
+function sanitizeFilterSettings(raw: unknown): Partial<GrindrFilterSettings> {
+  if (!raw || typeof raw !== 'object') return {};
+  const src = raw as Record<string, unknown>;
+  const out: Partial<GrindrFilterSettings> = {};
+
+  const mode = (key: 'ethnicityFilter' | 'genderFilter' | 'neverChattedFilter' | 'keywordFilter') => {
+    const v = src[key];
+    if (v === 'off' || v === 'include' || v === 'exclude') out[key] = v;
+  };
+  mode('ethnicityFilter');
+  mode('genderFilter');
+  mode('neverChattedFilter');
+  mode('keywordFilter');
+
+  const numbers = (key: 'ethnicityValues' | 'genderValues') => {
+    const v = src[key];
+    if (Array.isArray(v)) out[key] = v.map(Number).filter(n => Number.isFinite(n));
+  };
+  numbers('ethnicityValues');
+  numbers('genderValues');
+
+  if (Array.isArray(src.keywords)) {
+    out.keywords = src.keywords.filter((k): k is string => typeof k === 'string' && k.length > 0);
+  }
+  if (typeof src.autoBlock === 'boolean') out.autoBlock = src.autoBlock;
+  if (typeof src.enabled === 'boolean') out.enabled = src.enabled;
+
+  return out;
+}
+
 function loadSettings(): void {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) Object.assign(settings, JSON.parse(raw));
+    if (raw) Object.assign(settings, sanitizeFilterSettings(JSON.parse(raw)));
   } catch {}
 }
 
 window.addEventListener('__aggregaytor_grindr_filter_settings', ((event: CustomEvent) => {
-  const update = event.detail;
-  if (!update) return;
+  const update = sanitizeFilterSettings(event.detail);
+  if (!Object.keys(update).length) return;
   Object.assign(settings, update);
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));

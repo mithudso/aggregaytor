@@ -2,11 +2,15 @@
   "name": "aggregaytor",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.33.0",
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "lint": "eslint .",
-    "clean": "pnpm -r exec rm -rf dist"
+    "clean": "pnpm -r exec rm -rf dist",
+    "index:check": "node scripts/check-doc-indexes.mjs",
+    "index:semantic": "python3 scripts/semantic_indexer.py",
+    "index:watch": "./scripts/watch_and_index.sh"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

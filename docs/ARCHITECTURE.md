@@ -1,6 +1,6 @@
 # Aggregaytor — Architecture & Code Map
 
-**Last updated:** 2026-05-10 (v0.57.80)
+**Last updated:** 2026-08-30 (v0.57.81)
 
 This document is the **primary entry point** for anyone (human or AI) starting fresh on the codebase. Read this before making non-trivial changes. It captures the *why* behind choices that aren't obvious from reading the code alone.
 
@@ -15,7 +15,7 @@ Chrome MV3 extension that unifies message inboxes across Sniffies, Grindr, Doubl
 ```
 aggregaytor/
 ├── extensions/aggregaytor/      # The shipped extension (manifest v3)
-│   ├── manifest.json            # SOURCE OF TRUTH for version (currently 0.57.8)
+│   ├── manifest.json            # SOURCE OF TRUTH for version (currently 0.57.81)
 │   ├── background/
 │   │   ├── service-worker.ts    # ~2400 lines — central message router
 │   │   ├── llm.ts               # ~1700 lines — multi-provider LLM + caches
@@ -269,9 +269,10 @@ sidepanel/panel.js renders the inbox
 ## Testing
 
 - `pnpm -r test` — vitest across all packages
-- 65 tests currently (context-engine: 34, adapter-core: 23, sniffies: 8)
-- Most adapters and the store package have no tests (they pass `--passWithNoTests`)
+- 198 tests currently (context-engine: 45, adapter-core: 50, sniffies: 100, store: 3)
+- Most adapters pass `--passWithNoTests` — grindr/doublelist/adam4adam/gmail/yahoo have no tests
 - Store tests use `fake-indexeddb` for isolated IndexedDB-backed runs
+- See `docs/TESTING.md` for conventions, and note ~40 sniffies tests exercise replicated parser copies, not shipped code (`docs/CDO-REPORT-2026-08-30.md`)
 
 ## Debug
 
@@ -279,6 +280,27 @@ sidepanel/panel.js renders the inbox
 - `GET_SW_PERF` message returns per-op perf counters + memory block (autoTrainedSet size, thread-cache age)
 - `GET_LLM_QUEUE_STATUS` returns queue length, provider RPM usage, backoff state
 - `DIAGNOSE_TRAINING_DATA` returns preference-model sample-quality audit
+
+## Recent hardening (2026-08-30)
+
+A large audit-and-fix pass landed on 2026-08-30 (~160 applied fixes; 10 Critical,
+~30 High). Full findings, the BLOCKED/decision-needed table, and verification
+commands are in **`docs/CDO-REPORT-2026-08-30.md`** — read it before touching the
+areas it lists. Highlights that refine statements elsewhere in this doc:
+
+- **Bridges now allowlist relayed event types** — each `<platform>-bridge.ts`
+  defines a `*_RELAY_TYPES` set and drops any `__aggregaytor_message` whose
+  `type` isn't on it, so a page script can no longer reach arbitrary cases of the
+  SW message switch. New bridges must follow this pattern.
+- **Network interceptor parses response bodies off the page's await path** —
+  only `clone()` runs on the page's critical path; the body read and adapter
+  callback happen on a detached promise (`packages/adapter-core/src/network-interceptor.ts`).
+- **Adapters survive hostile payloads** — a garbage timestamp no longer throws
+  inside the payload walker and drops the rest of the batch.
+- **Root `vitest.config.ts` excludes `**/.claude/**`** so worktree checkouts
+  aren't collected as duplicate test suites.
+- **panel.js/popup.js HTML escaping** was rewritten (full 5-char entity
+  escaping) — route all platform-derived strings through `esc()`.
 
 ## Known tech debt / unfinished work
 

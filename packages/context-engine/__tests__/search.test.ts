@@ -42,6 +42,9 @@ describe('searchFieldedIndex', () => {
 
   it('filters by segment', () => {
     const result = searchFieldedIndex(index, 'migration', { segments: ['reports'] });
+    // Guard: `.every()` on an empty array is vacuously true, so a filter that
+    // dropped everything would pass the segment assertion below.
+    expect(result.modules.length).toBeGreaterThan(0);
     expect(result.modules.every(m => m.segment === 'reports')).toBe(true);
   });
 

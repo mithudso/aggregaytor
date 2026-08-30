@@ -1,6 +1,25 @@
 # Copilot instructions for Aggregaytor
 
-## Build, test, and lint
+## Default Execution Strategy
+
+- **Parallelism-first.** When a task decomposes into independent subtasks (multiple file reads, per-package builds/tests, independent searches), run them concurrently rather than serially. Only serialize when one step's output feeds the next.
+- **No truncation.** Never elide, summarize away, or truncate file contents, diffs, command output, or lists the user asked for. If output is long, deliver all of it in full.
+- **Auto-continue.** If a multi-step task is interrupted or hits a length limit, continue from where it left off without waiting to be re-prompted. Do not restart completed steps.
+- **Completion summary table.** End every multi-step task with a summary table of what was done:
+
+  | Step | Target | Result |
+  |------|--------|--------|
+  | e.g. build | repo root | pass/fail + notes |
+
+## Orientation
+
+Read these before making non-trivial changes:
+
+1. `docs/ARCHITECTURE.md` — primary code map: message-dispatch model, storage layer, caching invariants, content-script architecture, "Things NOT to do".
+2. `CLAUDE.md` — command reference, critical invariants, build-system gotchas, and where things live.
+3. `README.md` — user-facing feature/usage reference.
+
+## Build, Test, and Validation Commands
 
 Use **pnpm workspaces** from the repo root unless noted.
 
@@ -27,7 +46,7 @@ cd adapters/sniffies && npx vitest run __tests__/ws-parser.test.ts
 cd adapters/sniffies && npx vitest run -t "matches partial messages"
 ```
 
-## High-level architecture
+## High-level Architecture
 
 This repo is a **Chrome MV3 extension** that aggregates inboxes from multiple platforms into one side panel. The important end-to-end flow is:
 
@@ -59,7 +78,7 @@ Build-wise, `extensions/aggregaytor/vite.config.ts` matters:
 - MAIN-world content scripts are built separately as **self-contained IIFE bundles** with no shared chunks.
 - During the extension build, `@aggregaytor/*` aliases resolve to workspace `src/` files rather than `dist/`.
 
-## Key conventions
+## Key Conventions
 
 - Read `docs/ARCHITECTURE.md` before non-trivial changes. It is the main codebase map and records invariants that are easy to break accidentally.
 - The release version source of truth is `extensions/aggregaytor/manifest.json`, not workspace package versions.

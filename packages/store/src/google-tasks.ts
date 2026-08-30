@@ -15,7 +15,7 @@
  * - Pull from Google → merge into local PouchDB (pullGoogleTasks)
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 declare const chrome: any;
 
 const TASKS_API = 'https://tasks.googleapis.com/tasks/v1';
@@ -161,6 +161,21 @@ async function getOrCreateTaskList(): Promise<string> {
  * Create a task in Google Tasks.
  * @returns The created Google Task object with `id`, `title`, etc.
  */
+/**
+ * Convert a local due date to the RFC 3339 timestamp the API expects.
+ * (Google stores only the date portion and discards the time.)
+ * Returns null for anything unparseable, so a corrupt local `dueAt` drops the
+ * field instead of throwing a RangeError out of the whole sync.
+ */
+function toGoogleDue(dueAt: string): string | null {
+  const ms = new Date(dueAt).getTime();
+  if (!Number.isFinite(ms)) {
+    console.warn('[GoogleTasks] Ignoring unparseable due date:', dueAt);
+    return null;
+  }
+  return new Date(ms).toISOString();
+}
+
 export async function createGoogleTask(opts: {
   title: string;
   notes?: string;
@@ -169,8 +184,10 @@ export async function createGoogleTask(opts: {
   const listId = await getOrCreateTaskList();
   const body: any = { title: opts.title };
   if (opts.notes) body.notes = opts.notes;
-  // Google Tasks API uses RFC 3339 date (date only, no time for due)
-  if (opts.dueAt) body.due = new Date(opts.dueAt).toISOString();
+  if (opts.dueAt) {
+    const due = toGoogleDue(opts.dueAt);
+    if (due) body.due = due;
+  }
   return tasksApiFetch(`/lists/${encodeURIComponent(listId)}/tasks`, {
     method: 'POST',
     body: JSON.stringify(body),
@@ -189,7 +206,10 @@ export async function updateGoogleTask(
   const body: any = {};
   if (updates.title !== undefined) body.title = updates.title;
   if (updates.notes !== undefined) body.notes = updates.notes;
-  if (updates.dueAt !== undefined) body.due = new Date(updates.dueAt).toISOString();
+  if (updates.dueAt !== undefined) {
+    const due = toGoogleDue(updates.dueAt);
+    if (due) body.due = due;
+  }
   if (updates.completed !== undefined) {
     body.status = updates.completed ? 'completed' : 'needsAction';
     if (updates.completed) body.completed = new Date().toISOString();
@@ -211,14 +231,42 @@ export async function deleteGoogleTask(googleTaskId: string): Promise<void> {
   });
 }
 
+/** Hard cap on pagination so a repeating pageToken can't loop forever. */
+const MAX_TASK_PAGES = 20;
+
+/**
+ * Fetch the whole "Aggregaytor" list, following `nextPageToken`.
+ *
+ * `complete` reports whether the page cap was hit. It matters because
+ * `syncGoogleTasks()` deletes every local task whose Google id is missing from
+ * this list — acting on a truncated list would delete tasks that still exist
+ * remotely. `showHidden` is required as well: Google hides older completed
+ * tasks by default, and those would otherwise read as remote deletions.
+ */
+async function fetchAllGoogleTasks(): Promise<{ items: any[]; complete: boolean }> {
+  const listId = await getOrCreateTaskList();
+  const items: any[] = [];
+  let pageToken = '';
+
+  for (let page = 0; page < MAX_TASK_PAGES; page++) {
+    const query = `?maxResults=100&showCompleted=true&showHidden=true`
+      + (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
+    const data = await tasksApiFetch(`/lists/${encodeURIComponent(listId)}/tasks${query}`);
+    if (Array.isArray(data?.items)) items.push(...data.items);
+    pageToken = data?.nextPageToken || '';
+    if (!pageToken) return { items, complete: true };
+  }
+
+  console.warn(`[GoogleTasks] Stopped after ${MAX_TASK_PAGES} pages; remote list is larger than expected.`);
+  return { items, complete: false };
+}
+
 /**
  * Pull all tasks from the "Aggregaytor" list in Google Tasks.
  * Returns the raw Google Tasks API objects.
  */
 export async function pullGoogleTasks(): Promise<any[]> {
-  const listId = await getOrCreateTaskList();
-  const data = await tasksApiFetch(`/lists/${encodeURIComponent(listId)}/tasks?maxResults=100&showCompleted=true`);
-  return data?.items || [];
+  return (await fetchAllGoogleTasks()).items;
 }
 
 /**
@@ -241,7 +289,7 @@ export async function syncGoogleTasks(): Promise<{
   const { getAllTasks, updateTask, createTask, deleteTask } = await import('./tasks.js');
 
   // Fetch both sides
-  const remoteTasks = await pullGoogleTasks();
+  const { items: remoteTasks, complete: remoteListComplete } = await fetchAllGoogleTasks();
   const localTasks = await getAllTasks();
 
   // Build lookup maps
@@ -298,10 +346,14 @@ export async function syncGoogleTasks(): Promise<{
   }
 
   // ── Delete local tasks whose Google counterpart was removed ──────────
-  for (const [googleId, local] of localByGoogleId) {
-    if (!remoteIds.has(googleId)) {
-      await deleteTask(local._id);
-      deleted++;
+  // Only safe when we saw the ENTIRE remote list; on a truncated pull an
+  // absent id means "not fetched", not "deleted remotely".
+  if (remoteListComplete) {
+    for (const [googleId, local] of localByGoogleId) {
+      if (!remoteIds.has(googleId)) {
+        await deleteTask(local._id);
+        deleted++;
+      }
     }
   }
 
@@ -318,7 +370,12 @@ export async function syncGoogleTasks(): Promise<{
         await updateTask(local._id, { googleTaskId: gTask.id, lastSyncedAt: now });
       }
       pushed++;
-    } catch { /* Google API failure — skip, retry next sync */ }
+    } catch (err) {
+      // Skip and retry on the next sync, but never silently: an always-failing
+      // push is otherwise invisible. Error text comes from tasksApiFetch and
+      // never contains the access token.
+      console.warn('[GoogleTasks] Push (create) failed for task', local._id, err);
+    }
   }
 
   // Dirty local tasks (updated since last sync) → push updates
@@ -335,7 +392,9 @@ export async function syncGoogleTasks(): Promise<{
         });
         await updateTask(local._id, { lastSyncedAt: now });
         pushed++;
-      } catch { /* skip, retry next sync */ }
+      } catch (err) {
+        console.warn('[GoogleTasks] Push (update) failed for task', local._id, err);
+      }
     }
   }
 

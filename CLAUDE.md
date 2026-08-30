@@ -82,6 +82,29 @@ These are extracted from `docs/ARCHITECTURE.md`; consult it for the *why*.
 - `vitest` with `environment: 'node'`. Tests use the in-memory PouchDB adapter (`{ adapter: 'memory' }`) — isolated DB per test.
 - Most coverage is in `packages/context-engine` and `adapters/sniffies`. Many packages pass `--passWithNoTests`; that's expected.
 
+## Repository shape
+
+| Path | What lives there |
+|------|------------------|
+| `extensions/aggregaytor/` | The shipped Chrome MV3 extension: `manifest.json` (version source of truth), `background/` (service worker, LLM engine), `content/` (MAIN-world adapters + ISOLATED bridges), `sidepanel/`, `popup/`, `vite.config.ts` |
+| `packages/` | Shared workspace packages: `adapter-core` (shared types), `context-engine`, `store` (PouchDB storage primitives) |
+| `adapters/` | Per-platform network interception + parsing (`sniffies`, `grindr`, `doublelist`, `adam4adam`, `gmail`, `yahoo`) |
+| `tools/` | Dev tooling (`debug-server`) |
+| `skills/` | Repo-local Claude Code skills (12 SKILL.md reviewer/reference contexts) — see `AGENTS.md` |
+| `docs/` | `ARCHITECTURE.md`, CDO/performance reports, per-skill `*-context.md` companion files |
+| `scripts/` | Maintenance scripts (workflow-log rotation) |
+| `.github/` | Copilot instructions, CI workflow, templates, dependabot |
+
+## MCP servers
+
+No MCP servers are configured repo-locally (there is no `.mcp.json` in this repository). Any MCP tooling available in a session comes from user-level or global configuration.
+
+## Workflow log rule
+
+- Append every user request to `prompts.md` as a new section headed `## Prompt vN - <ISO timestamp>` (N increments per prompt).
+- Keep `memory.md` current: update the entry for the current version with Completed / In progress / Next steps after each work session.
+- Bump the **patch** version in `extensions/aggregaytor/manifest.json` on every change (it is the version source of truth; release commits use the form `vX.Y.Z: <summary>`).
+
 ## Auto-memory has additional context
 
 The user's auto-memory at `/Users/mitch/.claude/projects/-Users-mitch-Documents-GitHub-aggregaytor/memory/` has running notes from prior sessions: performance analyses, scheduled-improvement runs, deprecation deadlines (e.g. Gemini 2.5 → June 17 2026), and the Dexie-migration plan that is documented but **not implemented**. Check `MEMORY.md` index when prior decisions or in-flight initiatives are relevant.

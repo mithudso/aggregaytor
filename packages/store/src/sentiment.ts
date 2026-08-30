@@ -54,12 +54,16 @@ export function analyzeConversationSentiment(messages: MessageDoc[]): SentimentS
   engagement += Math.min(questionsFromThem * 0.1, 0.3);
   if (questionsFromThem > 2) signals.push('Asking questions');
 
-  // Response speed (recent messages)
+  // Response speed (recent messages). Only scored when we actually observed
+  // replies — with no out→in pairs the old `Infinity` average scored the
+  // thread as "Slow to respond", which is a claim the data doesn't support.
   const recentPairs = getResponsePairs(messages).slice(-5);
-  const avgResponseMs = recentPairs.length ? recentPairs.reduce((s, p) => s + p.delayMs, 0) / recentPairs.length : Infinity;
-  if (avgResponseMs < 5 * 60_000) { engagement += 0.2; signals.push('Fast responses'); }
-  else if (avgResponseMs < 30 * 60_000) { engagement += 0.1; }
-  else if (avgResponseMs > 2 * 3600_000) { engagement -= 0.1; signals.push('Slow to respond'); }
+  if (recentPairs.length) {
+    const avgResponseMs = recentPairs.reduce((s, p) => s + p.delayMs, 0) / recentPairs.length;
+    if (avgResponseMs < 5 * 60_000) { engagement += 0.2; signals.push('Fast responses'); }
+    else if (avgResponseMs < 30 * 60_000) { engagement += 0.1; }
+    else if (avgResponseMs > 2 * 3600_000) { engagement -= 0.1; signals.push('Slow to respond'); }
+  }
 
   // Conversation depth
   if (messages.length > 10) { engagement += 0.1; signals.push('Extended conversation'); }

@@ -16,6 +16,7 @@
 - [How It Works](#how-it-works)
 - [Troubleshooting](#troubleshooting)
 - [Debug Tools](#debug-tools)
+- [Documentation](#documentation)
 
 ---
 
@@ -481,6 +482,18 @@ The Sniffies adapter writes debug data to localStorage (survives page reload, wo
 Access via `chrome://extensions` → Aggregaytor → click "service worker" link under "Inspect views".
 
 ---
+
+## Documentation
+
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — primary technical entry point: code map, message dispatch, storage, caching invariants
+- [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) — prerequisites, dev workflow, adding a platform adapter, conventions, troubleshooting
+- [docs/INSTALLATION.md](./docs/INSTALLATION.md) — install, load unpacked, verify, upgrade, uninstall
+- [docs/TESTING.md](./docs/TESTING.md) — test suites, running/writing tests, coverage posture, known gaps
+- [docs/SECURITY.md](./docs/SECURITY.md) — security model and hardening notes
+- [docs/COMPONENTS.md](./docs/COMPONENTS.md) — component-level codebase overview
+- [docs/requirements.md](./docs/requirements.md) — functional/non-functional requirements and dependencies
+- [docs/onboarding.md](./docs/onboarding.md) — new-contributor walkthrough
+- [CONTRIBUTING.md](./CONTRIBUTING.md) — how to contribute
 
 ## License
 

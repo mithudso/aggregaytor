@@ -55,11 +55,13 @@ export async function getAllBlockRules(
     const result = await db.find({ selector: { docType: 'block_rule' } });
     return result.docs as BlockRuleDoc[];
   }
-  if (_rulesCache) return _rulesCache;
+  // Hand out a copy: the cached array outlives every caller, so returning it
+  // directly lets an in-place sort/splice by one caller corrupt it for all.
+  if (_rulesCache) return [..._rulesCache];
   const store = await getDB();
   const result = await store.find({ selector: { docType: 'block_rule' } });
   _rulesCache = result.docs as BlockRuleDoc[];
-  return _rulesCache;
+  return [..._rulesCache];
 }
 
 export async function updateBlockRule(
@@ -69,7 +71,10 @@ export async function updateBlockRule(
 ): Promise<void> {
   const store = db || await getDB();
   const doc = await store.get(id) as BlockRuleDoc;
-  Object.assign(doc, updates);
+  // Never let a caller-supplied patch rewrite the document's identity — that
+  // would fork the rule into a second doc or break the docType index.
+  const { _id: _ignoredId, _rev: _ignoredRev, docType: _ignoredType, ...safeUpdates } = updates;
+  Object.assign(doc, safeUpdates);
   await store.put(doc);
   if (!db) invalidateBlockRulesCache();
 }
@@ -174,5 +179,9 @@ export async function executeAction(
     rule.executedCount = (rule.executedCount || 0) + 1;
     await store.put(rule);
     if (!db) invalidateBlockRulesCache();
-  } catch { /* ignore */ }
+  } catch (err) {
+    // Non-fatal: the block action itself already succeeded. Still log it —
+    // a permanently failing counter means the settings UI shows stale stats.
+    console.warn('[Aggregaytor:Store] block rule counter update failed:', ruleId, err);
+  }
 }

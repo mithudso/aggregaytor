@@ -12,8 +12,11 @@
  *   - **Incrementally maintained**: every `handleIncomingMessages` write
  *     calls `indexMessages(newMessages)` so the index stays hot.
  *   - **Memory-bounded**: we cap at SEARCH_INDEX_MAX_DOCS. Older messages
- *     fall out of the index (but remain in PouchDB). Searches that miss
- *     the capped window transparently fall back to the slow PouchDB scan.
+ *     fall out of the index (but remain in PouchDB) and are therefore NOT
+ *     searchable while the index is live — the caller only falls back to the
+ *     PouchDB scan when the index is unavailable (see "Fallback semantics"),
+ *     not when a query merely returns few hits. Evicted messages are counted
+ *     by `getEvictedCount()` so the UI can warn about the blind spot.
  *   - **Stateless across SW wakeups**: FlexSearch lives only in RAM, so when
  *     the service worker goes idle and restarts, the index is rebuilt on
  *     next search. That's a feature — we never persist a stale index.
@@ -27,11 +30,12 @@
  *
  * ## Fallback semantics
  *
- * If FlexSearch fails to load (import error), throws during index building,
- * or the query set exceeds our cap, `searchMessages` returns `null` and the
- * caller (SEARCH_MESSAGES handler) falls back to its legacy PouchDB scan.
- * This makes the index a *strict enhancement* — never a single point of
- * failure for the search feature.
+ * If FlexSearch fails to load (import error) or throws during index building
+ * or querying, `searchMessages` returns `null` and the caller
+ * (SEARCH_MESSAGES handler) falls back to its legacy PouchDB scan. This makes
+ * the index a *strict enhancement* — never a single point of failure for the
+ * search feature. Note that a successful-but-empty result is `[]`, not `null`:
+ * "the index has no match" is an answer, and the caller reports it as such.
  */
 
 // @ts-ignore — FlexSearch 0.7 has no first-class types, we use loose typing
@@ -83,11 +87,12 @@ let _index: any = null;
 const _indexedIds: string[] = [];
 const _indexedSet = new Set<string>();
 let _seeded = false;
-// v0.57.20: lifetime counter of messages evicted due to cap overflow. Exposed
-// via getEvictedCount() so the settings UI can tell users "you're at the cap —
-// search only covers the most recent 20k of your 25k messages". Previously
-// this was invisible and heavy users could see stale/incomplete search
-// results without any hint that the index was dropping docs.
+// v0.57.20: per-index-lifetime counter of messages evicted due to cap
+// overflow (reset by clearIndex(), unlike the _lifetime* counters below).
+// Exposed via getEvictedCount() so the settings UI can tell users "you're at
+// the cap — search only covers the most recent 5k of your 25k messages".
+// Previously this was invisible and heavy users could see stale/incomplete
+// search results without any hint that the index was dropping docs.
 let _evictedCount = 0;
 // v0.57.28: lifetime counters that survive clearIndex() so GET_SEARCH_INDEX_INFO
 // can show cumulative stats across rebuilds.
@@ -290,10 +295,11 @@ export function getIndexSize(): number {
 }
 
 /**
- * Lifetime count of messages evicted from the index because it hit the cap.
- * A non-zero value means the user has more messages than the index can hold
- * (SEARCH_INDEX_MAX_DOCS) and some searches will transparently fall back to
- * the slower PouchDB scan for docs outside the window.
+ * Count of messages evicted from the index because it hit the cap, since the
+ * last clearIndex() (NOT a true lifetime counter — see getLifetimeStats() for
+ * those). A non-zero value means the user has more messages than the index can
+ * hold (SEARCH_INDEX_MAX_DOCS), so messages outside the newest-N window are
+ * invisible to full-text search until the index is re-seeded.
  */
 export function getEvictedCount(): number {
   return _evictedCount;

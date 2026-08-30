@@ -102,6 +102,20 @@ function parseRelativeTime(text: string): string {
   return new Date(now - ms).toISOString();
 }
 
+/**
+ * Small unicode-safe string hash (FNV-1a, base36). Used for stable synthetic
+ * ids where the input is arbitrary scraped text — unlike btoa() it accepts any
+ * code point, so an emoji in a scraped profile line can't throw.
+ */
+function stableHash(input: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(36).padStart(7, '0');
+}
+
 // Tracks whether the extension context is still valid. Once invalidated
 // (e.g., extension reload/update), all chrome.runtime calls throw, so we
 // flip this flag and stop trying until the user reloads the page.
@@ -218,6 +232,14 @@ try {
     // and click an <a> tag matching the target path, and if all else fails, do
     // a hard navigation with location.href.
     if (message.type === 'SPA_NAVIGATE') {
+      // Both fields optional in the wire format, so validate before use —
+      // without a url the `catch` below used to "hard navigate" the tab to
+      // the string "undefined".
+      if (typeof message.url !== 'string' && typeof message.path !== 'string') {
+        console.warn(`${LOG} SPA_NAVIGATE with neither url nor path — ignoring`);
+        sendResponse({ ok: false, error: 'missing url/path' });
+        return true;
+      }
       try {
         const path = message.path || new URL(message.url).pathname;
         // Update the URL bar without a page reload
@@ -230,13 +252,21 @@ try {
         // Fallback: if the SPA router doesn't pick up the popstate (some Angular
         // apps need a real link click), find a matching <a> tag and click it
         setTimeout(() => {
-          const link = document.querySelector(`a[href="${path}"], a[href*="${path}"]`) as HTMLAnchorElement;
+          // `path` is interpolated into a CSS attribute-selector string, so
+          // backslashes and double quotes must be escaped — otherwise a stray
+          // quote makes querySelector throw a SyntaxError out of this timer
+          // (uncaught, and the click fallback silently never runs).
+          const q = String(path).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+          let link: HTMLAnchorElement | null = null;
+          try {
+            link = document.querySelector(`a[href="${q}"], a[href*="${q}"]`) as HTMLAnchorElement | null;
+          } catch { /* unusable selector — skip the click fallback */ }
           if (link) link.click();
         }, 500);
       } catch {
         // All SPA navigation strategies failed — hard navigate as last resort.
         // This will reload the page and re-initialize all content scripts.
-        window.location.href = message.url;
+        if (typeof message.url === 'string') window.location.href = message.url;
       }
       sendResponse({ ok: true });
       return true;
@@ -530,7 +560,11 @@ try {
           let profileId = '';
           const idFromAvatar = (avatarUrl || bgAvatar).match(/\/([0-9a-f]{6,})\//i);
           if (idFromAvatar) profileId = idFromAvatar[1].toLowerCase();
-          else profileId = `gc-${btoa(attrs.slice(0, 30)).slice(0, 12)}`;
+          // btoa() throws on any code point above U+00FF, so an emoji or
+          // accented character anywhere in the attrs line used to drop the
+          // whole feed item via the per-item catch. Hash the string instead —
+          // same purpose (a stable pseudo-id), no encoding constraints.
+          else profileId = `gc-${stableHash(attrs.slice(0, 30))}`;
 
           // All global chat messages share a single thread/contact ID
           messages.push({
@@ -623,6 +657,7 @@ const FP_ID = 'aggregaytor-floating-actions';
 let fpContactId = '';
 let fpPlatform = '';
 let _fpDragCleanup: (() => void) | null = null;
+let _fpEscapeCleanup: (() => void) | null = null;
 
 function injectFloatingCSS(): void {
   if (document.getElementById('aggregaytor-fp-css')) return;
@@ -742,9 +777,15 @@ function showFloatingPanel(contactId: string, platform: string): void {
   });
 
   panel.querySelector('.fp-close-btn')!.addEventListener('click', () => hideFloatingPanel());
-  document.addEventListener('keydown', (e) => {
+  // Escape-to-close. This used to be registered with `{ once: true }`, which
+  // detached the handler on the FIRST keydown of any kind — so Escape only
+  // worked if it happened to be the very next key the user pressed. The
+  // listener is now explicitly removed when the panel goes away instead.
+  const onEscape = (e: KeyboardEvent): void => {
     if (e.key === 'Escape' && document.getElementById(FP_ID)) hideFloatingPanel();
-  }, { once: true });
+  };
+  document.addEventListener('keydown', onEscape);
+  _fpEscapeCleanup = () => document.removeEventListener('keydown', onEscape);
 
   // Block — hide the profile on Sniffies map AND mark in aggregator.
   // When the user is viewing a profile (which is when this panel is shown),
@@ -803,12 +844,20 @@ function showFloatingPanel(contactId: string, platform: string): void {
     a.style.display = a.style.display === 'none' ? '' : 'none';
   });
 
-  // Notes save (debounced)
+  // Notes save (debounced).
+  // The contactId/platform are captured at INPUT time, not at flush time:
+  // fpContactId is module-level and showFloatingPanel rewrites it, so a
+  // profile switch inside the 800ms debounce window used to write the note
+  // the user typed for profile A onto profile B's thread_meta.
   let nt: ReturnType<typeof setTimeout> | null = null;
   panel.querySelector('#fp-notes-input')!.addEventListener('input', (e) => {
     if (nt) clearTimeout(nt);
+    const forContactId = fpContactId;
+    const forPlatform = fpPlatform;
+    const notes = (e.target as HTMLTextAreaElement).value;
     nt = setTimeout(() => {
-      safeSendMessage({ type: 'UPSERT_THREAD_META', contactId: fpContactId, platform: fpPlatform, updates: { notes: (e.target as HTMLTextAreaElement).value } }).catch(() => {});
+      if (!forContactId) return;
+      safeSendMessage({ type: 'UPSERT_THREAD_META', contactId: forContactId, platform: forPlatform, updates: { notes } }).catch(() => {});
       const st = panel.querySelector('#fp-status') as HTMLElement;
       if (st) { st.textContent = 'Saved'; setTimeout(() => { st.textContent = ''; }, 1500); }
     }, 800);
@@ -846,11 +895,17 @@ function showFloatingPanel(contactId: string, platform: string): void {
 
   // Phrases
   chrome.storage.local.get('aggregaytor_quick_phrases', (data: any) => {
-    const phrases = (data.aggregaytor_quick_phrases || ['Hey there!', "What's up?", 'Looking?']).slice(0, 3);
+    // Stored user data of unknown shape — coerce before any .length/.slice.
+    const rawPhrases = data?.aggregaytor_quick_phrases;
+    const phrases: string[] = (Array.isArray(rawPhrases) && rawPhrases.length
+      ? rawPhrases : ['Hey there!', "What's up?", 'Looking?'])
+      .filter((p: unknown) => typeof p === 'string' && p !== '')
+      .slice(0, 3);
     const c = panel.querySelector('#fp-phrases') as HTMLElement;
     if (!c) return;
-    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    c.innerHTML = phrases.map((p: string) => `<button class="fp-phrase-btn" title="${esc(p)}">${esc(p.length > 18 ? p.slice(0, 16) + '…' : p)}</button>`).join('');
+    // escHtml (module scope) is byte-for-byte the same escaper this used to
+    // redeclare locally.
+    c.innerHTML = phrases.map((p: string) => `<button class="fp-phrase-btn" title="${escHtml(p)}">${escHtml(p.length > 18 ? p.slice(0, 16) + '…' : p)}</button>`).join('');
     c.querySelectorAll('.fp-phrase-btn').forEach((btn, i) => {
       btn.addEventListener('click', () => {
         // Use postMessage to cross ISOLATED→MAIN world boundary
@@ -870,6 +925,10 @@ function hideFloatingPanel(): void {
   document.getElementById(FP_ID)?.remove();
   fpContactId = '';
   if (_fpDragCleanup) { _fpDragCleanup(); _fpDragCleanup = null; }
+  if (_fpEscapeCleanup) { _fpEscapeCleanup(); _fpEscapeCleanup = null; }
+  // showMapFilterPanel reuses FP_ID, so removing "the" panel here can also be
+  // removing the map-filter panel — take its listener down with it.
+  if (_mapFilterPanelCleanup) { _mapFilterPanelCleanup(); _mapFilterPanelCleanup = null; }
 }
 
 // ── Inline Profile Actions ─────────────────────────────────────────────────
@@ -897,6 +956,36 @@ const PROFILE_ACTIONS_CSS_ID = 'aggregaytor-profile-actions-css';
 
 const SNIFFIES_NOTES_KEY = 'aggregaytor_sniffies_notes_v1';
 const SNIFFIES_REMINDERS_KEY = 'aggregaytor_sniffies_reminders_v1';
+
+/**
+ * Read + JSON.parse a page-origin localStorage key, never throwing.
+ *
+ * localStorage on sniffies.com is shared with the host page, so every value we
+ * read back is untrusted input: it can be absent, corrupt, or deliberately
+ * poisoned. A bare `JSON.parse(localStorage.getItem(k) || '{}')` at the top of
+ * a UI builder used to abort that whole builder (the filter bar / filter panel
+ * simply never rendered) and surface as an uncaught error.
+ *
+ * The result is only accepted when it passes `isValid`; otherwise the caller's
+ * fallback is returned.
+ */
+function readLocalJson<T>(key: string, fallback: T, isValid: (v: unknown) => boolean): T {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    return isValid(parsed) ? (parsed as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+const isPlainObject = (v: unknown): boolean =>
+  !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** JSON.stringify + write to localStorage, never throwing (quota, private mode). */
+function writeLocalJson(key: string, value: unknown): void {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
 
 interface LocalReminder {
   id: string;            // matches SW reminder._id when round-tripped
@@ -1196,8 +1285,7 @@ function injectProfileActions(contactId: string, platform: string): void {
   el.className = useAnchor ? 'pa-anchored' : 'pa-floating';
 
   // Check if already blocked in the local map-filter blocklist
-  let blockedIds: string[] = [];
-  try { blockedIds = JSON.parse(localStorage.getItem('aggregaytor_map_blocked') || '[]'); } catch {}
+  const blockedIds = readLocalJson<string[]>('aggregaytor_map_blocked', [], Array.isArray);
   const isBlocked = blockedIds.includes(profileId);
 
   el.innerHTML = `
@@ -1450,7 +1538,10 @@ function injectProfileActions(contactId: string, platform: string): void {
   const hideBtn = el.querySelector('.pa-hide-btn') as HTMLButtonElement;
   hideBtn.addEventListener('click', () => {
     window.postMessage({ type: '__aggregaytor_block', profileId }, '*');
-    chrome.runtime.sendMessage({ type: 'PROFILE_BLOCKED', contactId, platform }).catch(() => {});
+    // safeSendMessage, not a bare chrome.runtime.sendMessage: this bar lives in
+    // the page until the user refreshes, so it routinely outlives an extension
+    // reload, and the resulting sync throw escapes .catch().
+    safeSendMessage({ type: 'PROFILE_BLOCKED', contactId, platform }).catch(() => {});
     hideBtn.textContent = '🚫 Hidden';
     hideBtn.disabled = true;
     showBlockToast(profileId);
@@ -1524,7 +1615,7 @@ function injectProfileActions(contactId: string, platform: string): void {
       const cur = el.querySelectorAll('.pa-star.active').length;
       const nr = r === cur ? 0 : r;
       stars.forEach((s, i) => s.classList.toggle('active', i < nr));
-      chrome.runtime.sendMessage({ type: 'SET_RATING', contactId, platform, rating: nr }).catch(() => {});
+      safeSendMessage({ type: 'SET_RATING', contactId, platform, rating: nr }).catch(() => {});
     });
   });
 
@@ -1726,7 +1817,7 @@ function injectProfileActions(contactId: string, platform: string): void {
     const orig = introBtn.textContent || '';
     introBtn.disabled = true;
     introBtn.textContent = '🎲 Sending…';
-    chrome.runtime.sendMessage({ type: 'SEND_GREETING', contactId, platform }).then((res: any) => {
+    safeSendMessage({ type: 'SEND_GREETING', contactId, platform }).then((res: any) => {
       const delaySec = Math.round(((res?.delay) || 0) / 1000);
       introBtn.textContent = `✓ Queued (${delaySec}s)`;
       setTimeout(() => { introBtn.textContent = orig; introBtn.disabled = false; }, 3000);
@@ -1742,7 +1833,7 @@ function injectProfileActions(contactId: string, platform: string): void {
   // OR present while local is empty (cross-device sync case). We never
   // overwrite a non-empty local value with an empty SW value because that
   // would erase a note the user just typed.
-  chrome.runtime.sendMessage({ type: 'GET_THREAD_META', contactId }).then((res: any) => {
+  safeSendMessage({ type: 'GET_THREAD_META', contactId }).then((res: any) => {
     const m = res?.meta || {};
     if (m.notes && !notesInput.value) {
       notesInput.value = m.notes;
@@ -1811,12 +1902,21 @@ function injectFilterBarCSS(): void {
 // status bar.
 let _originalBodyPaddingTop: string | null = null;
 
+// Detaches the three `window.addEventListener('message', …)` handlers that
+// showTopFilterBar() registers. Without this, every re-create of the bar (close
+// it, re-open it from the filter panel, navigate, …) left the previous set
+// attached to a bar that no longer exists — they kept running querySelector on
+// a detached tree for the life of the page.
+let _filterBarCleanup: (() => void) | null = null;
+
 function showTopFilterBar(): void {
   if (document.getElementById(FILTER_BAR_ID)) return;
+  // Drop any listeners left over from a previous bar before wiring new ones.
+  if (_filterBarCleanup) { _filterBarCleanup(); _filterBarCleanup = null; }
   injectFilterBarCSS();
 
-  const settings = JSON.parse(localStorage.getItem('aggregaytor_map_filter_settings') || '{}');
-  const blockedCount = (() => { try { return JSON.parse(localStorage.getItem('aggregaytor_map_blocked') || '[]').length; } catch { return 0; } })();
+  const settings = readLocalJson<Record<string, unknown>>('aggregaytor_map_filter_settings', {}, isPlainObject);
+  const blockedCount = readLocalJson<string[]>('aggregaytor_map_blocked', [], Array.isArray).length;
 
   const positions = [
     { key: 'hideBottom',     label: 'Btm' },
@@ -1893,11 +1993,11 @@ function showTopFilterBar(): void {
     const label = bar.querySelector('.fb-label');
     if (label) label.textContent = `Filter${onCount ? ` (${onCount})` : ''}:`;
     // Merge with existing settings (preserve text terms, blocked list, etc.)
-    const prev = JSON.parse(localStorage.getItem('aggregaytor_map_filter_settings') || '{}');
+    const prev = readLocalJson<Record<string, unknown>>('aggregaytor_map_filter_settings', {}, isPlainObject);
     delete (prev as any).blockedIds;
     const merged = { ...prev, ...update };
     delete (merged as any).blockedIds;
-    localStorage.setItem('aggregaytor_map_filter_settings', JSON.stringify(merged));
+    writeLocalJson('aggregaytor_map_filter_settings', merged);
     // v0.57.57: tag with source so the floating Map Filters window
     // (also listening on this message) can ignore its own echoes and
     // re-render only when the OTHER UI changed settings.
@@ -1913,6 +2013,10 @@ function showTopFilterBar(): void {
   // the _source check so we don't loop. localStorage is the source of
   // truth; we just re-read and update checkbox + chip-on states.
   const topbarSyncListener = (event: MessageEvent) => {
+    // Same-frame posts only. Every legitimate sender (this bridge, the MAIN
+    // world script) posts into this window; without the check any embedded
+    // iframe could drive our filter UI.
+    if (event.source !== window) return;
     if (!event.data || event.data.type !== '__aggregaytor_map_filter_settings') return;
     if (event.data._source === 'topbar') return; // own post, skip
     const settings = event.data.update || {};
@@ -1935,11 +2039,9 @@ function showTopFilterBar(): void {
     window.postMessage({ type: '__aggregaytor_undo_hide' }, '*');
     // Update count after a brief delay
     setTimeout(() => {
-      try {
-        const count = JSON.parse(localStorage.getItem('aggregaytor_map_blocked') || '[]').length;
-        const countEl = bar.querySelector('.fb-hide-count');
-        if (countEl) countEl.textContent = `${count} hidden`;
-      } catch {}
+      const count = readLocalJson<string[]>('aggregaytor_map_blocked', [], Array.isArray).length;
+      const countEl = bar.querySelector('.fb-hide-count');
+      if (countEl) countEl.textContent = `${count} hidden`;
     }, 200);
   });
 
@@ -1975,9 +2077,11 @@ function showTopFilterBar(): void {
   refreshRemindersChipCount();
   // Listen for reminder-changed events (e.g. when a profile saves a new
   // reminder via the action bar) so the chip count stays in sync.
-  window.addEventListener('message', (ev: MessageEvent) => {
+  const remindersChangedListener = (ev: MessageEvent) => {
+    if (ev.source !== window) return;
     if (ev.data?.type === '__aggregaytor_reminders_changed') refreshRemindersChipCount();
-  });
+  };
+  window.addEventListener('message', remindersChangedListener);
   bar.querySelector('.fb-reminders')!.addEventListener('click', () => {
     showRemindersPanel();
   });
@@ -1985,6 +2089,7 @@ function showTopFilterBar(): void {
   // Close bar
   bar.querySelector('.fb-close')!.addEventListener('click', () => {
     bar.remove();
+    removeBarListeners();
     document.body.style.paddingTop = _originalBodyPaddingTop ?? '';
     _originalBodyPaddingTop = null;
     try { localStorage.setItem('aggregaytor_top_filter_bar_hidden', 'true'); } catch {}
@@ -1996,11 +2101,12 @@ function showTopFilterBar(): void {
   // previously with only ~41 waiting profiles out of 3000+ and <5
   // visible on screen at a time, it felt like the filter wasn't working.
   const statsListener = (event: MessageEvent) => {
+    if (event.source !== window) return;
     if (!event.data || event.data.type !== '__aggregaytor_filter_stats') return;
     const s = event.data.stats;
     if (!s) return;
     const bar = document.getElementById(FILTER_BAR_ID);
-    if (!bar) { window.removeEventListener('message', statsListener); return; }
+    if (!bar) { removeBarListeners(); return; }
     // Update chip labels — show "⏳ <24h (3)" when 3 markers are hidden
     const chip24 = bar.querySelector('[data-chip="hideRecentChats"]');
     const chipEver = bar.querySelector('[data-chip="hideAnyChats"]');
@@ -2023,6 +2129,14 @@ function showTopFilterBar(): void {
     if (countEl) countEl.textContent = `${total} hidden${s.waiting ? ` · ${s.waiting} waiting` : ''}`;
   };
   window.addEventListener('message', statsListener);
+
+  function removeBarListeners(): void {
+    window.removeEventListener('message', topbarSyncListener);
+    window.removeEventListener('message', remindersChangedListener);
+    window.removeEventListener('message', statsListener);
+    _filterBarCleanup = null;
+  }
+  _filterBarCleanup = removeBarListeners;
 }
 
 function removeTopFilterBar(): void {
@@ -2032,6 +2146,7 @@ function removeTopFilterBar(): void {
     document.body.style.paddingTop = _originalBodyPaddingTop ?? '';
     _originalBodyPaddingTop = null;
   }
+  if (_filterBarCleanup) { _filterBarCleanup(); _filterBarCleanup = null; }
 }
 
 /** Show a brief toast in the bottom-right to confirm a block action. */
@@ -2194,8 +2309,12 @@ function showRemindersPanel(): void {
 // ── Map Filter Floating Panel ─────────────────────────────────────────────
 // Shows filter controls instead of profile actions when on the map view
 
+/** Detaches showMapFilterPanel's window message listener. See fp-close-btn. */
+let _mapFilterPanelCleanup: (() => void) | null = null;
+
 function showMapFilterPanel(): void {
   if (document.getElementById(FP_ID)) return; // already showing something
+  if (_mapFilterPanelCleanup) { _mapFilterPanelCleanup(); _mapFilterPanelCleanup = null; }
 
   injectFloatingCSS();
   const panel = document.createElement('div');
@@ -2219,7 +2338,7 @@ function showMapFilterPanel(): void {
   const collapsed = localStorage.getItem('aggregaytor_fp_collapsed') === 'true';
   if (collapsed) panel.classList.add('collapsed');
 
-  const settings = JSON.parse(localStorage.getItem('aggregaytor_map_filter_settings') || '{}');
+  const settings = readLocalJson<Record<string, any>>('aggregaytor_map_filter_settings', {}, isPlainObject);
 
   // Inject the CSS for the redesigned filter panel (only once per page load).
   if (!document.getElementById('aggregaytor-fp-filters-css')) {
@@ -2246,6 +2365,14 @@ function showMapFilterPanel(): void {
   }
 
   const posAttributes = ['Bottom', 'VersBottom', 'Vers', 'VersTop', 'Top', 'Side', 'Unspecified'];
+
+  // Filter terms are rendered into a <textarea> below via innerHTML. They come
+  // from page-origin localStorage, so they must be (a) shape-checked — a
+  // non-array would throw on .join and kill the whole panel — and (b) HTML
+  // escaped, or a term containing "</textarea>" breaks out of the element and
+  // injects markup into our own UI.
+  const termLines = (v: unknown): string =>
+    escHtml((Array.isArray(v) ? v : []).filter((t) => typeof t === 'string').join('\n'));
 
   panel.innerHTML = `
     <div class="fp-header">
@@ -2291,7 +2418,7 @@ function showMapFilterPanel(): void {
           </label>
         </div>
         <div class="fp-filter-wrap ${settings.excludeEnabled ? '' : 'fp-disabled'}" data-wrap-for="excludeEnabled">
-          <textarea class="fp-terms" id="fp-exclude-terms" rows="2" placeholder="one term per line — e.g.&#10;trans&#10;no fats">${(settings.excludeTerms || []).join('\n')}</textarea>
+          <textarea class="fp-terms" id="fp-exclude-terms" rows="2" placeholder="one term per line — e.g.&#10;trans&#10;no fats">${termLines(settings.excludeTerms)}</textarea>
         </div>
       </div>
 
@@ -2304,7 +2431,7 @@ function showMapFilterPanel(): void {
           </label>
         </div>
         <div class="fp-filter-wrap ${settings.includeEnabled ? '' : 'fp-disabled'}" data-wrap-for="includeEnabled">
-          <textarea class="fp-terms" id="fp-include-terms" rows="2" placeholder="one term per line — e.g.&#10;bbc&#10;daddy">${(settings.includeTerms || []).join('\n')}</textarea>
+          <textarea class="fp-terms" id="fp-include-terms" rows="2" placeholder="one term per line — e.g.&#10;bbc&#10;daddy">${termLines(settings.includeTerms)}</textarea>
         </div>
       </div>
 
@@ -2342,6 +2469,10 @@ function showMapFilterPanel(): void {
   });
   panel.querySelector('.fp-close-btn')!.addEventListener('click', () => {
     panel.remove();
+    // The panel can be re-created on every return to the map view, so its
+    // window message listener has to go with it — otherwise each open/close
+    // cycle left another handler bound to a detached panel.
+    if (_mapFilterPanelCleanup) { _mapFilterPanelCleanup(); _mapFilterPanelCleanup = null; }
   });
 
   // ── Auto-Apply Filters ──────────────────────────────────────────────────
@@ -2362,14 +2493,14 @@ function showMapFilterPanel(): void {
 
     // Merge with existing settings in localStorage so we don't clobber
     // anything that the side panel wrote but this panel doesn't expose.
-    const prev = JSON.parse(localStorage.getItem('aggregaytor_map_filter_settings') || '{}');
+    const prev = readLocalJson<Record<string, unknown>>('aggregaytor_map_filter_settings', {}, isPlainObject);
     // Never carry blockedIds through the filter-panel path. BLOCKED_KEY is
     // the single source of truth for hides — letting a stale array leak
     // through here caused freshly-hidden profiles to reappear seconds later.
     delete (prev as any).blockedIds;
     const merged = { ...prev, ...update };
     delete (merged as any).blockedIds;
-    localStorage.setItem('aggregaytor_map_filter_settings', JSON.stringify(merged));
+    writeLocalJson('aggregaytor_map_filter_settings', merged);
 
     // Cross the ISOLATED→MAIN world boundary via postMessage.
     // sniffies.ts relays this to the map-filters CustomEvent listener.
@@ -2433,6 +2564,8 @@ function showMapFilterPanel(): void {
   // echoing back. The _source check prevents the loop. localStorage is
   // the source of truth — we just re-read it and refresh the controls.
   const mapfiltersSyncListener = (event: MessageEvent) => {
+    // Same-frame posts only — see the note on topbarSyncListener.
+    if (event.source !== window) return;
     if (!event.data || event.data.type !== '__aggregaytor_map_filter_settings') return;
     if (event.data._source === 'mapfilters') return;
     const settings = event.data.update || {};
@@ -2441,10 +2574,14 @@ function showMapFilterPanel(): void {
       const key = el.dataset.key as string;
       el.checked = !!settings[key];
     });
+    // `.value` is a safe sink (no markup parsing) but the shape still has to
+    // be checked — settings arrive on a window message any page script can post.
+    const asLines = (v: unknown): string =>
+      (Array.isArray(v) ? v : []).filter((t) => typeof t === 'string').join('\n');
     const exTerms = panel.querySelector('#fp-exclude-terms') as HTMLTextAreaElement;
-    if (exTerms) exTerms.value = (settings.excludeTerms || []).join('\n');
+    if (exTerms) exTerms.value = asLines(settings.excludeTerms);
     const inTerms = panel.querySelector('#fp-include-terms') as HTMLTextAreaElement;
-    if (inTerms) inTerms.value = (settings.includeTerms || []).join('\n');
+    if (inTerms) inTerms.value = asLines(settings.includeTerms);
     // Refresh visual switch / chip states without re-broadcasting
     panel.querySelectorAll('.fp-switch').forEach((sw) => {
       const key = (sw as HTMLElement).dataset.switch;
@@ -2462,6 +2599,7 @@ function showMapFilterPanel(): void {
     });
   };
   window.addEventListener('message', mapfiltersSyncListener);
+  _mapFilterPanelCleanup = () => window.removeEventListener('message', mapfiltersSyncListener);
 }
 
 // ── URL Change Detection ────────────────────────────────────────────────────
@@ -2811,8 +2949,15 @@ try {
       }
     }
   });
-  chatPanelObserver.observe(document.body, { childList: true, subtree: true });
-} catch { /* MutationObserver unavailable */ }
+  // This bridge is registered with `run_at: document_start`, so at this point
+  // in the module body `document.body` is still null — `observe(null)` threw a
+  // TypeError that the catch below swallowed, and the observer was never
+  // installed at all. Observing <html> covers <body> once the parser creates
+  // it, and subtree:true means we still see every chat row insertion.
+  chatPanelObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+} catch (err) {
+  console.warn(`${LOG} chat-panel MutationObserver setup failed:`, (err as Error)?.message || err);
+}
 
 // ── URL Change Polling ──────────────────────────────────────────────────────
 // Poll every 3 seconds because pushState (used by Angular Router for in-app
@@ -3165,7 +3310,7 @@ if (checkContext()) {
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;
     if (event.data?.type !== '__aggregaytor_memory_response') return;
-    latestCaches = event.data.caches || {};
+    latestCaches = (event.data.caches && typeof event.data.caches === 'object') ? event.data.caches : {};
   });
 
   async function reportOnce() {
@@ -3184,7 +3329,10 @@ if (checkContext()) {
       });
     } catch { /* SW gone — next tick will retry */ }
   }
-  // First report after 5s (let MAIN world initialize), then every 60s
+  // First report after 5s (let MAIN world initialize), then every 60s.
+  // Registered so shutdownBackgroundTimers() clears it once the extension
+  // context is invalidated — otherwise it kept ticking (and postMessaging to
+  // the page) for the life of the orphaned tab.
   setTimeout(reportOnce, 5000);
-  setInterval(reportOnce, 60_000);
+  registerBackgroundTimer(setInterval(reportOnce, 60_000));
 })();

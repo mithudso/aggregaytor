@@ -12,25 +12,37 @@ function metaId(contactId: string): string {
   return `meta:${contactId}`;
 }
 
-const DEFAULTS: Omit<ThreadMetaDoc, '_id' | '_rev' | 'contactId' | 'platform' | 'createdAt' | 'updatedAt'> = {
-  docType: 'thread_meta',
-  archived: false,
-  hidden: false,
-  hiddenUntilResponse: false,
-  bookmarked: false,
-  favorited: false,
-  alias: '',
-  tags: [],
-  notes: '',
-  deletedChatCount: 0,
-  autoRespondEnabled: false,
-  autoRespondSettings: { ...DEFAULT_AUTO_RESPOND_SETTINGS },
-  generatedNickname: '',
-  blockedByThem: false,
-  distance: '',
-  sentiment: null,
-  preferenceScore: null,
-};
+type ThreadMetaDefaults = Omit<
+  ThreadMetaDoc,
+  '_id' | '_rev' | 'contactId' | 'platform' | 'createdAt' | 'updatedAt'
+>;
+
+/**
+ * Built per call — a shared literal would hand every new doc the SAME `tags`
+ * array and `autoRespondSettings` object, so one caller mutating either
+ * (e.g. `meta.tags.push(...)`) would corrupt the defaults for every later doc.
+ */
+function threadMetaDefaults(): ThreadMetaDefaults {
+  return {
+    docType: 'thread_meta',
+    archived: false,
+    hidden: false,
+    hiddenUntilResponse: false,
+    bookmarked: false,
+    favorited: false,
+    alias: '',
+    tags: [],
+    notes: '',
+    deletedChatCount: 0,
+    autoRespondEnabled: false,
+    autoRespondSettings: { ...DEFAULT_AUTO_RESPOND_SETTINGS },
+    generatedNickname: '',
+    blockedByThem: false,
+    distance: '',
+    sentiment: null,
+    preferenceScore: null,
+  };
+}
 
 export async function getThreadMeta(
   contactId: string,
@@ -54,7 +66,7 @@ export async function getThreadMeta(
  * edits don't fan out into unnecessary model retraining work.
  */
 const SIGNAL_FIELDS = new Set<keyof ThreadMetaDoc>([
-  'bookmarked', 'favorited', 'rating' as any,
+  'bookmarked', 'favorited', 'rating',
   'blockedByThem', 'archived', 'hidden',
 ]);
 
@@ -79,25 +91,23 @@ export async function upsertThreadMeta(
   // signal field's proposed value to the existing value; if any differ, we
   // bump signalsUpdatedAt so the incremental trainer picks this thread up
   // on its next pass. This keeps the training scan O(Δ) instead of O(N).
-  let signalChanged = !existing; // new docs always count as a signal change if they carry any signal
-  if (existing) {
-    for (const field of SIGNAL_FIELDS) {
-      if (field in updates) {
-        const next = (updates as any)[field];
-        const prev = (existing as any)[field];
-        if (next !== prev) { signalChanged = true; break; }
-      }
-    }
-  } else {
-    // New doc — count as a signal change only if any signal field is set
-    signalChanged = false;
-    for (const field of SIGNAL_FIELDS) {
-      if (field in updates && (updates as any)[field]) { signalChanged = true; break; }
+  let signalChanged = false;
+  for (const field of SIGNAL_FIELDS) {
+    if (!(field in updates)) continue;
+    const next = (updates as Record<string, unknown>)[field];
+    // Existing doc: a signal changed if the proposed value differs.
+    // New doc: only a truthy signal counts (an all-false doc carries no signal).
+    if (existing
+      ? next !== (existing as unknown as Record<string, unknown>)[field]
+      : !!next
+    ) {
+      signalChanged = true;
+      break;
     }
   }
 
   const doc: ThreadMetaDoc = {
-    ...DEFAULTS,
+    ...threadMetaDefaults(),
     ...existing,
     ...updates,
     _id: id,

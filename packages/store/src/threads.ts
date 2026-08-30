@@ -145,17 +145,18 @@ export async function getThreadUnreadCounts(
   db?: StoreDatabase,
 ): Promise<Map<string, number>> {
   const store = db || await getDB();
-  const result = await store.allDocs({
-    startkey: 'msg:',
-    endkey: 'msg:\uffff',
-    include_docs: true,
+  // Filter in the store and project down to contactId. The previous
+  // allDocs({ include_docs: true }) scan materialised EVERY message document \u2014
+  // bodies and all \u2014 purely to count the unread ones, which on a large inbox
+  // is several MB of transient heap in the service worker.
+  const result = await store.find<MessageDoc>({
+    selector: { docType: 'message', read: false, direction: 'in' },
+    fields: ['contactId'],
   });
   const counts = new Map<string, number>();
-  for (const row of result.rows) {
-    const doc = row.doc as MessageDoc;
-    if (doc && !doc.read && doc.direction === 'in') {
-      counts.set(doc.contactId, (counts.get(doc.contactId) || 0) + 1);
-    }
+  for (const doc of result.docs) {
+    if (!doc.contactId) continue;
+    counts.set(doc.contactId, (counts.get(doc.contactId) || 0) + 1);
   }
   return counts;
 }

@@ -60,8 +60,10 @@ function normalizeArray(values?: string[]): string[] {
     : [];
 }
 
-function buildNearDuplicateMetadata(input: Partial<ContextRecordInput>) {
-  const basisText = buildCombinedRecordText(input);
+function buildNearDuplicateMetadata(
+  input: Partial<ContextRecordInput>,
+  basisText = buildCombinedRecordText(input),
+) {
   const signature = buildMinHashSignature(basisText);
   const bodyTokens = tokenizeIndexText(
     (input.body || input.summary || input.excerpt || input.title || '') as string,
@@ -87,7 +89,9 @@ export function createContextRecord(kind: string, input: ContextRecordInput = {}
   const normalized = { title, summary, excerpt, body, keywords, entities, source_type: sourceType, segment };
   const combinedText = buildCombinedRecordText(normalized);
   const exactHash = input.exact_hash || stableContentHash(combinedText);
-  const nearDuplicateMeta = buildNearDuplicateMetadata(normalized);
+  // Same basis string the hash used — rebuilding it here concatenated every
+  // field a second time for no gain.
+  const nearDuplicateMeta = buildNearDuplicateMetadata(normalized, combinedText);
   const searchFields = buildRecordSearchFields(normalized);
 
   const updatedAt = String(input.updated_at || input.generated_at || new Date().toISOString());

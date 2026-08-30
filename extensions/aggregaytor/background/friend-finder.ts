@@ -121,16 +121,31 @@ export async function addToIgnoreList(ids: string[]): Promise<FFState> {
   return s;
 }
 
+const DEFAULT_RUN_STATE: FFRunState = {
+  state: 'idle', queue: [], approved: [], sentCount: 0, failedCount: 0,
+  startedAt: 0, lastSendAt: 0, nextSendAt: 0,
+};
+
 export async function getRunState(): Promise<FFRunState> {
   try {
     const got = await chrome.storage.session.get(FF_RUN_KEY);
     const stored = got?.[FF_RUN_KEY];
-    if (stored && typeof stored === 'object') return stored as FFRunState;
+    if (stored && typeof stored === 'object') {
+      // Normalise against the defaults rather than trusting the stored shape.
+      // A state written by an older build (or a partially-written record) could
+      // otherwise hand the alarm tick a non-array `queue`, and `queue.shift()`
+      // would throw inside the alarm handler and strand the run.
+      return {
+        ...DEFAULT_RUN_STATE,
+        ...stored,
+        queue: Array.isArray(stored.queue) ? stored.queue : [],
+        approved: Array.isArray(stored.approved) ? stored.approved : [],
+        sentCount: Number(stored.sentCount) || 0,
+        failedCount: Number(stored.failedCount) || 0,
+      };
+    }
   } catch {}
-  return {
-    state: 'idle', queue: [], approved: [], sentCount: 0, failedCount: 0,
-    startedAt: 0, lastSendAt: 0, nextSendAt: 0,
-  };
+  return { ...DEFAULT_RUN_STATE };
 }
 
 export async function setRunState(runState: FFRunState): Promise<void> {

@@ -27,6 +27,14 @@
  * the perf instance so you can inspect it from DevTools:
  *   __aggregaytor_perf.stats()
  *   __aggregaytor_perf.reset()
+ *
+ * That assignment lives in the content script (e.g.
+ * `extensions/aggregaytor/content/sniffies.ts`), not here, and it is a
+ * deliberate exception to the repo's "don't expose anything on `window.*`
+ * from MAIN-world scripts" rule: the host page can read it. Keep it that way
+ * -- counters are timing metadata only. Do not attach anything privileged
+ * (auth headers, message bodies, adapter instances) to this object, and do
+ * not add further globals here.
  */
 
 interface PerfEntry {

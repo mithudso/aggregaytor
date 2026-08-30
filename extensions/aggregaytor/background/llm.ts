@@ -192,6 +192,13 @@ function getProviderRPMUsed(provider: string): number {
 function recordProviderRequest(provider: string): void {
   const now = Date.now();
   let timestamps = providerRequestCounts.get(provider) || [];
+  // Defensive ceiling. The 60s prune below is the primary bound, but it only
+  // fires once the OLDEST entry has aged out — a burst that stays inside a
+  // single 60s window is otherwise unbounded. PROVIDER_TS_HARD_CAP was
+  // declared for exactly this and had never been enforced.
+  if (timestamps.length >= PROVIDER_TS_HARD_CAP) {
+    timestamps = timestamps.slice(-Math.floor(PROVIDER_TS_HARD_CAP / 2));
+  }
   // v0.57.36: prune-on-write so the array is always exactly the 60s window.
   // Old code only pruned on read AND only after the 2000-entry hard cap was
   // reached. On a chronically-misbehaving SW this could pin ~16KB per provider
@@ -223,7 +230,10 @@ async function getBestProvider(): Promise<LLMConfig> {
 
   console.log(`${LOG} ${primary.provider} near rate limit (${getProviderRPMUsed(primary.provider)}/${PROVIDER_RPM[primary.provider] || '?'} RPM), cycling...`);
 
-  const keys = await getAllProviderKeys();
+  // Copy before mutating: getAllProviderKeys() hands back the object held in
+  // _storageCache, so writing the primary key into it would poison that cache
+  // for every later reader (making a never-persisted key look persisted).
+  const keys = { ...(await getAllProviderKeys()) };
   // Also include the primary key
   keys[primary.provider] = primary.apiKey;
 
@@ -321,6 +331,11 @@ let requestTimestamps: number[] = [];
 let backoffUntil = 0;
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 2000;
+/** Per-attempt provider request budget. Comfortably above a normal completion
+ *  (our max_tokens tops out at 1024) but finite, so one wedged connection can't
+ *  block the serial queue forever. Timeouts surface as an AbortError and go
+ *  through the existing network-error retry path. */
+const LLM_FETCH_TIMEOUT_MS = 60_000;
 let rateLimitLoggedAt = 0;
 
 function isRateLimited(maxPerMin: number): boolean {
@@ -334,6 +349,20 @@ async function processQueue(): Promise<void> {
   if (queueProcessing) return;
   queueProcessing = true;
 
+  // try/finally is load-bearing: the loop body awaits getLLMRateSettings(),
+  // which reads chrome.storage and CAN reject. Without the finally, that
+  // rejection escaped with queueProcessing still true, permanently wedging
+  // the queue for the rest of the service-worker's life — every subsequent
+  // queuedFetch() would push a request that nothing ever drained, so its
+  // promise never settled and the caller hung forever.
+  try {
+    await drainQueue();
+  } finally {
+    queueProcessing = false;
+  }
+}
+
+async function drainQueue(): Promise<void> {
   while (requestQueue.length > 0) {
     sortQueueByPriority(); // interactive requests first
     const rateSettings = await getLLMRateSettings();
@@ -428,8 +457,6 @@ async function processQueue(): Promise<void> {
       }
     }
   }
-
-  queueProcessing = false;
 }
 
 /**
@@ -466,13 +493,26 @@ async function queuedFetch(url: string, init: RequestInit, feature: string): Pro
   return new Promise((resolve, reject) => {
     requestQueue.push({
       id: `${feature}-${Date.now()}`,
-      execute: () => fetch(url, init),
+      // The queue drains SERIALLY, so a single hung provider connection would
+      // otherwise stall every other LLM request behind it indefinitely. The
+      // signal is constructed per attempt so each retry gets a fresh budget.
+      execute: () => fetch(url, {
+        ...init,
+        signal: typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+          ? AbortSignal.timeout(LLM_FETCH_TIMEOUT_MS)
+          : undefined,
+      }),
       resolve,
       reject,
       retries: 0,
       feature,
     });
-    processQueue();
+    // Not awaited (the per-request promise is what the caller waits on), so
+    // attach a handler — an unhandled rejection here would surface as a bogus
+    // top-level error in the rolling error log.
+    processQueue().catch(err => {
+      console.warn(`${LOG} queue processor aborted:`, (err as Error)?.message || err);
+    });
   });
 }
 
@@ -487,6 +527,10 @@ export async function getLLMConfig(): Promise<LLMConfig> {
 
 /**
  * Get all configured API keys for failover.
+ *
+ * NOTE: the returned object is the cached instance, not a copy — callers that
+ * intend to add or override entries MUST spread it first, or they will mutate
+ * the shared settings cache.
  */
 export async function getAllProviderKeys(): Promise<Record<string, string>> {
   const keys = await getCachedStorage<Record<string, string>>(PROVIDER_KEYS_KEY);
@@ -518,6 +562,8 @@ export async function setProviderModelOverride(provider: string, model: string):
   await chrome.storage.local.set({ [PROVIDER_MODELS_KEY]: next });
   invalidateStorageCache(PROVIDER_MODELS_KEY);
 }
+/** NOTE: like getAllProviderKeys, this returns the cached instance. Spread it
+ *  before adding or overriding entries. */
 export async function getAllProviderModels(): Promise<Record<string, string>> {
   const got = await getCachedStorage<Record<string, string>>(PROVIDER_MODELS_KEY);
   return got || {};
@@ -732,10 +778,6 @@ export async function deriveStyleGuide(sentMessages: Message[]): Promise<string>
   return traits.join('. ') + '.';
 }
 
-async function buildSystemPrompt(contactName: string, platform: string): Promise<string> {
-  return buildSystemPromptWithContext(contactName, platform);
-}
-
 /**
  * Compose the suggestions system prompt from modular fragments, optionally
  * including a per-contact dossier slice. `contactId` is optional — when the
@@ -786,9 +828,14 @@ const responseCache = new LruIdbCache<{ response: string; tokens: number }>({
 });
 
 function getCacheKey(systemPrompt: string, userPrompt: string, feature: string): string {
-  // Simple hash — same prompt = same response (within TTL)
+  // Hash the FULL prompts, not slices. The old key hashed only the first 200
+  // chars of the system prompt plus the last 500 of the user prompt, so two
+  // requests that differed only in the middle collided — and this key also
+  // drives in-flight coalescing, so a collision meant one contact's response
+  // was handed to another's request. Prompts are a few KB at most, so hashing
+  // all of it is negligible. Lengths are mixed in as a cheap extra discriminator.
   let hash = 0;
-  const str = `${feature}:${systemPrompt.slice(0, 200)}:${userPrompt.slice(-500)}`;
+  const str = `${feature}:${systemPrompt.length}:${userPrompt.length}:${systemPrompt}:${userPrompt}`;
   for (let i = 0; i < str.length; i++) {
     hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
   }
@@ -846,6 +893,17 @@ const _contextBuilderCache = new Map<string, { value: string; time: number }>();
 const CONTEXT_BUILDER_TTL_MS = 30_000;
 const CONTEXT_BUILDER_CAP = 200;
 
+/** Serialize a message window to the `Speaker: body` transcript form, with
+ *  long bodies compacted. Single definition — three copies of this loop used
+ *  to be inlined across buildConversationContext and
+ *  getCompactConversationContext. */
+function renderTranscript(messages: Message[], contactName: string): string {
+  return messages.map(m => {
+    const body = m.body.length > 100 ? m.body.slice(0, 100) + '...' : m.body;
+    return `${m.direction === 'out' ? 'You' : contactName}: ${body}`;
+  }).join('\n');
+}
+
 function buildConversationContext(messages: Message[], contactName: string, feature = 'suggestions'): string {
   const windowSize = CONTEXT_WINDOWS[feature] || 15;
   const recent = messages.slice(-windowSize);
@@ -861,10 +919,7 @@ function buildConversationContext(messages: Message[], contactName: string, feat
   }
 
   // Context compaction: for long messages, truncate to first 100 chars
-  const value = recent.map(m => {
-    const body = m.body.length > 100 ? m.body.slice(0, 100) + '...' : m.body;
-    return `${m.direction === 'out' ? 'You' : contactName}: ${body}`;
-  }).join('\n');
+  const value = renderTranscript(recent, contactName);
 
   _contextBuilderCache.set(cacheKey, { value, time: Date.now() });
   if (_contextBuilderCache.size > CONTEXT_BUILDER_CAP) {
@@ -1101,11 +1156,7 @@ async function getCompactConversationContext(
   // (TTL is enforced inside LruIdbCache.get; we only need the message-count
   //  proximity check here.)
   if (cached && Math.abs(cached.messageCount - olderMessages.length) < 5) {
-    const recentContext = recentMessages.map(m => {
-      const body = m.body.length > 100 ? m.body.slice(0, 100) + '...' : m.body;
-      return `${m.direction === 'out' ? 'You' : contactName}: ${body}`;
-    }).join('\n');
-    return `[Earlier conversation summary: ${cached.summary}]\n\n${recentContext}`;
+    return `[Earlier conversation summary: ${cached.summary}]\n\n${renderTranscript(recentMessages, contactName)}`;
   }
 
   // Generate a local summary of older messages (no LLM call)
@@ -1119,12 +1170,7 @@ async function getCompactConversationContext(
     summary, messageCount: olderMessages.length,
   }).catch(() => {});
 
-  const recentContext = recentMessages.map(m => {
-    const body = m.body.length > 100 ? m.body.slice(0, 100) + '...' : m.body;
-    return `${m.direction === 'out' ? 'You' : contactName}: ${body}`;
-  }).join('\n');
-
-  return `[Earlier: ${summary}]\n\n${recentContext}`;
+  return `[Earlier: ${summary}]\n\n${renderTranscript(recentMessages, contactName)}`;
 }
 
 function extractTopics(messages: Message[]): string {
@@ -1170,6 +1216,11 @@ async function callProvider(
   userPrompt: string,
   feature: string,
   opts?: { temperature?: number; maxTokens?: number; jsonMode?: boolean },
+  // Providers already tried in this logical call, for the 429-failover chain
+  // below. Without it two rate-limited providers ping-pong forever: A 429s →
+  // failover picks B (order skips only the CURRENT provider) → B 429s →
+  // failover picks A again, recursing until the stack blows.
+  attemptedProviders?: Set<string>,
 ): Promise<string> {
   totalApiCalls++;
 
@@ -1202,7 +1253,11 @@ async function callProvider(
   switch (routedConfig.provider) {
     case 'gemini': {
       const model = routedConfig.model || DEFAULT_MODELS.gemini;
-      url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${routedConfig.apiKey}`;
+      // The key goes in the query string for this provider, so it MUST be
+      // percent-encoded — an unencoded '&' or '#' in a pasted key silently
+      // truncates it and corrupts the request (model-updater.ts already does
+      // this; this call site did not).
+      url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(routedConfig.apiKey)}`;
       init = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1338,12 +1393,15 @@ async function callProvider(
   const res = await queuedFetch(url, init, feature);
 
   if (!res.ok) {
-    // On 429 rate limit, try failover to another provider
+    // On 429 rate limit, try failover to another provider we haven't already
+    // burned in this call chain.
     if (res.status === 429) {
+      const attempted = attemptedProviders || new Set<string>();
+      attempted.add(routedConfig.provider);
       const failoverConfig = await getConfigWithFailover(routedConfig.provider);
-      if (failoverConfig.provider !== routedConfig.provider) {
+      if (failoverConfig.provider !== routedConfig.provider && !attempted.has(failoverConfig.provider)) {
         console.log(`${LOG} Failing over from ${routedConfig.provider} to ${failoverConfig.provider}`);
-        return callProvider(failoverConfig, systemPrompt, userPrompt, feature, opts);
+        return callProvider(failoverConfig, systemPrompt, userPrompt, feature, opts, attempted);
       }
     }
     const err = await res.text();
@@ -1372,27 +1430,10 @@ async function callProvider(
   return result;
 }
 
-// Legacy wrappers for backward compatibility
-async function callGemini(config: LLMConfig, systemPrompt: string, conversation: string): Promise<string[]> {
-  const text = await callProvider(config, systemPrompt,
-    `Here is the conversation:\n\n${conversation}\n\nGenerate 3-4 suggested responses as a JSON array of strings.`,
-    'suggestions', { jsonMode: true });
-  return parseJsonArray(text);
-}
-
-async function callOpenAI(config: LLMConfig, systemPrompt: string, conversation: string): Promise<string[]> {
-  const text = await callProvider(config, systemPrompt,
-    `Here is the conversation:\n\n${conversation}\n\nGenerate 3-4 suggested responses as a JSON array of strings.`,
-    'suggestions', { jsonMode: true });
-  return parseJsonArray(text);
-}
-
-async function callAnthropic(config: LLMConfig, systemPrompt: string, conversation: string): Promise<string[]> {
-  const text = await callProvider(config, systemPrompt,
-    `Here is the conversation:\n\n${conversation}\n\nGenerate 3-4 suggested responses as a JSON array of strings.`,
-    'suggestions');
-  return parseJsonArray(text);
-}
+// (Removed: callGemini / callOpenAI / callAnthropic. They were labelled
+// "legacy wrappers for backward compatibility" but had no callers left —
+// every provider now goes through callProvider() and generateSuggestions()
+// builds the same prompt inline.)
 
 // ── Local fallback ──────────────────────────────────────────────────────────
 
@@ -1703,13 +1744,10 @@ async function buildAutoRespondPrompt(
   return sections.join('\n\n');
 }
 
-function buildGreetingPrompt(platform: string): string {
-  const hour = new Date().getHours();
-  const timeOfDay = hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : hour < 21 ? 'evening' : 'night';
-  return `Write a single casual, friendly greeting for a ${timeOfDay} chat on ${platform}.
-Be natural and confident, not desperate or overly eager. One short sentence.
-Return ONLY a JSON object: { "response": "your greeting", "tier": "low", "reason": "greeting" }`;
-}
+// (Removed: buildGreetingPrompt. generateGreeting() built this string and then
+// threw it away — it delegates to generateAutoResponse() with an empty message
+// list, which composes its own prompt. The dead builder made it look as though
+// greetings had a dedicated prompt when they never did.)
 
 export interface AutoRespondResult {
   response: string;
@@ -1818,7 +1856,6 @@ export async function generateGreeting(
   platform: string,
 ): Promise<AutoRespondResult> {
   const config = await getBestProvider();
-  const prompt = buildGreetingPrompt(platform);
 
   if (config.provider === 'local' || !config.apiKey) {
     const hour = new Date().getHours();
@@ -1837,7 +1874,7 @@ export async function generateGreeting(
       'someone new',
       platform,
     );
-    // Override with greeting prompt if we got a generic response
+    // Guard against a degenerate/empty completion — fall back to a canned line.
     if (result.response.length < 3) {
       return { response: 'Hey, how\'s it going?', tier: 'low', reason: 'greeting', sendPicture: null, provider: 'local' };
     }

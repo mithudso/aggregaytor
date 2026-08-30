@@ -27,6 +27,27 @@ import type { Platform, UnifiedMessage, UnifiedContact } from '@aggregaytor/adap
 
 const log = createLogger('[Aggregaytor:DList]');
 
+/** Hosts whose responses may legitimately be parsed as DoubleList data. */
+const DOUBLELIST_HOST_RE = /(^|\.)doublelist\.com$/i;
+
+/**
+ * Test whether `url` resolves to a DoubleList-owned host.
+ *
+ * A bare `url.includes('doublelist.com')` test also accepts third-party URLs
+ * that merely mention the domain (`https://evil.example/?ref=doublelist.com`),
+ * letting anything running on the page feed forged JSON into the user's
+ * message and contact store. Relative URLs resolve against the page origin;
+ * anything unparseable is rejected.
+ */
+function isDoubleListHost(url: string): boolean {
+  try {
+    const base = typeof location !== 'undefined' ? location.href : undefined;
+    return DOUBLELIST_HOST_RE.test(new URL(String(url), base).hostname);
+  } catch {
+    return false;
+  }
+}
+
 export class DoubleListAdapter extends BaseAdapter {
   readonly platform: Platform = 'doublelist';
   private currentUser = '';
@@ -64,7 +85,9 @@ export class DoubleListAdapter extends BaseAdapter {
     if (!s.includes('doublelist.com')) return false;
     if (s.includes('/static/') || s.includes('.css') || s.includes('.js') ||
         s.includes('.png') || s.includes('.jpg') || s.includes('.svg') || s.includes('.woff')) return false;
-    return true;
+    // Host check so look-alike third-party URLs cannot inject forged
+    // payloads. See isDoubleListHost().
+    return isDoubleListHost(url);
   }
 
   protected parseApiResponse(url: string, payload: unknown): UnifiedMessage[] {
@@ -73,46 +96,74 @@ export class DoubleListAdapter extends BaseAdapter {
 
     walkPayload(payload, null, {
       onObject: (obj) => {
-        this.selfIds.detectFromPayload(obj);
-
-        const userId = String(obj.userId || obj.user_id || obj.senderId || obj.sender_id || obj.from || obj.author || obj.username || '');
-        if (userId && !this.selfIds.has(userId)) {
-          const displayName = String(obj.displayName || obj.name || obj.username || '').trim();
-          let avatarUrl = '';
-          for (const key of ['avatar', 'avatarUrl', 'photo', 'photoUrl', 'image', 'thumbnail']) {
-            const v = obj[key];
-            if (typeof v === 'string' && v.startsWith('http')) { avatarUrl = v; break; }
-          }
-          if (displayName || avatarUrl) {
-            contacts.push({
-              id: `doublelist:${userId}`, platform: 'doublelist', platformUserId: userId,
-              displayName, profileUrl: `https://doublelist.com/profile/${userId}`,
-              avatarUrl, lastSeen: new Date().toISOString(), metadata: {},
-            });
-          }
+        // Payload objects are untrusted. One unrenderable value — e.g. a
+        // numeric timestamp outside the Date range, which makes the shared
+        // extractTimestamp() throw `RangeError: Invalid time value` — must
+        // not abort the rest of the walk and silently drop every message
+        // later in the same response.
+        try {
+          this.visitPayloadObject(obj, url, messages, contacts);
+        } catch (err) {
+          log.debug('Skipped unparseable payload object:', err);
         }
-
-        const body = extractMessageText(obj);
-        if (!body || body.length < 2) return;
-        const ts = extractTimestamp(obj);
-        const senderId = String(obj.senderId || obj.sender_id || obj.from || obj.author || '');
-        const recipientId = String(obj.recipientId || obj.recipient_id || obj.to || '');
-        const channel = String(obj.channel || obj.conversation_id || obj.thread_id || '');
-        const msgId = String(obj.id || obj.message_id || obj.messageId || `${senderId || channel}:${ts || Date.now()}`);
-        const direction = (senderId && (this.selfIds.has(senderId) || senderId === this.currentUser)) ? 'out' : 'in';
-        const contactKey = direction === 'out' ? recipientId : senderId;
-        const contactId = channel ? `doublelist:${channel}` : `doublelist:${contactKey || 'unknown'}`;
-
-        messages.push({
-          id: `doublelist:${msgId}`, platform: 'doublelist', threadId: contactId, contactId,
-          direction, body: body.slice(0, 500), timestamp: ts || new Date().toISOString(),
-          read: direction === 'out', metadata: { senderId, recipientId, channel, url },
-        });
       },
     });
 
     if (contacts.length) this.emit({ type: 'contacts', payload: contacts });
     return this.dedup(messages);
+  }
+
+  /**
+   * Inspect a single object node from an API payload, appending any message
+   * and/or contact it yields to the supplied accumulators.
+   *
+   * Split out of {@link parseApiResponse} so the walker can isolate a throw
+   * to one node instead of losing the remainder of the response.
+   */
+  private visitPayloadObject(
+    obj: Record<string, unknown>,
+    url: string,
+    messages: UnifiedMessage[],
+    contacts: UnifiedContact[],
+  ): void {
+    this.selfIds.detectFromPayload(obj);
+
+    const userId = String(obj.userId || obj.user_id || obj.senderId || obj.sender_id || obj.from || obj.author || obj.username || '');
+    if (userId && !this.selfIds.has(userId)) {
+      const displayName = String(obj.displayName || obj.name || obj.username || '').trim();
+      let avatarUrl = '';
+      for (const key of ['avatar', 'avatarUrl', 'photo', 'photoUrl', 'image', 'thumbnail']) {
+        const v = obj[key];
+        if (typeof v === 'string' && v.startsWith('http')) { avatarUrl = v; break; }
+      }
+      if (displayName || avatarUrl) {
+        contacts.push({
+          id: `doublelist:${userId}`, platform: 'doublelist', platformUserId: userId,
+          displayName, profileUrl: `https://doublelist.com/profile/${userId}`,
+          avatarUrl, lastSeen: new Date().toISOString(), metadata: {},
+        });
+      }
+    }
+
+    const body = extractMessageText(obj);
+    if (!body || body.length < 2) return;
+    const ts = extractTimestamp(obj);
+    const senderId = String(obj.senderId || obj.sender_id || obj.from || obj.author || '');
+    const recipientId = String(obj.recipientId || obj.recipient_id || obj.to || '');
+    const channel = String(obj.channel || obj.conversation_id || obj.thread_id || '');
+    const msgId = String(obj.id || obj.message_id || obj.messageId || `${senderId || channel}:${ts || Date.now()}`);
+    const direction = (senderId && (this.selfIds.has(senderId) || senderId === this.currentUser)) ? 'out' : 'in';
+    const contactKey = direction === 'out' ? recipientId : senderId;
+    // NOTE: when a channel is present this keys the thread by channel, while
+    // the contact pushed above is keyed by userId — see the review notes; the
+    // two identities do not join today.
+    const contactId = channel ? `doublelist:${channel}` : `doublelist:${contactKey || 'unknown'}`;
+
+    messages.push({
+      id: `doublelist:${msgId}`, platform: 'doublelist', threadId: contactId, contactId,
+      direction, body: body.slice(0, 500), timestamp: ts || new Date().toISOString(),
+      read: direction === 'out', metadata: { senderId, recipientId, channel, url },
+    });
   }
 
   protected parseWebSocketFrame(data: string | ArrayBuffer): UnifiedMessage[] {
@@ -239,7 +290,11 @@ export class DoubleListAdapter extends BaseAdapter {
     const now = Date.now();
     if (t.includes('just now') || t === 'now') return new Date(now).toISOString();
     if (t.includes('yesterday')) return new Date(now - 86400000).toISOString();
-    const match = t.match(/(\d+)\s*(s|sec|min|m|hour|h|day|d|week|w|month|mo|year|y)/i);
+    // Unit alternatives MUST be ordered longest-prefix-first. The previous
+    // order put the bare `m` ahead of `mo`/`month`, so JS alternation matched
+    // the `m` in "months" first and "5 months ago" was resolved as 5 MINUTES
+    // ago — off by four orders of magnitude on every month-old message.
+    const match = t.match(/(\d+)\s*(sec|min|mo(?:nth)?|hour|day|week|year|s|m|h|d|w|y)/i);
     if (!match) return null;
     const num = parseInt(match[1], 10);
     const unit = match[2].toLowerCase();

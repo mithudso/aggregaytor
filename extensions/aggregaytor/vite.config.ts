@@ -1,6 +1,6 @@
 import { defineConfig, type Plugin, build as viteBuild } from 'vite';
 import { resolve } from 'path';
-import { copyFileSync, cpSync, mkdirSync, existsSync, writeFileSync } from 'fs';
+import { copyFileSync, cpSync, mkdirSync, existsSync, writeFileSync, statSync } from 'fs';
 
 /**
  * Write a fresh random build hash into dist/.build-hash on every bundle.
@@ -57,8 +57,6 @@ function copyExtensionAssets(): Plugin {
       // cpSync; if it doesn't, copyFileSync the single file directly.
       // Cheap: ~4 stat calls + 0-1 copies per build.
       try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { statSync } = require('fs');
         const iconSrc = resolve(src, 'icons');
         const iconDist = resolve(dist, 'icons');
         if (existsSync(iconSrc) && existsSync(iconDist)) {
@@ -127,6 +125,7 @@ function buildContentScriptsIIFE(): Plugin {
             alias: {
               '@aggregaytor/context-engine': resolve(__dirname, '../../packages/context-engine/src/index.ts'),
               '@aggregaytor/adapter-core': resolve(__dirname, '../../packages/adapter-core/src/index.ts'),
+              '@aggregaytor/grindr-lib': resolve(__dirname, '../../packages/grindr-lib/src/index.js'),
               '@aggregaytor/adapter-sniffies': resolve(__dirname, '../../adapters/sniffies/src/index.ts'),
               '@aggregaytor/adapter-grindr': resolve(__dirname, '../../adapters/grindr/src/index.ts'),
               '@aggregaytor/adapter-doublelist': resolve(__dirname, '../../adapters/doublelist/src/index.ts'),
@@ -175,6 +174,7 @@ export default defineConfig({
       events: 'events',
       '@aggregaytor/context-engine': resolve(__dirname, '../../packages/context-engine/src/index.ts'),
       '@aggregaytor/adapter-core': resolve(__dirname, '../../packages/adapter-core/src/index.ts'),
+      '@aggregaytor/grindr-lib': resolve(__dirname, '../../packages/grindr-lib/src/index.js'),
       '@aggregaytor/store': resolve(__dirname, '../../packages/store/src/index.ts'),
       '@aggregaytor/adapter-sniffies': resolve(__dirname, '../../adapters/sniffies/src/index.ts'),
       '@aggregaytor/adapter-grindr': resolve(__dirname, '../../adapters/grindr/src/index.ts'),

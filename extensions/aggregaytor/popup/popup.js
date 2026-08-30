@@ -16,6 +16,45 @@ const PROVIDER_INFO = {
   copilot: 'Via Copilot proxy (unofficial). Needs Copilot sub.',
 };
 
+/**
+ * chrome.runtime.sendMessage wrapper that never throws.
+ *
+ * Several handlers below `await chrome.runtime.sendMessage(...)` with no
+ * try/catch and then unconditionally report success. If the service worker is
+ * suspended, mid-restart, or the handler throws, the await rejects: the click
+ * handler dies as an unhandled rejection, no "Saved!" ever appears, and the
+ * user gets no explanation. Returns a uniform { ok, error? } instead.
+ */
+async function popupSend(msg) {
+  try {
+    const res = await chrome.runtime.sendMessage(msg);
+    if (res === undefined) return { ok: false, error: 'no response from background' };
+    return res;
+  } catch (err) {
+    return { ok: false, error: (err && err.message) || String(err) };
+  }
+}
+
+/**
+ * HTML-escape a value before interpolating it into innerHTML.
+ *
+ * Safe in BOTH text and quoted-attribute contexts (quotes are escaped), which
+ * matters because most call sites here are attributes — `src="${...}"`,
+ * `alt="${...}"`, `data-delete-pic="${...}"`. Picture labels, picture data
+ * URLs and block-rule names are all user- or import-controlled (IMPORT_ALL_DATA
+ * ingests an arbitrary JSON file), and were previously interpolated raw.
+ *
+ * Mirrors panel.js's esc(), including the `|| ''` coercion.
+ */
+function esc(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // ── Personality settings ────────────────────────────────────────────────────
 
 async function loadPersonality() {
@@ -27,7 +66,7 @@ async function loadPersonality() {
     // Populate preset dropdown
     const select = document.getElementById('personality-preset');
     select.innerHTML = presets.map(p =>
-      `<option value="${p.id}"${p.id === personality.preset ? ' selected' : ''}>${p.label}</option>`
+      `<option value="${esc(p.id)}"${p.id === personality.preset ? ' selected' : ''}>${esc(p.label)}</option>`
     ).join('');
 
     // Show description
@@ -53,13 +92,19 @@ document.getElementById('personality-preset')?.addEventListener('change', (e) =>
 });
 
 document.getElementById('save-personality')?.addEventListener('click', async () => {
-  await chrome.runtime.sendMessage({
+  const res = await popupSend({
     type: 'SAVE_PERSONALITY',
     settings: {
       preset: document.getElementById('personality-preset').value,
       customInstructions: document.getElementById('custom-instructions').value.trim(),
     },
   });
+  const desc = document.getElementById('preset-description');
+  if (res?.ok === false) {
+    // Don't claim "Saved!" when nothing was saved.
+    if (desc) desc.textContent = `Save failed: ${res.error || 'unknown error'}`;
+    return;
+  }
   const msg = document.getElementById('personality-saved');
   msg.classList.add('show'); setTimeout(() => msg.classList.remove('show'), 2000);
 });
@@ -143,7 +188,7 @@ async function loadLLMSettings() {
 
 // Log level
 document.getElementById('log-level').addEventListener('change', async (e) => {
-  await chrome.runtime.sendMessage({ type: 'SET_LOG_LEVEL', level: e.target.value });
+  await popupSend({ type: 'SET_LOG_LEVEL', level: e.target.value });
 });
 chrome.storage.local.get('aggregaytor_log_level').then(data => {
   if (data.aggregaytor_log_level) document.getElementById('log-level').value = data.aggregaytor_log_level;
@@ -165,7 +210,7 @@ document.getElementById('provider').addEventListener('change', (e) => {
 });
 
 document.getElementById('save-llm').addEventListener('click', async () => {
-  await chrome.runtime.sendMessage({
+  const res = await popupSend({
     type: 'SAVE_LLM_CONFIG',
     config: {
       provider: document.getElementById('provider').value,
@@ -173,6 +218,10 @@ document.getElementById('save-llm').addEventListener('click', async () => {
       model: document.getElementById('model').value.trim(),
     },
   });
+  if (res?.ok === false) {
+    document.getElementById('provider-info').textContent = `Save failed: ${res.error || 'unknown error'}`;
+    return;
+  }
   const msg = document.getElementById('llm-saved');
   msg.classList.add('show'); setTimeout(() => msg.classList.remove('show'), 2000);
 });
@@ -206,7 +255,7 @@ async function loadRateSettings() {
 }
 
 document.getElementById('save-rate').addEventListener('click', async () => {
-  await chrome.runtime.sendMessage({
+  await popupSend({
     type: 'SAVE_LLM_RATE_SETTINGS',
     settings: {
       enabled: document.getElementById('llm-enabled').checked,
@@ -226,7 +275,9 @@ document.getElementById('save-rate').addEventListener('click', async () => {
 document.getElementById('cal-connect').addEventListener('click', async () => {
   const status = document.getElementById('cal-status');
   status.textContent = 'Connecting...';
-  const res = await chrome.runtime.sendMessage({ type: 'AUTHENTICATE_CALENDAR' });
+  // Was a bare await: an SW-side throw here rejected out of the handler, so the
+  // status stayed stuck on "Connecting..." forever with no error shown.
+  const res = await popupSend({ type: 'AUTHENTICATE_CALENDAR' });
   if (res?.ok && res.success) {
     status.textContent = 'Connected!';
     status.style.color = '#34d399';
@@ -239,16 +290,22 @@ document.getElementById('cal-connect').addEventListener('click', async () => {
 });
 
 document.getElementById('cal-save').addEventListener('click', async () => {
-  await chrome.runtime.sendMessage({
+  const status = document.getElementById('cal-status');
+  const res = await popupSend({
     type: 'SAVE_CALENDAR_SETTINGS',
     settings: {
       enabled: true,
-      prepTimeMinutes: parseInt(document.getElementById('cal-prep').value) || 30,
-      travelTimeMinutes: parseInt(document.getElementById('cal-travel').value) || 15,
+      prepTimeMinutes: parseInt(document.getElementById('cal-prep').value, 10) || 30,
+      travelTimeMinutes: parseInt(document.getElementById('cal-travel').value, 10) || 15,
     },
   });
-  document.getElementById('cal-status').textContent = 'Settings saved!';
-  document.getElementById('cal-status').style.color = '#34d399';
+  if (res?.ok === false) {
+    status.textContent = `Save failed: ${res.error || 'unknown error'}`;
+    status.style.color = '#f87171';
+    return;
+  }
+  status.textContent = 'Settings saved!';
+  status.style.color = '#34d399';
 });
 
 async function loadCalendarSettings() {
@@ -273,16 +330,16 @@ async function loadPictures() {
     if (!res?.ok || !res.pictures?.length) { grid.innerHTML = '<div class="info">No pictures yet.</div>'; return; }
     grid.innerHTML = res.pictures.map(p => `
       <div class="pic-item">
-        ${p.thumbnail ? `<img src="${p.thumbnail}" alt="${p.label || p.tag}">` : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#6b7280">${p.tag}</div>`}
-        <span class="pic-tag">${p.tag}</span>
-        <span class="pic-stats">${p.sentCount}s ${p.responseCount}r ${p.likeCount}l</span>
-        <button class="pic-del" data-delete-pic="${p._id}">&times;</button>
+        ${p.thumbnail ? `<img src="${esc(p.thumbnail)}" alt="${esc(p.label || p.tag)}">` : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#6b7280">${esc(p.tag)}</div>`}
+        <span class="pic-tag">${esc(p.tag)}</span>
+        <span class="pic-stats">${Number(p.sentCount) || 0}s ${Number(p.responseCount) || 0}r ${Number(p.likeCount) || 0}l</span>
+        <button class="pic-del" data-delete-pic="${esc(p._id)}">&times;</button>
       </div>
     `).join('');
     // Attach delete handlers
     grid.querySelectorAll('[data-delete-pic]').forEach(btn => {
       btn.addEventListener('click', async () => {
-        await chrome.runtime.sendMessage({ type: 'DELETE_PICTURE', id: btn.dataset.deletePic });
+        await popupSend({ type: 'DELETE_PICTURE', id: btn.dataset.deletePic });
         loadPictures();
       });
     });
@@ -310,7 +367,7 @@ document.getElementById('pic-upload').addEventListener('change', async (e) => {
       ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
       const thumbnail = canvas.toDataURL('image/jpeg', 0.7);
 
-      await chrome.runtime.sendMessage({
+      await popupSend({
         type: 'ADD_PICTURE',
         input: { tag, label, dataUrl, thumbnail },
       });
@@ -339,24 +396,24 @@ async function loadRules() {
     if (!res?.ok || !res.rules?.length) { list.innerHTML = '<div class="info">No rules yet.</div>'; return; }
     list.innerHTML = res.rules.map(r => `
       <div class="rule-item">
-        <span class="rule-name">${r.name} ${r.enabled ? '' : '(off)'}</span>
-        <span class="rule-count">${r.executedCount}x</span>
+        <span class="rule-name">${esc(r.name)} ${r.enabled ? '' : '(off)'}</span>
+        <span class="rule-count">${Number(r.executedCount) || 0}x</span>
         <div class="rule-actions">
-          <button class="btn btn-sm" data-toggle-rule="${r._id}" data-enabled="${!r.enabled}">${r.enabled ? 'Disable' : 'Enable'}</button>
-          <button class="btn btn-sm btn-danger" data-delete-rule="${r._id}">Del</button>
+          <button class="btn btn-sm" data-toggle-rule="${esc(r._id)}" data-enabled="${!r.enabled}">${r.enabled ? 'Disable' : 'Enable'}</button>
+          <button class="btn btn-sm btn-danger" data-delete-rule="${esc(r._id)}">Del</button>
         </div>
       </div>
     `).join('');
     // Attach handlers
     list.querySelectorAll('[data-toggle-rule]').forEach(btn => {
       btn.addEventListener('click', async () => {
-        await chrome.runtime.sendMessage({ type: 'UPDATE_BLOCK_RULE', id: btn.dataset.toggleRule, updates: { enabled: btn.dataset.enabled === 'true' } });
+        await popupSend({ type: 'UPDATE_BLOCK_RULE', id: btn.dataset.toggleRule, updates: { enabled: btn.dataset.enabled === 'true' } });
         loadRules();
       });
     });
     list.querySelectorAll('[data-delete-rule]').forEach(btn => {
       btn.addEventListener('click', async () => {
-        await chrome.runtime.sendMessage({ type: 'DELETE_BLOCK_RULE', id: btn.dataset.deleteRule });
+        await popupSend({ type: 'DELETE_BLOCK_RULE', id: btn.dataset.deleteRule });
         loadRules();
       });
     });
@@ -381,10 +438,16 @@ document.getElementById('add-rule').addEventListener('click', async () => {
     keyword: `Keyword: ${keywords.slice(0, 2).join(', ')}`,
   };
 
-  await chrome.runtime.sendMessage({
+  const res = await popupSend({
     type: 'CREATE_BLOCK_RULE',
     input: { name: names[type] || type, condition, action },
   });
+  const list = document.getElementById('rule-list');
+  if (res?.ok === false && list) {
+    // Previously a failed create just silently re-rendered the unchanged list.
+    list.innerHTML = `<div class="info">Failed to add rule: ${esc(res.error || 'unknown error')}</div>`;
+    return;
+  }
   loadRules();
 });
 

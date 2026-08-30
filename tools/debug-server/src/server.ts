@@ -20,45 +20,106 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import WebSocket from 'ws';
 
-const PORT = 9222;
-let ws: WebSocket | null = null;
-let requestId = 0;
-const pendingRequests = new Map<number, { resolve: (data: any) => void; reject: (err: Error) => void }>();
+/**
+ * Bridge port. 9222 is also Chrome's default --remote-debugging-port; if
+ * Chrome is holding it, the handshake fails and every tool call reports a
+ * connection error. Override on both this server and the extension to move.
+ */
+const PORT = Number(process.env.AGGREGAYTOR_DEBUG_PORT) || 9222;
+const REQUEST_TIMEOUT_MS = 10_000;
 
-async function connectWS(): Promise<void> {
-  if (ws?.readyState === WebSocket.OPEN) return;
-
-  return new Promise((resolve, reject) => {
-    ws = new WebSocket(`ws://localhost:${PORT}`);
-    ws.on('open', () => resolve());
-    ws.on('error', (err) => reject(new Error(`WebSocket error: ${err.message}`)));
-    ws.on('message', (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        const pending = pendingRequests.get(msg.id);
-        if (pending) {
-          pendingRequests.delete(msg.id);
-          if (msg.error) pending.reject(new Error(msg.error));
-          else pending.resolve(msg.result);
-        }
-      } catch {}
-    });
-    ws.on('close', () => { ws = null; });
-  });
+interface PendingRequest {
+  resolve: (data: unknown) => void;
+  reject: (err: Error) => void;
 }
 
-async function sendCommand(type: string, params: Record<string, any> = {}): Promise<any> {
-  await connectWS();
+let ws: WebSocket | null = null;
+let connecting: Promise<WebSocket> | null = null;
+let requestId = 0;
+const pendingRequests = new Map<number, PendingRequest>();
+
+/** Fails every in-flight request instead of leaving them to time out. */
+function failAllPending(reason: Error): void {
+  for (const [id, pending] of [...pendingRequests]) {
+    pendingRequests.delete(id);
+    pending.reject(reason);
+  }
+}
+
+function handleBridgeMessage(raw: WebSocket.RawData): void {
+  let msg: { id?: unknown; error?: unknown; result?: unknown };
+  try {
+    msg = JSON.parse(raw.toString());
+  } catch (err) {
+    console.error('[aggregaytor-debug] dropped unparseable bridge frame:', (err as Error).message);
+    return;
+  }
+  if (typeof msg?.id !== 'number') return;
+  const pending = pendingRequests.get(msg.id);
+  if (!pending) return;
+  pendingRequests.delete(msg.id);
+  if (msg.error) pending.reject(new Error(String(msg.error)));
+  else pending.resolve(msg.result);
+}
+
+async function connectWS(): Promise<WebSocket> {
+  if (ws?.readyState === WebSocket.OPEN) return ws;
+  // Callers arriving during a handshake must await it. Opening a second socket
+  // orphaned the first one, and sending on a still-CONNECTING socket throws.
+  if (connecting) return connecting;
+
+  connecting = new Promise<WebSocket>((resolve, reject) => {
+    const socket = new WebSocket(`ws://localhost:${PORT}`);
+    socket.on('open', () => {
+      ws = socket;
+      resolve(socket);
+    });
+    socket.on('message', handleBridgeMessage);
+    socket.on('error', (err) => {
+      const failure = new Error(`WebSocket error: ${err.message}`);
+      if (ws === socket) ws = null;
+      failAllPending(failure);
+      reject(failure);
+    });
+    socket.on('close', () => {
+      if (ws === socket) ws = null;
+      // Without this, requests in flight when the extension goes away hang
+      // for the full timeout instead of failing immediately.
+      failAllPending(new Error('Debug bridge closed the connection'));
+      reject(new Error('Debug bridge closed before the connection was ready'));
+    });
+  });
+  // Cleared on settle: a successful connect is served by `ws` from here on,
+  // and a failed one must be retried rather than replayed.
+  connecting.catch(() => {}).finally(() => { connecting = null; });
+  return connecting;
+}
+
+async function sendCommand(type: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  const socket = await connectWS();
   const id = ++requestId;
   return new Promise((resolve, reject) => {
-    pendingRequests.set(id, { resolve, reject });
-    ws!.send(JSON.stringify({ id, type, ...params }));
-    setTimeout(() => {
-      if (pendingRequests.has(id)) {
-        pendingRequests.delete(id);
-        reject(new Error('Timeout waiting for extension response'));
+    const timer = setTimeout(() => {
+      if (pendingRequests.delete(id)) {
+        reject(new Error(`Timed out after ${REQUEST_TIMEOUT_MS}ms waiting for extension response`));
       }
-    }, 10000);
+    }, REQUEST_TIMEOUT_MS);
+    // Never let a pending request keep the event loop alive on shutdown.
+    // Cast because this tsconfig loads both the DOM and Node timer signatures.
+    (timer as unknown as { unref?: () => void }).unref?.();
+    pendingRequests.set(id, {
+      resolve: (data) => { clearTimeout(timer); resolve(data); },
+      reject: (err) => { clearTimeout(timer); reject(err); },
+    });
+    try {
+      // `id` and `type` are written last so a tool argument of the same name
+      // cannot clobber them and strand the response correlation.
+      socket.send(JSON.stringify({ ...params, id, type }));
+    } catch (err) {
+      const pending = pendingRequests.get(id);
+      pendingRequests.delete(id);
+      pending?.reject(err instanceof Error ? err : new Error(String(err)));
+    }
   });
 }
 
@@ -139,7 +200,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'trigger_action',
-      description: 'Trigger an extension action: sync_pics, toggle_autorespond, set_log_level, resync_thread.',
+      description: 'Trigger an extension action: sync_pics, toggle_autorespond, set_log_level, resync_thread, open_all_sites, or clear_db. DESTRUCTIVE: clear_db erases the local PouchDB store irreversibly — confirm with the user before calling it.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -190,7 +251,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // stderr, never stdout: stdout carries the MCP protocol stream.
   console.error('[aggregaytor-debug] MCP server started on stdio');
 }
 
-main().catch(console.error);
+main().catch((err) => {
+  console.error('[aggregaytor-debug] fatal:', err);
+  // Exit non-zero so a supervising client sees the failure instead of a
+  // silently dead server that looks like a clean shutdown.
+  process.exitCode = 1;
+});

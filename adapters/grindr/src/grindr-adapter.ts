@@ -11,27 +11,83 @@
 import {
   BaseAdapter,
   walkPayload,
+  createLogger,
 } from '@aggregaytor/adapter-core';
 import type { Platform, UnifiedMessage, UnifiedContact } from '@aggregaytor/adapter-core';
+// Profile-id plausibility now delegates to @aggregaytor/grindr-lib (5–10
+// digits — tighter than the old bare /^\d+$/ check, by design). The lib
+// exposes it on the `dom` namespace export, not as a top-level named export.
+import { dom as grindrDom } from '@aggregaytor/grindr-lib';
 
-const LOG = '[Aggregaytor:Grindr]';
+const { isPlausibleProfileId } = grindrDom;
 
-const GRINDR_API_PATTERNS = [
-  '/v3/inbox',
-  '/v4/chat/conversation',
-  '/v1/inbox/conversation',
-  '/v1/ws',
-  '/chat/',
-  '/inbox',
-];
+// Level-gated logger. Bare console.* calls ran unconditionally on the parse
+// hot path inside a page we do not control, dumping conversation IDs and
+// profile IDs into the host page's console with no way to silence them.
+const log = createLogger('[Aggregaytor:Grindr]');
 
 const BODY_KEYS = ['body', 'text', 'message', 'content', 'snippet', 'messageBody', 'lastMessage', 'preview'];
 
+/** Hosts whose responses may legitimately be parsed as Grindr data. */
+const GRINDR_HOST_RE = /(^|\.)grindr\.com$/i;
+
+/**
+ * Test whether `url` resolves to a Grindr-owned host.
+ *
+ * A bare `url.includes('grindr.com')` test also accepts third-party URLs that
+ * merely mention the domain (`https://evil.example/?ref=grindr.com`), which
+ * would let anything running on the page feed forged JSON straight into the
+ * user's message and contact store. Relative URLs resolve against the page
+ * origin; anything unparseable is rejected.
+ */
+function isGrindrHost(url: string): boolean {
+  try {
+    const base = typeof location !== 'undefined' ? location.href : undefined;
+    return GRINDR_HOST_RE.test(new URL(String(url), base).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** Largest absolute epoch-ms magnitude the ECMAScript Date type can represent. */
+const MAX_EPOCH_MS = 8.64e15;
+
+/**
+ * Coerce a timestamp value to epoch-ms, rejecting anything a `Date` cannot
+ * render. `{"timestamp": 1e20}` is valid JSON, and the resulting
+ * `new Date(1e20).toISOString()` throws `RangeError: Invalid time value`
+ * from inside the walkPayload visitor — which aborts the rest of the walk
+ * and silently drops every message later in the same response.
+ */
 function parseTs(value: unknown): number {
   if (!value) return 0;
-  if (typeof value === 'number') return value < 1e12 ? value * 1000 : value;
-  if (typeof value === 'string') { const p = Date.parse(value); return isNaN(p) ? 0 : p; }
-  return 0;
+  let ms = 0;
+  if (typeof value === 'number') ms = value < 1e12 ? value * 1000 : value;
+  else if (typeof value === 'string') { const p = Date.parse(value); ms = isNaN(p) ? 0 : p; }
+  else return 0;
+  return Number.isFinite(ms) && Math.abs(ms) <= MAX_EPOCH_MS ? ms : 0;
+}
+
+/** Upper bound on the photo-hash -> profileId index (see setHash). */
+const MAX_HASH_MAP_ENTRIES = 20_000;
+
+/**
+ * Insert into the photo-hash index with a FIFO cap.
+ *
+ * Every cascade page adds fresh hashes and nothing ever removed them, so a
+ * long browsing session grew this map without bound. Map preserves insertion
+ * order, so dropping from the front evicts the oldest entries.
+ */
+function setHash(map: Map<string, string>, hash: string, profileId: string): void {
+  map.set(hash, profileId);
+  if (map.size > MAX_HASH_MAP_ENTRIES) {
+    const iter = map.keys();
+    for (let i = 0; i < 5_000; i++) {
+      const next = iter.next();
+      if (next.done) break;
+      map.delete(next.value);
+    }
+  }
 }
 
 function extractBody(obj: Record<string, unknown>): string {
@@ -47,16 +103,18 @@ export class GrindrAdapter extends BaseAdapter {
   private captureCount = 0;
 
   async init(): Promise<void> {
-    console.log(`${LOG} Initializing adapter...`);
+    log.info('Initializing adapter...');
     this.selfIds.seedFromWindow(window as Window & typeof globalThis);
     this.setupNetworkInterception(window as Window & typeof globalThis);
-    console.log(`${LOG} Adapter initialized. Self IDs:`, [...this.selfIds.ids]);
+    log.info('Adapter initialized. Self IDs:', [...this.selfIds.ids]);
   }
 
   protected shouldInterceptUrl(url: string): boolean {
     const s = String(url).toLowerCase();
-    // Intercept all grindr.com API traffic
-    return s.includes('grindr.com');
+    // Coarse gate first (cheap), then a real host check so look-alike
+    // third-party URLs cannot inject forged payloads. See isGrindrHost().
+    if (!s.includes('grindr.com')) return false;
+    return isGrindrHost(url);
   }
 
   protected parseApiResponse(url: string, payload: unknown): UnifiedMessage[] {
@@ -71,26 +129,32 @@ export class GrindrAdapter extends BaseAdapter {
         // This runs inside the adapter's fetch interceptor which is installed
         // BEFORE the page's own fetch, so it catches cascade API responses
         // that the grindr.ts interceptor might miss.
+        //
+        // NOTE: `window.__grindr_hash_map` is a documented exception to the
+        // "don't expose anything on window.*" rule — it is the handoff to the
+        // MAIN-world reader in extensions/aggregaytor/content/grindr.ts. It
+        // holds only photo hashes the host page already knows, no auth state.
         const pid = String(obj.profileId || '');
-        if (pid && /^\d+$/.test(pid)) {
+        if (pid && isPlausibleProfileId(pid)) {   // delegates to @aggregaytor/grindr-lib
           const w = (typeof window !== 'undefined' ? window : globalThis) as any;
-          if (!w.__grindr_hash_map) w.__grindr_hash_map = new Map();
+          if (!(w.__grindr_hash_map instanceof Map)) w.__grindr_hash_map = new Map<string, string>();
+          const hashMap = w.__grindr_hash_map as Map<string, string>;
           // Index photoMediaHashes (cascade API format)
           const pmh = obj.photoMediaHashes;
           if (Array.isArray(pmh)) {
             for (const h of pmh) {
-              if (typeof h === 'string' && h.length > 10) w.__grindr_hash_map.set(h, pid);
+              if (typeof h === 'string' && h.length > 10) setHash(hashMap, h, pid);
             }
           }
           // Index profileImageMediaHash (individual profile API format)
           const pimh = String(obj.profileImageMediaHash || '');
-          if (pimh && pimh.length > 10) w.__grindr_hash_map.set(pimh, pid);
+          if (pimh && pimh.length > 10) setHash(hashMap, pimh, pid);
           // Index medias[].mediaHash
           const medias = obj.medias;
           if (Array.isArray(medias)) {
             for (const m of medias) {
               const mh = String((m as any)?.mediaHash || '');
-              if (mh && mh.length > 10) w.__grindr_hash_map.set(mh, pid);
+              if (mh && mh.length > 10) setHash(hashMap, mh, pid);
             }
           }
         }
@@ -132,8 +196,10 @@ export class GrindrAdapter extends BaseAdapter {
           });
         }
 
-        // Extract contact info — from any object with a profile ID
-        if (profileId) {
+        // Extract contact info — from any object with a profile ID, EXCEPT
+        // our own. Without the self filter the logged-in user's own profile
+        // was stored as a contact (every sibling adapter already skips self).
+        if (profileId && !this.selfIds.has(profileId)) {
           const displayName = String(obj.displayName || obj.name || obj.username || '').trim();
           const photoHash = String(obj.photoHash || obj.profileImageMediaHash || obj.mediahash || obj.primaryPhotoHash || '');
           // Grindr CDN: https://cdns.grindr.com/images/profile/1024x1024/{hash}
@@ -197,10 +263,10 @@ export class GrindrAdapter extends BaseAdapter {
 
     if (messages.length) {
       this.captureCount += messages.length;
-      console.log(`${LOG} Captured ${messages.length} messages from ${url} (total: ${this.captureCount})`);
+      log.info(`Captured ${messages.length} messages from ${url} (total: ${this.captureCount})`);
     }
     if (contacts.length) {
-      console.log(`${LOG} Captured ${contacts.length} contacts from ${url}`);
+      log.debug(`Captured ${contacts.length} contacts from ${url}`);
       this.emit({ type: 'contacts', payload: contacts });
     }
 

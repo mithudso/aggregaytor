@@ -88,21 +88,25 @@ const PROFILE_ATTRIBUTE_VALUES = new Set([
 // These are compared against the NORMALIZED (lowercased, no separators)
 // key names of the object being inspected.
 
+// NOTE: both sets hold ALREADY-NORMALIZED names (lowercase, separators
+// stripped), because that is what they are compared against. Writing a
+// separator form such as 'message_id' here would be dead weight -- it can
+// never equal `normalizeKey('message_id')`, which is 'messageid'.
+
 /** Keys whose presence strongly indicates the object IS a chat message. */
-const MESSAGE_SIGNAL_KEYS = [
-  'messageid', 'message_id', 'chatid', 'chat_id', 'conversationid',
-  'conversation_id', 'senderid', 'sender_id', 'recipientid', 'recipient_id',
+const MESSAGE_SIGNAL_KEYS = new Set([
+  'messageid', 'chatid', 'conversationid', 'senderid', 'recipientid',
   'fromme', 'ismine', 'sentbyme', 'isoutgoing', 'isincoming',
-  'messagetype', 'message_type', 'chattype', 'replyto', 'reply_to',
-];
+  'messagetype', 'chattype', 'replyto',
+]);
 
 /** Keys whose presence strongly indicates the object is a PROFILE, not a message. */
-const PROFILE_SIGNAL_KEYS = [
-  'attitude', 'bodytype', 'body_type', 'ethnicity', 'height', 'weight',
-  'age', 'hivstatus', 'hiv_status', 'position', 'tribe', 'pronouns',
-  'lookingfor', 'looking_for', 'hosting', 'lastactive', 'last_active',
+const PROFILE_SIGNAL_KEYS = new Set([
+  'attitude', 'bodytype', 'ethnicity', 'height', 'weight',
+  'age', 'hivstatus', 'position', 'tribe', 'pronouns',
+  'lookingfor', 'hosting', 'lastactive',
   'distance', 'distanceaway', 'miles', 'kilometers',
-];
+]);
 
 // ── Utility Helpers ─────────────────────────────────────────────────────────
 
@@ -114,20 +118,58 @@ function normalizeKey(key: string): string {
   return String(key || '').replace(/[-_ ]/g, '').toLowerCase();
 }
 
+/** Hosts whose responses may legitimately be parsed as Sniffies data. */
+const SNIFFIES_HOST_RE = /(^|\.)sniffies(assets)?\.com$/i;
+
+/**
+ * Test whether `url` resolves to a Sniffies-owned host.
+ *
+ * Relative URLs are resolved against the page origin, so this stays correct
+ * for same-origin SPA requests. Anything unparseable is rejected -- we would
+ * rather miss a frame than parse an attacker-controlled response.
+ */
+function isSniffiesHost(url: string): boolean {
+  try {
+    const base = typeof location !== 'undefined' ? location.href : undefined;
+    return SNIFFIES_HOST_RE.test(new URL(String(url), base).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** Largest absolute epoch-ms magnitude the ECMAScript Date type can represent. */
+const MAX_EPOCH_MS = 8.64e15;
+
+/**
+ * Reject epoch values that `new Date(ms).toISOString()` cannot render.
+ *
+ * Payload values are attacker-influenceable: `{"timestamp": 1e20}` is valid
+ * JSON, and `new Date(1e20).toISOString()` throws `RangeError: Invalid time
+ * value`. Message construction happens inside the `walkPayload` visitor, so
+ * that throw would abort the ENTIRE remaining walk and silently drop every
+ * message after the poisoned node. Returning 0 instead makes the object fail
+ * the existing `if (!ts) return` guard -- one node is skipped, the rest of
+ * the response still parses.
+ */
+function clampEpochMs(ms: number): number {
+  return Number.isFinite(ms) && Math.abs(ms) <= MAX_EPOCH_MS ? ms : 0;
+}
+
 /**
  * Coerce a timestamp value (seconds, milliseconds, or ISO string) to
- * epoch-milliseconds. Returns 0 if the value is falsy or unparseable.
+ * epoch-milliseconds. Returns 0 if the value is falsy, unparseable, or
+ * outside the range a `Date` can represent.
  * Values below 1e12 are assumed to be seconds and are multiplied by 1000.
  */
 function parseTimestamp(value: unknown): number {
   if (!value) return 0;
   if (typeof value === 'number') {
     // Heuristic: timestamps below 1e12 (~2001 in ms) are likely in seconds
-    return value < 1e12 ? value * 1000 : value;
+    return clampEpochMs(value < 1e12 ? value * 1000 : value);
   }
   if (typeof value === 'string') {
     const parsed = Date.parse(value);
-    return isNaN(parsed) ? 0 : parsed;
+    return isNaN(parsed) ? 0 : clampEpochMs(parsed);
   }
   return 0;
 }
@@ -177,14 +219,21 @@ function extractTimestampFromObj(obj: Record<string, unknown>): number {
  * @returns `true` if the object should be treated as a chat message candidate.
  */
 function isLikelyMessage(obj: Record<string, unknown>): boolean {
-  const keys = Object.keys(obj).map(normalizeKey);
-
-  // Tier 1: strong positive signal -- has message-specific keys
-  const hasMessageKey = MESSAGE_SIGNAL_KEYS.some(mk => keys.includes(mk));
-  if (hasMessageKey) return true;
+  // Single pass over the object's own keys with Set lookups. The previous
+  // implementation allocated a normalized-key array and then ran
+  // `SIGNAL_KEYS.some(k => keys.includes(k))` twice -- O(keys x 33) string
+  // comparisons per object, on a path that runs for up to 2000 nodes per
+  // intercepted response.
+  let hasProfileKey = false;
+  for (const key of Object.keys(obj)) {
+    const nk = normalizeKey(key);
+    // Tier 1: strong positive signal -- has message-specific keys.
+    // A message key outranks any profile key, so we can stop immediately.
+    if (MESSAGE_SIGNAL_KEYS.has(nk)) return true;
+    if (PROFILE_SIGNAL_KEYS.has(nk)) hasProfileKey = true;
+  }
 
   // Tier 2: strong negative signal -- has profile-specific keys
-  const hasProfileKey = PROFILE_SIGNAL_KEYS.some(pk => keys.includes(pk));
   if (hasProfileKey) return false;
 
   // Tier 3: check the body text against the profile-attribute blocklist
@@ -207,8 +256,12 @@ function isLikelyMessage(obj: Record<string, unknown>): boolean {
  * passes {@link isLikelyMessage}, because profile objects use `body` for
  * body-type ("athletic"). Safe keys like `text` / `message` are checked
  * unconditionally since they are unambiguous.
+ *
+ * @param knownMessageLike Pass `true` when the caller has already run
+ *   {@link isLikelyMessage} on `obj`, to skip the (non-trivial) re-check.
+ *   Omit it and the check is performed here.
  */
-function extractBody(obj: Record<string, unknown>): string {
+function extractBody(obj: Record<string, unknown>, knownMessageLike?: boolean): string {
   // Phase 1: safe, unambiguous keys -- always check these first
   const textKeys = ['text', 'message', 'msg', 'messageText', 'messageBody'];
   for (const key of textKeys) {
@@ -219,7 +272,7 @@ function extractBody(obj: Record<string, unknown>): string {
   // SKIP 'snippet', 'preview', 'lastMessage' — these are conversation-level summary
   // fields that contain concatenated text from the entire conversation, not a single
   // message. Including them produces a giant "rollup" message in the UI.
-  if (isLikelyMessage(obj)) {
+  if (knownMessageLike ?? isLikelyMessage(obj)) {
     for (const key of ['body', 'content']) {
       const value = obj[key];
       if (typeof value === 'string' && value.trim().length >= 2) {
@@ -267,6 +320,17 @@ function isMetadataText(body: string): boolean {
   return false;
 }
 
+/** Boolean flag keys (normalized) that mean "this message is ours". */
+const OUT_FLAG_KEYS = new Set(['fromme', 'ismine', 'mine', 'sentbyme', 'outgoing', 'isoutgoing', 'mymessage']);
+/** Boolean flag keys (normalized) that mean "this message is theirs". */
+const IN_FLAG_KEYS = new Set(['incoming', 'isincoming', 'fromthem', 'received', 'isreceived', 'theirmessage']);
+/** Keys (normalized) whose STRING value may name a direction. */
+const DIRECTION_STRING_KEYS = new Set(['direction', 'messagedirection', 'type', 'msgtype']);
+/** Whole tokens inside a direction string that mean outbound. */
+const OUT_TOKENS = new Set(['out', 'outgoing', 'outbound', 'sent', 'send', 'fromme', 'mine', 'self']);
+/** Whole tokens inside a direction string that mean inbound. */
+const IN_TOKENS = new Set(['in', 'incoming', 'inbound', 'received', 'receive', 'fromthem', 'them']);
+
 /**
  * Determine if a message was sent by us ('out') or received ('in').
  *
@@ -275,24 +339,46 @@ function isMetadataText(body: string): boolean {
  *  2. String direction fields (`direction: "outgoing"`)
  *  3. Sender-ID match against our known self IDs
  *
+ * The tiers really are evaluated in order: an earlier implementation ran
+ * tiers 1 and 2 inside a single `Object.entries` loop, so which signal won
+ * depended on JSON key order -- `{ type: "...", fromMe: true }` and
+ * `{ fromMe: true, type: "..." }` could disagree.
+ *
+ * Direction strings are matched on whole tokens, not substrings. The
+ * previous `/(out|sent|fromme|mine)/` / `/(in|received|fromthem)/` tests
+ * fired on any value merely CONTAINING those letters, so `type: "shout"`
+ * or `type: "timeout"` marked an incoming message as our own (which also
+ * forces `read: true` and drops it into the wrong side of the thread),
+ * while `type: "cruisingUpdate"` matched "in" via "cruis-IN-g".
+ *
  * Defaults to 'in' when no signal matches (safer to assume incoming).
  */
 function detectDirection(obj: Record<string, unknown>, selfIds: Set<string>): 'in' | 'out' {
-  for (const [key, value] of Object.entries(obj)) {
+  const entries = Object.entries(obj);
+
+  // Tier 1: boolean flags -- the most reliable signal, so check every key
+  // for one before falling back to the fuzzier string fields.
+  for (const [key, value] of entries) {
+    if (value !== true) continue;
     const k = normalizeKey(key);
-    // Check boolean flags first (most reliable signal)
-    if (value === true) {
-      if (['fromme', 'ismine', 'mine', 'sentbyme', 'outgoing', 'isoutgoing', 'mymessage'].includes(k)) return 'out';
-      if (['incoming', 'isincoming', 'fromthem', 'received', 'isreceived', 'theirmessage'].includes(k)) return 'in';
-    }
-    // Check string direction fields
-    if (typeof value === 'string' && ['direction', 'messagedirection', 'type', 'msgtype'].includes(k)) {
-      const s = value.toLowerCase();
-      if (/(out|sent|fromme|mine)/.test(s)) return 'out';
-      if (/(in|received|fromthem)/.test(s)) return 'in';
+    if (OUT_FLAG_KEYS.has(k)) return 'out';
+    if (IN_FLAG_KEYS.has(k)) return 'in';
+  }
+
+  // Tier 2: string direction fields
+  for (const [key, value] of entries) {
+    if (typeof value !== 'string') continue;
+    if (!DIRECTION_STRING_KEYS.has(normalizeKey(key))) continue;
+    // Split on non-alphanumerics so "message_sent" / "OUT-going" still match
+    // while "shout" / "timeout" / "cruisingUpdate" no longer do.
+    for (const token of value.toLowerCase().split(/[^a-z0-9]+/)) {
+      if (!token) continue;
+      if (OUT_TOKENS.has(token)) return 'out';
+      if (IN_TOKENS.has(token)) return 'in';
     }
   }
-  // Fallback: compare the sender ID against our known self IDs
+
+  // Tier 3: compare the sender ID against our known self IDs
   const senderId = normalizeProfileId(String(obj.senderId || obj.sender_id || obj.from || obj.fromId || obj.from_id || ''));
   if (senderId && selfIds.has(senderId)) return 'out';
   return 'in';
@@ -309,7 +395,10 @@ function detectDirection(obj: Record<string, unknown>, selfIds: Set<string>): 'i
  */
 export class SniffiesAdapter extends BaseAdapter {
   readonly platform: Platform = 'sniffies';
-  private storageTimer: ReturnType<typeof setInterval> | null = null;
+  /** Recurring map-marker avatar scrape (see {@link scrapeAvatarsFromDOM}). */
+  private avatarScrapeTimer: ReturnType<typeof setInterval> | null = null;
+  /** One-shot post-hydration avatar scrape scheduled during {@link init}. */
+  private initialScrapeTimer: ReturnType<typeof setTimeout> | null = null;
   private captureCount = 0;
 
   /**
@@ -356,21 +445,31 @@ export class SniffiesAdapter extends BaseAdapter {
     // Monkey-patch fetch/XHR/WebSocket to intercept traffic
     this.setupNetworkInterception(window as Window & typeof globalThis);
     // Periodically scrape map-marker DOM nodes for avatar URLs.
-    // NOTE: scanStorage() was removed — it cost 300ms+ per call scanning
-    // ALL localStorage keys and JSON.parsing matching ones. It was a legacy
-    // fallback from before fetch/XHR interception worked reliably.
-    this.storageTimer = setInterval(() => {
+    // NOTE: a periodic scanStorage() pass was removed — it cost 300ms+ per
+    // call scanning ALL localStorage keys and JSON.parsing matching ones. It
+    // was a legacy fallback from before fetch/XHR interception worked
+    // reliably. Do not reintroduce it.
+    this.avatarScrapeTimer = setInterval(() => {
       this.scrapeAvatarsFromDOM();
     }, 60_000);
-    // Initial avatar scrape after DOM settles (5s delay for SPA hydration)
-    setTimeout(() => this.scrapeAvatarsFromDOM(), 5000);
+    // Initial avatar scrape after DOM settles (5s delay for SPA hydration).
+    // Tracked so destroy() can cancel it — otherwise tearing the adapter down
+    // inside the first 5s leaves a timer that fires against a dead adapter.
+    this.initialScrapeTimer = setTimeout(() => {
+      this.initialScrapeTimer = null;
+      this.scrapeAvatarsFromDOM();
+    }, 5000);
     log.info('Adapter initialized. Self IDs:', [...this.selfIds.ids]);
   }
 
   async destroy(): Promise<void> {
-    if (this.storageTimer) {
-      clearInterval(this.storageTimer);
-      this.storageTimer = null;
+    if (this.avatarScrapeTimer) {
+      clearInterval(this.avatarScrapeTimer);
+      this.avatarScrapeTimer = null;
+    }
+    if (this.initialScrapeTimer) {
+      clearTimeout(this.initialScrapeTimer);
+      this.initialScrapeTimer = null;
     }
     if (this.userJoinedFlushTimer) {
       clearTimeout(this.userJoinedFlushTimer);
@@ -391,7 +490,14 @@ export class SniffiesAdapter extends BaseAdapter {
    */
   protected shouldInterceptUrl(url: string): boolean {
     const s = String(url).toLowerCase();
-    if (!s.includes('sniffies.com') && !s.includes('sniffies')) return false;
+    // Coarse gate (cheap, unchanged): the URL must mention Sniffies at all.
+    if (!s.includes('sniffies')) return false;
+    // Host gate: reject look-alikes. The substring test alone accepted any
+    // URL merely CONTAINING "sniffies", so anything running on the page —
+    // an injected ad script, an XSS payload — could
+    // `fetch('https://evil.example/x?ref=sniffies')` and have the attacker's
+    // JSON parsed straight into the user's message/contact store.
+    if (!isSniffiesHost(url)) return false;
     // Skip non-API URLs to avoid wasting CPU on clone+json for static assets.
     // The fetch interceptor clones + JSON.parses every intercepted response,
     // which costs 5-75ms per call. Filtering here prevents that cost for
@@ -430,8 +536,12 @@ export class SniffiesAdapter extends BaseAdapter {
         error.includes('deleted') || error.includes('unavailable') ||
         error.includes('no longer available')) {
 
-      // Try to extract the profile ID from the URL
-      const match = url.match(/\/profile\/([0-9a-f]{6,})/i) || url.match(/\/([0-9a-f]{6,})/i);
+      // Try to extract the profile ID from the URL. The fallback pattern is
+      // anchored to a COMPLETE path segment; an unanchored `/([0-9a-f]{6,})/`
+      // also matched hex-looking prefixes inside ordinary path words and
+      // emitted spurious BLOCKED events that gray out live conversations.
+      const match = url.match(/\/profile\/([0-9a-f]{6,})(?=[/?#]|$)/i)
+        || url.match(/\/([0-9a-f]{6,})(?=[/?#]|$)/i);
       if (match) {
         const profileId = match[1].toLowerCase();
         log.info(`Block detected for ${profileId}: ${error || status}`);
@@ -562,7 +672,9 @@ export class SniffiesAdapter extends BaseAdapter {
         // body text is not a profile attribute enum, etc.)
         if (!isLikelyMessage(obj)) return;
 
-        const body = extractBody(obj);
+        // `true` = already verified message-like above; skips a redundant
+        // second isLikelyMessage() pass over every key of every message.
+        const body = extractBody(obj, true);
         if (!body) return;
         // Double-check: reject profile attributes and UI metadata
         if (PROFILE_ATTRIBUTE_VALUES.has(body.toLowerCase())) return;
@@ -638,7 +750,13 @@ export class SniffiesAdapter extends BaseAdapter {
           for (const [key, value] of Object.entries(obj)) {
             const k = normalizeKey(key);
             if (typeof value === 'string' && value.length < 100) {
-              if (/bodytype|body|build/.test(k)) senderAttrs.bodyType = value;
+              // Same trap as the contact loop above: on a Sniffies MESSAGE
+              // object `body` holds the message text, so a bare /body/ test
+              // stamped the message body into metadata.bodyType. Require an
+              // exact bodyType/build key, or a `body` value that still looks
+              // like a body-type label rather than a sentence.
+              if (/^(bodytype|build)$/.test(k)) senderAttrs.bodyType = value;
+              else if (k === 'body' && /^[a-z][a-z -]{1,30}$/i.test(value.trim())) senderAttrs.bodyType = value;
               if (/attitude|position|role/.test(k)) senderAttrs.position = value;
               if (/^age$/.test(k)) senderAttrs.age = value;
               if (/height/.test(k)) senderAttrs.height = value;
@@ -760,8 +878,8 @@ export class SniffiesAdapter extends BaseAdapter {
       // userJoined events carry a full profile payload (avatar, attributes)
       // that we can use to populate the contact list. THROTTLED: these fire
       // hundreds of times per minute on busy maps. We process each profileId
-      // at most once every 30 seconds to avoid CPU-intensive recursive avatar
-      // searches on every single presence event.
+      // at most once every 60 seconds (see userJoinedThrottle) to avoid
+      // CPU-intensive recursive avatar searches on every presence event.
       if (frame.eventName === 'userJoined' && frame.data && typeof frame.data === 'object') {
         const obj = frame.data as Record<string, unknown>;
         const profileId = normalizeProfileId(String(obj._id || ''));
@@ -918,7 +1036,9 @@ export class SniffiesAdapter extends BaseAdapter {
    */
   private seedSelfIdsFromPage(): void {
     try {
-      const w = window as any;
+      // Read-only probe of page globals; typed as an index map rather than
+      // `any` so a typo cannot silently become a call/property access.
+      const w = window as unknown as Record<string, unknown>;
       for (const key of ['__sniffies_user_id', '__user', 'userId', 'currentUserId', 'myProfileId', 'selfId']) {
         const val = w[key];
         if (val && typeof val === 'string') {
@@ -1058,11 +1178,19 @@ export class SniffiesAdapter extends BaseAdapter {
    * We parse the profileId out of the CDN URL and emit a contact update so
    * the aggregator UI has an avatar for that profile, even before the user
    * opens a conversation with them.
+   *
+   * All markers found in one pass are emitted as a SINGLE batched `contacts`
+   * event. Emitting per marker meant one bridge -> service-worker round trip
+   * per visible pin (100+ on a busy map, every 60s) — the same flooding the
+   * userJoined buffer exists to prevent.
    */
   private scrapeAvatarsFromDOM(): void {
     const endScrape = perf.start('scrapeAvatarsFromDOM');
     try {
       const markers = document.querySelectorAll('.maplibregl-marker, .marker-avatar-image, [style*="sniffiesassets"]');
+      const contacts: UnifiedContact[] = [];
+      const seen = new Set<string>();
+      const scrapedAt = new Date().toISOString();
       for (const el of markers) {
         let bg = (el as HTMLElement).style?.backgroundImage || '';
         if (!bg || bg === 'none') { try { bg = getComputedStyle(el).backgroundImage || ''; } catch { continue; } }
@@ -1072,56 +1200,25 @@ export class SniffiesAdapter extends BaseAdapter {
         const url = match[1];
         // Extract the profile ID from the CDN path segment
         const idMatch = url.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
-        if (idMatch) {
-          const profileId = idMatch[1].toLowerCase();
-          this.emit({
-            type: 'contacts',
-            payload: [{
-              id: `sniffies:${profileId}`,
-              platform: 'sniffies' as const,
-              platformUserId: profileId,
-              displayName: '',
-              profileUrl: `https://sniffies.com/profile/${profileId}`,
-              avatarUrl: url,
-              lastSeen: new Date().toISOString(),
-              metadata: {},
-            }],
-          });
-        }
+        if (!idMatch) continue;
+        const profileId = idMatch[1].toLowerCase();
+        // The same profile can back several marker nodes (cluster + pin).
+        if (seen.has(profileId)) continue;
+        seen.add(profileId);
+        contacts.push({
+          id: `sniffies:${profileId}`,
+          platform: 'sniffies' as const,
+          platformUserId: profileId,
+          displayName: '',
+          profileUrl: `https://sniffies.com/profile/${profileId}`,
+          avatarUrl: url,
+          lastSeen: scrapedAt,
+          metadata: {},
+        });
       }
-    } catch { /* DOM access can fail in certain contexts */ }
+      if (contacts.length) this.emit({ type: 'contacts', payload: contacts });
+    } catch (err) { log.debug('Avatar DOM scrape failed:', err); }
     endScrape();
   }
 
-  // ── localStorage Scanning ────────────────────────────────────────────────
-
-  /**
-   * Scan localStorage for cached conversation data.
-   *
-   * Sniffies may cache chat/conversation objects in localStorage. This
-   * periodic scan looks for keys containing "chat", "message", "inbox", or
-   * "conversation", parses the JSON, and runs it through the same
-   * parseApiResponse pipeline as network traffic. Entries larger than 8 MB
-   * are skipped to avoid blocking the main thread.
-   */
-  private scanStorage(): void {
-    const endScan = perf.start('scanStorage');
-    try {
-      const keys = Object.keys(localStorage);
-      for (const key of keys) {
-        // Only inspect keys that look chat-related
-        if (!/chat|message|inbox|conversation/i.test(key)) continue;
-        try {
-          const raw = localStorage.getItem(key);
-          if (!raw || raw.length > 8_000_000) continue; // skip oversized entries
-          const data = JSON.parse(raw);
-          if (data && typeof data === 'object') {
-            const messages = this.parseApiResponse(`[storage:${key}]`, data);
-            if (messages.length) this.emit({ type: 'messages', payload: messages });
-          }
-        } catch { /* not valid JSON -- skip */ }
-      }
-    } catch { /* localStorage not available in this context */ }
-    endScan();
-  }
 }

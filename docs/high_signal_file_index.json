@@ -1,0 +1,3406 @@
+[
+  {
+    "path": ".claude/settings.local.json",
+    "purpose": "Local Claude Code permission allowlist for this repo.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "local-only"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": ".github/FUNDING.yml",
+    "purpose": "GitHub sponsor/funding metadata.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": ".github/ISSUE_TEMPLATE/bug_report.md",
+    "purpose": "Bug-report issue template.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": ".github/ISSUE_TEMPLATE/feature_request.md",
+    "purpose": "Feature-request issue template.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": ".github/PULL_REQUEST_TEMPLATE.md",
+    "purpose": "Pull-request template (summary, changes, testing).",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": ".github/SECURITY.md",
+    "purpose": "Security policy: report vulnerabilities privately via GitHub Security Advisories.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": ".github/copilot-instructions.md",
+    "purpose": "GitHub Copilot execution-strategy instructions (parallelism-first, no truncation, completion tables).",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "ai-agent-context"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": ".github/dependabot.yml",
+    "purpose": "Dependabot config: weekly npm and GitHub Actions update schedules.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": ".github/workflows/ci.yml",
+    "purpose": "CI workflow (build/lint/test) \u2014 owned by CI tooling; index:check is CI-ready to add.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "ci-workflow"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": ".pnpmrc.json",
+    "purpose": "pnpm config allowing only esbuild to run build scripts.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "supply-chain-hardening"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": ".vscode/extensions.json",
+    "purpose": "Recommended VS Code extensions (eslint, vitest, editorconfig)",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": ".vscode/launch.json",
+    "purpose": "VS Code debug configurations for Vitest (current file / all tests)",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": ".vscode/settings.json",
+    "purpose": "Project VS Code settings: eslint flat-config validation, dist/worktree excludes",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "AGENTS.md",
+    "purpose": "Catalog of the 12 repo-local skills with scope and when-to-use, plus docs companion map",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "CLAUDE.md",
+    "purpose": "Claude Code guidance: commands, architecture quick reference, build gotchas, critical invariants.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "ai-agent-context"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "CODE_OF_CONDUCT.md",
+    "purpose": "Contributor Covenant 2.1 code of conduct",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "CONTRIBUTING.md",
+    "purpose": "Contribution guide: setup, commands, CLAUDE.md invariants, PR flow",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "GEMINI.md",
+    "purpose": "Gemini CLI workflow pointer file referencing CLAUDE.md sections and commands",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "README.md",
+    "purpose": "User-facing feature and usage reference for the Aggregaytor extension.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/adam4adam/package.json",
+    "purpose": "Workspace manifest for @aggregaytor/adapter-adam4adam.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/adam4adam/src/adam4adam-adapter.ts",
+    "purpose": "Adam4Adam adapter: intercepts fetch/XHR on adam4adam.com plus DOM data-author elements, normalizes chat messages/contacts to UnifiedMessage.",
+    "layer": "adapter",
+    "exports": [
+      "Adam4AdamAdapter"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts"
+    ],
+    "patterns": [
+      "network-interception",
+      "dom-extraction",
+      "payload-walking"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/adam4adam/src/index.ts",
+    "purpose": "Public entry re-exporting Adam4AdamAdapter.",
+    "layer": "adapter",
+    "exports": [
+      "Adam4AdamAdapter"
+    ],
+    "depends_on": [
+      "adapters/adam4adam/src/adam4adam-adapter.ts"
+    ],
+    "patterns": [
+      "barrel-export"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/adam4adam/tsconfig.json",
+    "purpose": "TypeScript config extending tsconfig.base.json.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/adam4adam/tsup.config.ts",
+    "purpose": "tsup build config (ESM+CJS, dts) with adapter-core external.",
+    "layer": "config",
+    "exports": [
+      "default"
+    ],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/doublelist/package.json",
+    "purpose": "Workspace manifest for @aggregaytor/adapter-doublelist.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/doublelist/src/doublelist-adapter.ts",
+    "purpose": "DoubleList adapter: scrapes server-rendered notification DOM (data-mess-id/channel selectors) and intercepted responses into UnifiedMessage.",
+    "layer": "adapter",
+    "exports": [
+      "DoubleListAdapter"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts"
+    ],
+    "patterns": [
+      "dom-extraction",
+      "relative-time-parsing"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/doublelist/src/index.ts",
+    "purpose": "Public entry re-exporting DoubleListAdapter.",
+    "layer": "adapter",
+    "exports": [
+      "DoubleListAdapter"
+    ],
+    "depends_on": [
+      "adapters/doublelist/src/doublelist-adapter.ts"
+    ],
+    "patterns": [
+      "barrel-export"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/doublelist/tsconfig.json",
+    "purpose": "TypeScript config extending tsconfig.base.json.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/doublelist/tsup.config.ts",
+    "purpose": "tsup build config (ESM+CJS, dts) with adapter-core external.",
+    "layer": "config",
+    "exports": [
+      "default"
+    ],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/gmail/package.json",
+    "purpose": "Workspace manifest for @aggregaytor/adapter-gmail.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/gmail/src/gmail-adapter.ts",
+    "purpose": "Gmail adapter: DOM observation of mail.google.com plus Gmail API response interception; host-anchored URL matching.",
+    "layer": "adapter",
+    "exports": [
+      "GmailAdapter"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts"
+    ],
+    "patterns": [
+      "network-interception",
+      "dom-extraction",
+      "host-anchored-url-check"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/gmail/src/index.ts",
+    "purpose": "Public entry re-exporting GmailAdapter.",
+    "layer": "adapter",
+    "exports": [
+      "GmailAdapter"
+    ],
+    "depends_on": [
+      "adapters/gmail/src/gmail-adapter.ts"
+    ],
+    "patterns": [
+      "barrel-export"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/gmail/tsconfig.json",
+    "purpose": "TypeScript config extending tsconfig.base.json.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/gmail/tsup.config.ts",
+    "purpose": "tsup build config (ESM+CJS, dts) with adapter-core external.",
+    "layer": "config",
+    "exports": [
+      "default"
+    ],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/grindr/package.json",
+    "purpose": "Workspace manifest for @aggregaytor/adapter-grindr.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/grindr/src/grindr-adapter.ts",
+    "purpose": "Grindr Web adapter: intercepts /v3/inbox, /v4/chat and /v1/ws WebSocket of the React SPA; captures auth headers for API-replay sends.",
+    "layer": "adapter",
+    "exports": [
+      "GrindrAdapter"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts"
+    ],
+    "patterns": [
+      "network-interception",
+      "websocket-parsing",
+      "auth-capture"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/grindr/src/index.ts",
+    "purpose": "Public entry re-exporting GrindrAdapter.",
+    "layer": "adapter",
+    "exports": [
+      "GrindrAdapter"
+    ],
+    "depends_on": [
+      "adapters/grindr/src/grindr-adapter.ts"
+    ],
+    "patterns": [
+      "barrel-export"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/grindr/tsconfig.json",
+    "purpose": "TypeScript config extending tsconfig.base.json.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/grindr/tsup.config.ts",
+    "purpose": "tsup build config (ESM+CJS, dts) with core/context-engine externals.",
+    "layer": "config",
+    "exports": [
+      "default"
+    ],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/sniffies/__tests__/event-classification.test.ts",
+    "purpose": "Tests isGlobalChatEvent/isPresenceEvent exact and fuzzy classification.",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [
+      "adapters/sniffies/src/ws-parser.ts"
+    ],
+    "patterns": [
+      "test-only"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/sniffies/__tests__/force-refresh.test.ts",
+    "purpose": "Tests SniffiesAdapter.forceRefreshConversation with a stubbed global fetch.",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [
+      "adapters/sniffies/src/sniffies-adapter.ts"
+    ],
+    "patterns": [
+      "test-only",
+      "fetch-stub"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/sniffies/__tests__/partials-parser.test.ts",
+    "purpose": "Tests replicated copies of sniffies-map-filters partials parsers (not the shipped functions \u2014 flagged in CDO report).",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "test-only",
+      "replicated-logic"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/sniffies/__tests__/perf-benchmark.test.ts",
+    "purpose": "Latency-budget benchmarks for WS frame parsing and event classification.",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [
+      "adapters/sniffies/src/ws-parser.ts"
+    ],
+    "patterns": [
+      "test-only",
+      "perf-benchmark"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/sniffies/__tests__/time-parser.test.ts",
+    "purpose": "Tests a replicated copy of the sniffies-bridge parseRelativeTime DOM time parser.",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "test-only",
+      "replicated-logic"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/sniffies/__tests__/ws-parser.test.ts",
+    "purpose": "Tests parseSocketIOFrame envelope parsing for both frame formats.",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [
+      "adapters/sniffies/src/ws-parser.ts"
+    ],
+    "patterns": [
+      "test-only"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/sniffies/package.json",
+    "purpose": "Workspace manifest for @aggregaytor/adapter-sniffies.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/sniffies/src/index.ts",
+    "purpose": "Public entry re-exporting SniffiesAdapter, ws-parser helpers, and profile-resolver utilities.",
+    "layer": "adapter",
+    "exports": [
+      "SniffiesAdapter",
+      "parseSocketIOFrame",
+      "isGlobalChatEvent",
+      "isPresenceEvent",
+      "ParsedSocketFrame",
+      "normalizeProfileId",
+      "extractProfileIdFromUrl",
+      "findLikelyProfileId",
+      "extractProfileIdFromBackground"
+    ],
+    "depends_on": [
+      "adapters/sniffies/src/sniffies-adapter.ts",
+      "adapters/sniffies/src/ws-parser.ts",
+      "adapters/sniffies/src/profile-resolver.ts"
+    ],
+    "patterns": [
+      "barrel-export"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/sniffies/src/profile-resolver.ts",
+    "purpose": "Extracts the conversation partner's profile ID from payloads/URLs/DOM via a 6-priority strategy with self-ID skipping.",
+    "layer": "adapter",
+    "exports": [
+      "normalizeProfileId",
+      "extractProfileIdFromUrl",
+      "findLikelyProfileId",
+      "extractProfileIdFromBackground"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "priority-fallback-chain",
+      "self-id-skipping"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/sniffies/src/sniffies-adapter.ts",
+    "purpose": "Sniffies adapter: fetch/XHR/WebSocket interception with body-type-vs-message disambiguation and global-chat vs DM routing.",
+    "layer": "adapter",
+    "exports": [
+      "SniffiesAdapter"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts",
+      "adapters/sniffies/src/ws-parser.ts",
+      "adapters/sniffies/src/profile-resolver.ts"
+    ],
+    "patterns": [
+      "network-interception",
+      "websocket-parsing",
+      "heuristic-classification"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/sniffies/src/ws-parser.ts",
+    "purpose": "Parses Sniffies WebSocket frames (raw JSON and Socket.IO 42-prefix) and classifies events as global-chat vs presence.",
+    "layer": "adapter",
+    "exports": [
+      "ParsedSocketFrame",
+      "parseSocketIOFrame",
+      "GLOBAL_CHAT_EVENTS",
+      "PRESENCE_EVENTS",
+      "isGlobalChatEvent",
+      "isPresenceEvent"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "websocket-parsing",
+      "dual-format-parser"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/sniffies/tsconfig.json",
+    "purpose": "TypeScript config extending tsconfig.base.json.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/sniffies/tsup.config.ts",
+    "purpose": "tsup build config (ESM+CJS, dts) with core/context-engine externals.",
+    "layer": "config",
+    "exports": [
+      "default"
+    ],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/yahoo/package.json",
+    "purpose": "Workspace manifest for @aggregaytor/adapter-yahoo.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/yahoo/src/index.ts",
+    "purpose": "Public entry re-exporting YahooAdapter.",
+    "layer": "adapter",
+    "exports": [
+      "YahooAdapter"
+    ],
+    "depends_on": [
+      "adapters/yahoo/src/yahoo-adapter.ts"
+    ],
+    "patterns": [
+      "barrel-export"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/yahoo/src/yahoo-adapter.ts",
+    "purpose": "Yahoo Mail adapter: REST response interception on mail.yahoo.com plus MutationObserver DOM extraction (no WebSockets).",
+    "layer": "adapter",
+    "exports": [
+      "YahooAdapter"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts"
+    ],
+    "patterns": [
+      "network-interception",
+      "dom-extraction"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/yahoo/tsconfig.json",
+    "purpose": "TypeScript config extending tsconfig.base.json.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "adapters/yahoo/tsup.config.ts",
+    "purpose": "tsup build config (ESM+CJS, dts) with adapter-core external.",
+    "layer": "config",
+    "exports": [
+      "default"
+    ],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "chrome-dev-context.md",
+    "purpose": "Standalone Chrome MV3 + DevTools MCP reference context (root copy of the chrome-dev-context skill body).",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "ai-agent-context"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/ARCHITECTURE.md",
+    "purpose": "Primary architecture entry point: code map, message-dispatch model, storage layer, caching invariants, content-script architecture, things-not-to-do.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "primary-entry-point"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/CDO-REPORT-2026-08-30.md",
+    "purpose": "Code Deep Optimizer report: ~160 applied fixes (10 critical), verify-gate results, BLOCKED decision-needed items.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "audit-report"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/COMPONENTS.md",
+    "purpose": "Per-module component reference: purpose, public API, dependencies, constraints, dependency graph",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/DEVELOPMENT.md",
+    "purpose": "Developer guide: setup, watch mode, test/lint commands, CI, adapter-adding walkthrough, troubleshooting",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/DEXIE-MIGRATION-PLAN.md",
+    "purpose": "PouchDB\u2192Dexie migration plan (implemented as the current compat layer with legacy import and OPFS snapshots).",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "migration-plan"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/INSTALLATION.md",
+    "purpose": "Install guide: prerequisites, build, load-unpacked, verification, upgrade, uninstall",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/MCP.md",
+    "purpose": "MCP posture (none configured repo-locally) and the debug-server WebSocket bridge as debug surface",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/PERFORMANCE-ANALYSIS-2026-04-14.md",
+    "purpose": "Performance measurements comparing v0.57.6 baseline to v0.57.9 optimizations.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "perf-report"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/RESEARCH-2026-04-14.md",
+    "purpose": "Research notes verifying caching assumptions and cataloguing candidate libraries/strategies.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "research-notes"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/SECURITY.md",
+    "purpose": "STRIDE threat model: trust boundaries, auth, secrets, mitigations, known open risks from CDO report",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/TESTING.md",
+    "purpose": "Test strategy: vitest suites, 198-test baseline, coverage posture, CI gate, known limitations",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/accessibility-ux-reviewer-context.md",
+    "purpose": "Full accessibility/UX reviewer reference context backing the matching skill.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "ai-agent-context"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/caching-and-optimization.md",
+    "purpose": "All cache layers with invalidation triggers, perf patterns, known bottlenecks, profiling",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/code-reviewer-context.md",
+    "purpose": "Full code-reviewer reference context backing the matching skill.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "ai-agent-context"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/codebase-overview.md",
+    "purpose": "Generated codebase map: every workspace component and source file with purpose, exports, layer, and patterns.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "generated",
+      "index"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/external-calls.md",
+    "purpose": "Inventory of every external call site: target, transport, error handling, timeout, logging",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/high_signal_file_index.json",
+    "purpose": "Generated machine-readable per-file index (purpose, layer, exports, depends_on, patterns) consumed by retrieval tooling and check-doc-indexes.mjs.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "generated",
+      "index"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/html-css-context.md",
+    "purpose": "Full HTML/CSS reference context backing the matching skill.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "ai-agent-context"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/integrations-and-assumptions.md",
+    "purpose": "External services (platforms, LLM providers, Google APIs), hardcoded assumptions, env differences",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/javascript-nodejs-context.md",
+    "purpose": "Full JavaScript/Node.js reference context backing the matching skill.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "ai-agent-context"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/known-issues.md",
+    "purpose": "Active bugs, BLOCKED findings from the CDO report, TODO markers, pre-existing tsc errors",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/logging.md",
+    "purpose": "Logging approach: createLogger levels, error-logger persistence, sensitive-data rules",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/mongodb-expert-context.md",
+    "purpose": "Full MongoDB reference context backing the matching skill.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "ai-agent-context"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/mongodb-performance-troubleshooting-context.md",
+    "purpose": "Full MongoDB performance/troubleshooting context backing the matching skill.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "ai-agent-context"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/onboarding.md",
+    "purpose": "New-contributor walkthrough: read order, first build, two-worlds model, invariants",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/performance-profiling-expert-context.md",
+    "purpose": "Full performance/profiling reference context backing the matching skill.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "ai-agent-context"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/requirements.md",
+    "purpose": "Functional and non-functional requirements, dependencies, system requirements",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/runbooks/build-and-release.md",
+    "purpose": "Release runbook: version bump in manifest.json, build, reload, vX.Y.Z commit form",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/runbooks/extension-debugging.md",
+    "purpose": "Debugging runbook: SW inspection, build-hash auto-reload, error-logger dump, debug bridge",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/security-reviewer-context.md",
+    "purpose": "Full security reviewer reference context backing the matching skill.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "ai-agent-context"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/software-architect-context.md",
+    "purpose": "Full software architecture reference context backing the matching skill.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "ai-agent-context"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/testing-and-vitest-expert-context.md",
+    "purpose": "Full testing/Vitest reference context backing the matching skill.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "ai-agent-context"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/typescript-expert-context.md",
+    "purpose": "Full TypeScript reference context backing the matching skill.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "ai-agent-context"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "eslint.config.mjs",
+    "purpose": "Flat ESLint config with shared browser/extension globals and @typescript-eslint for *.ts.",
+    "layer": "config",
+    "exports": [
+      "default"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "eslint-flat-config"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/background/debug-bridge.ts",
+    "purpose": "Read-mostly introspection commands for the MCP debug server, reached via the SW DEBUG_COMMAND case (ungated \u2014 documented security caveat).",
+    "layer": "extension-background",
+    "exports": [
+      "handleDebugCommand"
+    ],
+    "depends_on": [
+      "packages/store/src/index.ts",
+      "extensions/aggregaytor/background/llm.ts"
+    ],
+    "patterns": [
+      "debug-surface",
+      "bounded-reads"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/background/error-logger.ts",
+    "purpose": "Rolling 500-entry error buffer in chrome.storage.local capturing errors from every context, exportable as a JSON artifact.",
+    "layer": "extension-background",
+    "exports": [
+      "ErrorLogEntry",
+      "logError",
+      "getErrorLog",
+      "clearErrorLog",
+      "exportErrorLog",
+      "installGlobalErrorCapture"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "rolling-buffer",
+      "global-error-capture"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/background/friend-finder.ts",
+    "purpose": "Paced intro-greeting workflow: candidate ranking by filters/distance, permanent ignore list, chrome.alarms-driven jittered send loop.",
+    "layer": "extension-background",
+    "exports": [
+      "FFFilters",
+      "FFCandidate",
+      "FFRunState",
+      "FFState",
+      "getFFState",
+      "saveFFState",
+      "updateFFFilters",
+      "addToIgnoreList",
+      "getRunState",
+      "setRunState",
+      "rankCandidates",
+      "nextDelayMs",
+      "estimateRemainingMs",
+      "FF_ALARM"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "alarm-driven-loop",
+      "jittered-pacing",
+      "session-state"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/background/llm.ts",
+    "purpose": "Multi-provider LLM engine (Gemini/OpenAI/Anthropic/Groq/Cerebras/Perplexity/Mistral/Copilot/local): suggestions, auto-respond, greetings, nicknames, dossier extraction, personality presets, rate limiting, layered caches.",
+    "layer": "extension-background",
+    "exports": [
+      "LLMProvider",
+      "getDeprecationWarnings",
+      "LLMRateSettings",
+      "getLLMRateSettings",
+      "saveLLMRateSettings",
+      "getLLMConfig",
+      "getAllProviderKeys",
+      "saveProviderKey",
+      "getProviderModelOverride",
+      "setProviderModelOverride",
+      "getAllProviderModels",
+      "getDefaultModel",
+      "getEffectiveModelForProvider",
+      "getLLMQueueStatus",
+      "saveLLMConfig",
+      "PersonalitySettings",
+      "PERSONALITY_PRESETS",
+      "getPersonalitySettings",
+      "savePersonalitySettings",
+      "deriveStyleGuide",
+      "getLLMOptimizationStats",
+      "clearLLMCaches",
+      "generateSuggestions",
+      "AutoRespondSettings",
+      "AutoRespondResult",
+      "generateAutoResponse",
+      "generateGreeting",
+      "generateNickname",
+      "extractDossierFields",
+      "localDossierExtraction",
+      "generateConversationSummary",
+      "ContactQueryRow",
+      "QueryContactsResult",
+      "queryContacts"
+    ],
+    "depends_on": [
+      "packages/store/src/index.ts"
+    ],
+    "patterns": [
+      "provider-failover",
+      "request-queue",
+      "prompt-caching"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/background/model-updater.ts",
+    "purpose": "Periodic auto-discovery of newer LLM model versions per provider via /models endpoints with family-pattern ranking and suggestions.",
+    "layer": "extension-background",
+    "exports": [
+      "ModelSuggestion",
+      "ModelUpdaterState",
+      "getUpdaterState",
+      "saveUpdaterState",
+      "checkAllProviders",
+      "MODEL_UPDATER_ALARM"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "model-discovery",
+      "family-ranking"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/background/search-index.ts",
+    "purpose": "In-memory FlexSearch full-text index over message bodies: lazy seed, incremental maintenance, memory cap with eviction accounting.",
+    "layer": "extension-background",
+    "exports": [
+      "SEARCH_INDEX_MAX_DOCS",
+      "IndexableMessage",
+      "seedIndex",
+      "indexMessages",
+      "removeFromIndex",
+      "clearIndex",
+      "searchMessages",
+      "isIndexReady",
+      "getIndexSize",
+      "getEvictedCount",
+      "getLastEvictionAt",
+      "getLifetimeStats"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "inverted-index",
+      "lazy-seed",
+      "bounded-memory"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/background/service-worker.ts",
+    "purpose": "Central background service worker: single ~700-case handleMessage switch routing adapter writes, CRUD, LLM, Google, training, and debug messages; thread-summary cache invalidation; alarms.",
+    "layer": "extension-background",
+    "exports": [
+      "recordMutation"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts",
+      "packages/store/src/index.ts",
+      "extensions/aggregaytor/background/llm.ts",
+      "extensions/aggregaytor/background/search-index.ts",
+      "extensions/aggregaytor/background/debug-bridge.ts",
+      "extensions/aggregaytor/background/error-logger.ts",
+      "extensions/aggregaytor/background/friend-finder.ts",
+      "extensions/aggregaytor/background/model-updater.ts"
+    ],
+    "patterns": [
+      "message-router",
+      "single-switch-dispatch",
+      "cache-invalidation"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/build.sh",
+    "purpose": "Build script: runs Vite then copies manifest, sidepanel, popup, icons into dist/.",
+    "layer": "tooling",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "build-script"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/adam4adam-bridge.ts",
+    "purpose": "ISOLATED-world A4A bridge: relay, auto-send/avatar-scrape commands, middle-click block, hide filter, floating actions.",
+    "layer": "extension-content",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "isolated-world",
+      "relay-allowlist"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/adam4adam.ts",
+    "purpose": "MAIN-world entry for adam4adam.com: Adam4AdamAdapter event relay + text expander.",
+    "layer": "extension-content",
+    "exports": [],
+    "depends_on": [
+      "adapters/adam4adam/src/index.ts",
+      "extensions/aggregaytor/content/text-expander.ts"
+    ],
+    "patterns": [
+      "main-world",
+      "custom-event-relay"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/doublelist-bridge.ts",
+    "purpose": "ISOLATED-world DoubleList bridge with relay-type allowlist and context-invalidation guard.",
+    "layer": "extension-content",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "isolated-world",
+      "relay-allowlist"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/doublelist.ts",
+    "purpose": "MAIN-world entry for doublelist.com: DoubleListAdapter event relay + text expander.",
+    "layer": "extension-content",
+    "exports": [],
+    "depends_on": [
+      "adapters/doublelist/src/index.ts",
+      "extensions/aggregaytor/content/text-expander.ts"
+    ],
+    "patterns": [
+      "main-world",
+      "custom-event-relay"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/floating-actions.ts",
+    "purpose": "ISOLATED-world floating quick-action panel (block, notes, rating, quick phrases) shown on profile/chat pages; draggable, position persisted.",
+    "layer": "extension-content",
+    "exports": [
+      "showFloatingPanel",
+      "hideFloatingPanel"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "isolated-world",
+      "injected-ui"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/gmail-bridge.ts",
+    "purpose": "ISOLATED-world Gmail bridge with relay-type allowlist and context-invalidation guard.",
+    "layer": "extension-content",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "isolated-world",
+      "relay-allowlist"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/gmail.ts",
+    "purpose": "MAIN-world entry for mail.google.com: GmailAdapter event relay.",
+    "layer": "extension-content",
+    "exports": [],
+    "depends_on": [
+      "adapters/gmail/src/index.ts"
+    ],
+    "patterns": [
+      "main-world",
+      "custom-event-relay"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/grindr-bridge.ts",
+    "purpose": "ISOLATED-world Grindr bridge: relay allowlist, SW command handling, middle-click block, floating panel wiring, error forwarding.",
+    "layer": "extension-content",
+    "exports": [],
+    "depends_on": [
+      "extensions/aggregaytor/content/floating-actions.ts"
+    ],
+    "patterns": [
+      "isolated-world",
+      "relay-allowlist"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/grindr-filters.ts",
+    "purpose": "Cascade grid filter engine: enum maps, profile indexing from API responses, hide/show CSS by inclusive/exclusive filters.",
+    "layer": "extension-content",
+    "exports": [
+      "ETHNICITY_MAP",
+      "GENDER_MAP",
+      "indexGrindrProfile",
+      "initGrindrFilters"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "main-world",
+      "enum-mapping",
+      "css-classing"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/grindr.ts",
+    "purpose": "MAIN-world entry for web.grindr.com: GrindrAdapter, photo-hash\u2192profileId mapping, auth relay, filters + text expander boot.",
+    "layer": "extension-content",
+    "exports": [],
+    "depends_on": [
+      "adapters/grindr/src/index.ts",
+      "packages/adapter-core/src/index.ts",
+      "extensions/aggregaytor/content/text-expander.ts",
+      "extensions/aggregaytor/content/grindr-filters.ts"
+    ],
+    "patterns": [
+      "main-world",
+      "custom-event-relay",
+      "hash-mapping"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/sniffies-bridge.ts",
+    "purpose": "ISOLATED-world Sniffies bridge: relays adapter events to SW, executes SW commands (SPA nav, auto-send, Angular DOM scraping), survives context invalidation, injects MAIN script.",
+    "layer": "extension-content",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "isolated-world",
+      "relay-allowlist",
+      "dom-scraping",
+      "spa-navigation"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/sniffies-map-filters.ts",
+    "purpose": "MAIN-world map-marker filtering: attitude hide/highlight, text include/exclude, chat-age badges, manual blocking via periodic marker scans.",
+    "layer": "extension-content",
+    "exports": [
+      "initMapFilters"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "main-world",
+      "periodic-scan",
+      "css-classing"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/sniffies-migrate.ts",
+    "purpose": "One-time migration of legacy sniffiesplus localStorage (chat activity, bookmarks, notes) into the store.",
+    "layer": "extension-content",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "one-shot-migration"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/sniffies.ts",
+    "purpose": "MAIN-world entry for sniffies.com: instantiates SniffiesAdapter, relays events via CustomEvent, exposes perf counters, boots map filters + text expander.",
+    "layer": "extension-content",
+    "exports": [],
+    "depends_on": [
+      "adapters/sniffies/src/index.ts",
+      "packages/adapter-core/src/index.ts",
+      "extensions/aggregaytor/content/sniffies-map-filters.ts",
+      "extensions/aggregaytor/content/text-expander.ts"
+    ],
+    "patterns": [
+      "main-world",
+      "custom-event-relay"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/text-expander.ts",
+    "purpose": "Text substitution engine expanding shortcuts in chat inputs; substitutions stored via chrome.storage relay (defaults currently in page-origin localStorage \u2014 CDO-flagged).",
+    "layer": "extension-content",
+    "exports": [
+      "initTextExpander"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "input-monitoring",
+      "text-expansion"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/yahoo-bridge.ts",
+    "purpose": "ISOLATED-world Yahoo bridge with relay-type allowlist and context-invalidation guard.",
+    "layer": "extension-content",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "isolated-world",
+      "relay-allowlist"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/content/yahoo.ts",
+    "purpose": "MAIN-world entry for mail.yahoo.com: YahooAdapter event relay.",
+    "layer": "extension-content",
+    "exports": [],
+    "depends_on": [
+      "adapters/yahoo/src/index.ts"
+    ],
+    "patterns": [
+      "main-world",
+      "custom-event-relay"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/manifest.json",
+    "purpose": "MV3 manifest \u2014 SOURCE OF TRUTH for version; permissions, host permissions, content-script registrations, oauth2 scopes.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "mv3-manifest",
+      "version-source-of-truth"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/package.json",
+    "purpose": "Workspace manifest for the extension: vite build/dev scripts.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/popup/popup.html",
+    "purpose": "Popup markup for quick settings.",
+    "layer": "extension-ui",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/popup/popup.js",
+    "purpose": "Popup controller: AI provider config, picture library, block rules; safe sendMessage wrapper.",
+    "layer": "extension-ui",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "vanilla-js",
+      "safe-send-wrapper"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/sidepanel/panel.css",
+    "purpose": "Side panel styling.",
+    "layer": "extension-ui",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/sidepanel/panel.html",
+    "purpose": "Side panel markup: inbox and thread views, settings modals.",
+    "layer": "extension-ui",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/sidepanel/panel.js",
+    "purpose": "~3500-line vanilla-JS side panel controller: inbox/thread views, filters, suggestions, reminders, settings; entity-escaped rendering; error forwarding.",
+    "layer": "extension-ui",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "vanilla-js",
+      "message-passing-ui",
+      "html-escaping"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/tsconfig.json",
+    "purpose": "TypeScript config extending tsconfig.base.json.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/vite.config.ts",
+    "purpose": "Two-pass Vite build: ESM pass for SW/bridges, then IIFE pass for MAIN-world content scripts; writes dist/.build-hash for dev auto-reload.",
+    "layer": "config",
+    "exports": [
+      "default"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "two-pass-build",
+      "iife-content-scripts",
+      "build-hash-autoreload"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "memory.md",
+    "purpose": "Versioned operator memory log (active task, completed, next steps)",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "package.json",
+    "purpose": "Root workspace manifest: pnpm scripts (build/test/lint/clean/index:*) and shared dev dependencies.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "pnpm-workspace-root"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/__tests__/message-normalizer.test.ts",
+    "purpose": "Tests timestamp/direction/text extraction and relative-time parsing.",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [
+      "packages/adapter-core/src/message-normalizer.ts"
+    ],
+    "patterns": [
+      "test-only"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/__tests__/payload-walker.test.ts",
+    "purpose": "Tests walkPayload traversal, depth limits, and cycle handling.",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [
+      "packages/adapter-core/src/payload-walker.ts",
+      "packages/adapter-core/src/types.ts"
+    ],
+    "patterns": [
+      "test-only"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/__tests__/perf-benchmark.test.ts",
+    "purpose": "Latency-budget benchmarks for walker/normalizer/perf hot paths.",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [
+      "packages/adapter-core/src/payload-walker.ts",
+      "packages/adapter-core/src/message-normalizer.ts",
+      "packages/adapter-core/src/perf.ts",
+      "packages/adapter-core/src/types.ts"
+    ],
+    "patterns": [
+      "test-only",
+      "perf-benchmark"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/__tests__/perf.test.ts",
+    "purpose": "Tests PerfCounters start/end accumulation and reset.",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [
+      "packages/adapter-core/src/perf.ts"
+    ],
+    "patterns": [
+      "test-only"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/package.json",
+    "purpose": "Workspace manifest for @aggregaytor/adapter-core.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/src/api-sender.ts",
+    "purpose": "Captures auth headers from intercepted calls and replays send-message endpoints (PLATFORM_AUTH_HOST maps slug\u2192host cache keys); DOM-injection fallback.",
+    "layer": "shared-lib",
+    "exports": [
+      "captureAuthHeaders",
+      "getCapturedAuth",
+      "sendViaApi"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/logger.ts"
+    ],
+    "patterns": [
+      "auth-capture",
+      "api-replay"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/src/base-adapter.ts",
+    "purpose": "Abstract BaseAdapter: network-interception wiring, pub/sub event emitter, self-ID tracking, lifecycle cleanup registry.",
+    "layer": "shared-lib",
+    "exports": [
+      "BaseAdapter"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/types.ts",
+      "packages/adapter-core/src/network-interceptor.ts",
+      "packages/adapter-core/src/self-id-tracker.ts"
+    ],
+    "patterns": [
+      "abstract-base-class",
+      "event-emitter",
+      "lifecycle-cleanup"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/src/dom-observer.ts",
+    "purpose": "createDOMExtractor: MutationObserver-based message-element extraction with lazy root attachment for SPAs.",
+    "layer": "shared-lib",
+    "exports": [
+      "createDOMExtractor"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/types.ts"
+    ],
+    "patterns": [
+      "mutation-observer",
+      "lazy-attachment"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/src/index.ts",
+    "purpose": "Barrel export of adapter-core: types, BaseAdapter, interceptors, walker, normalizer, logger, perf.",
+    "layer": "shared-lib",
+    "exports": [
+      "Platform",
+      "UnifiedMessage",
+      "UnifiedContact",
+      "AdapterEventType",
+      "AdapterEvent",
+      "AdapterConfig",
+      "InterceptorOptions",
+      "PayloadVisitor",
+      "DOMExtractorOptions",
+      "BaseAdapter",
+      "installFetchInterceptor",
+      "installXHRInterceptor",
+      "installWebSocketInterceptor",
+      "installAllInterceptors",
+      "walkPayload",
+      "extractTimestamp",
+      "extractDirection",
+      "extractMessageText",
+      "extractId",
+      "parseRelativeTimeString",
+      "SelfIdTracker",
+      "createDOMExtractor",
+      "captureAuthHeaders",
+      "getCapturedAuth",
+      "sendViaApi",
+      "createLogger",
+      "setLogLevel",
+      "getLogLevel",
+      "loadLogLevel",
+      "saveLogLevel",
+      "LogLevel",
+      "perf"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/types.ts",
+      "packages/adapter-core/src/base-adapter.ts",
+      "packages/adapter-core/src/network-interceptor.ts",
+      "packages/adapter-core/src/payload-walker.ts",
+      "packages/adapter-core/src/message-normalizer.ts",
+      "packages/adapter-core/src/self-id-tracker.ts",
+      "packages/adapter-core/src/dom-observer.ts",
+      "packages/adapter-core/src/api-sender.ts",
+      "packages/adapter-core/src/logger.ts",
+      "packages/adapter-core/src/perf.ts"
+    ],
+    "patterns": [
+      "barrel-export"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/src/logger.ts",
+    "purpose": "Level-gated logger (debug..off) persisted via chrome.storage.local, safe outside extension contexts.",
+    "layer": "shared-lib",
+    "exports": [
+      "LogLevel",
+      "setLogLevel",
+      "getLogLevel",
+      "loadLogLevel",
+      "saveLogLevel",
+      "createLogger"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "level-gated-logging"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/src/message-normalizer.ts",
+    "purpose": "Heuristic extraction of timestamp/direction/text/id from arbitrary payload objects plus relative-time-string parsing.",
+    "layer": "shared-lib",
+    "exports": [
+      "extractTimestamp",
+      "extractDirection",
+      "extractMessageText",
+      "extractId",
+      "parseRelativeTimeString"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "key-heuristics",
+      "relative-time-parsing"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/src/network-interceptor.ts",
+    "purpose": "Monkey-patches fetch, XHR, and WebSocket on a window to passively capture platform traffic; also feeds auth capture.",
+    "layer": "shared-lib",
+    "exports": [
+      "installFetchInterceptor",
+      "installXHRInterceptor",
+      "installWebSocketInterceptor",
+      "installAllInterceptors"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/types.ts",
+      "packages/adapter-core/src/api-sender.ts",
+      "packages/adapter-core/src/perf.ts"
+    ],
+    "patterns": [
+      "monkey-patching",
+      "network-interception"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/src/payload-walker.ts",
+    "purpose": "Generic BFS JSON payload walker with cycle detection, depth limiting, and context-ID propagation for visitor-based extraction.",
+    "layer": "shared-lib",
+    "exports": [
+      "walkPayload"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/types.ts"
+    ],
+    "patterns": [
+      "visitor-pattern",
+      "bfs-traversal",
+      "cycle-detection"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/src/perf.ts",
+    "purpose": "In-memory perf counters (call count + cumulative wall time) exposed for DevTools inspection.",
+    "layer": "shared-lib",
+    "exports": [
+      "perf"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "perf-counters"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/src/self-id-tracker.ts",
+    "purpose": "SelfIdTracker: detects the logged-in user's platform IDs from payload sniffing and window globals so message direction is classified correctly.",
+    "layer": "shared-lib",
+    "exports": [
+      "SelfIdTracker"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "self-id-detection"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/src/types.ts",
+    "purpose": "Single source of truth for shared types: Platform, UnifiedMessage, UnifiedContact, adapter/interceptor/visitor contracts.",
+    "layer": "shared-lib",
+    "exports": [
+      "Platform",
+      "UnifiedMessage",
+      "UnifiedContact",
+      "AdapterEventType",
+      "AdapterEvent",
+      "AdapterConfig",
+      "InterceptorOptions",
+      "PayloadVisitor",
+      "DOMExtractorOptions"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "core-schema",
+      "namespaced-ids"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/tsconfig.json",
+    "purpose": "TypeScript config extending tsconfig.base.json.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/adapter-core/tsup.config.ts",
+    "purpose": "tsup build config (ESM+CJS, dts).",
+    "layer": "config",
+    "exports": [
+      "default"
+    ],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/__tests__/entities.test.ts",
+    "purpose": "Tests entity normalization, term matching, inference, EntityStore.",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [
+      "packages/context-engine/src/entities.ts",
+      "packages/context-engine/src/types.ts"
+    ],
+    "patterns": [
+      "test-only"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/__tests__/hash.test.ts",
+    "purpose": "Tests stableContentHash determinism and normalization.",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [
+      "packages/context-engine/src/hash.ts"
+    ],
+    "patterns": [
+      "test-only"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/__tests__/normalize.test.ts",
+    "purpose": "Tests unicode replacements, normalization, mojibake repair.",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [
+      "packages/context-engine/src/normalize.ts"
+    ],
+    "patterns": [
+      "test-only"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/__tests__/perf-benchmark.test.ts",
+    "purpose": "Latency-budget benchmarks for hashing, normalization, search.",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [
+      "packages/context-engine/src/hash.ts",
+      "packages/context-engine/src/normalize.ts",
+      "packages/context-engine/src/records.ts",
+      "packages/context-engine/src/search.ts"
+    ],
+    "patterns": [
+      "test-only",
+      "perf-benchmark"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/__tests__/search.test.ts",
+    "purpose": "Tests fielded index building and weighted search.",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [
+      "packages/context-engine/src/records.ts",
+      "packages/context-engine/src/search.ts"
+    ],
+    "patterns": [
+      "test-only"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/package.json",
+    "purpose": "Workspace manifest for @aggregaytor/context-engine.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/src/dedup.ts",
+    "purpose": "Exact + near-duplicate detection over ContextRecords via content hash and LSH buckets, keeping the most specific record.",
+    "layer": "shared-lib",
+    "exports": [
+      "dedupeContextRecords"
+    ],
+    "depends_on": [
+      "packages/context-engine/src/lsh.ts",
+      "packages/context-engine/src/types.ts"
+    ],
+    "patterns": [
+      "dedup",
+      "lsh"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/src/entities.ts",
+    "purpose": "Entity management with keyword/alias-based inference and a pluggable EntityStoreAdapter.",
+    "layer": "shared-lib",
+    "exports": [
+      "normalizeEntities",
+      "buildSearchTerms",
+      "termMatchesText",
+      "inferEntityId",
+      "inferEntityName",
+      "EntityStore"
+    ],
+    "depends_on": [
+      "packages/context-engine/src/types.ts"
+    ],
+    "patterns": [
+      "entity-inference",
+      "storage-adapter"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/src/hash.ts",
+    "purpose": "stableContentHash: FNV-1a 64-bit content hash over normalized text (offset-basis typo documented in CDO report, kept for persisted-hash compatibility).",
+    "layer": "shared-lib",
+    "exports": [
+      "stableContentHash"
+    ],
+    "depends_on": [
+      "packages/context-engine/src/normalize.ts"
+    ],
+    "patterns": [
+      "content-hashing",
+      "persisted-format-compat"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/src/index.ts",
+    "purpose": "Barrel export: normalization, hashing, tokenization, MinHash/LSH, dedup, records, fielded search, entities.",
+    "layer": "shared-lib",
+    "exports": [
+      "FieldWeights",
+      "SearchFields",
+      "ContextRecordInput",
+      "ContextRecord",
+      "MinHashOptions",
+      "LshOptions",
+      "DedupeOptions",
+      "DedupeResult",
+      "IndexDocument",
+      "FieldedIndexRecord",
+      "SearchOptions",
+      "SearchResult",
+      "TokenizeOptions",
+      "Entity",
+      "EntityStoreAdapter",
+      "normalizeContextText",
+      "applyCommonReplacements",
+      "maybeRepairMojibake",
+      "stableContentHash",
+      "tokenizeIndexText",
+      "normalizeSearchText",
+      "DEFAULT_STOPWORDS",
+      "buildMinHashSignature",
+      "buildShingles",
+      "seededHash",
+      "buildLshBuckets",
+      "estimateSignatureSimilarity",
+      "estimateTokenJaccard",
+      "createContextRecord",
+      "createContextModule",
+      "createContextChunk",
+      "buildRecordSearchFields",
+      "buildDateBucket",
+      "dedupeContextRecords",
+      "buildFieldedIndexRecord",
+      "searchFieldedIndex",
+      "DEFAULT_FIELD_WEIGHTS",
+      "normalizeEntities",
+      "buildSearchTerms",
+      "termMatchesText",
+      "inferEntityId",
+      "inferEntityName",
+      "EntityStore"
+    ],
+    "depends_on": [
+      "packages/context-engine/src/types.ts",
+      "packages/context-engine/src/normalize.ts",
+      "packages/context-engine/src/hash.ts",
+      "packages/context-engine/src/tokenize.ts",
+      "packages/context-engine/src/minhash.ts",
+      "packages/context-engine/src/lsh.ts",
+      "packages/context-engine/src/records.ts",
+      "packages/context-engine/src/dedup.ts",
+      "packages/context-engine/src/search.ts",
+      "packages/context-engine/src/entities.ts"
+    ],
+    "patterns": [
+      "barrel-export"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/src/lsh.ts",
+    "purpose": "LSH banding of MinHash signatures plus signature/Jaccard similarity estimators (trailing-band drop kept for persisted-bucket compatibility).",
+    "layer": "shared-lib",
+    "exports": [
+      "buildLshBuckets",
+      "estimateSignatureSimilarity",
+      "estimateTokenJaccard"
+    ],
+    "depends_on": [
+      "packages/context-engine/src/minhash.ts",
+      "packages/context-engine/src/types.ts"
+    ],
+    "patterns": [
+      "lsh",
+      "persisted-format-compat"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/src/minhash.ts",
+    "purpose": "MinHash signature generation over token shingles with seeded FNV hashing.",
+    "layer": "shared-lib",
+    "exports": [
+      "buildShingles",
+      "seededHash",
+      "toIntOption",
+      "buildMinHashSignature"
+    ],
+    "depends_on": [
+      "packages/context-engine/src/tokenize.ts",
+      "packages/context-engine/src/types.ts"
+    ],
+    "patterns": [
+      "minhash"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/src/normalize.ts",
+    "purpose": "Text normalization: unicode replacements, zero-width stripping, mojibake repair.",
+    "layer": "shared-lib",
+    "exports": [
+      "applyCommonReplacements",
+      "maybeRepairMojibake",
+      "normalizeContextText"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "text-normalization"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/src/records.ts",
+    "purpose": "ContextRecord creation pipeline: normalize, hash, tokenize, MinHash, LSH buckets, date bucketing.",
+    "layer": "shared-lib",
+    "exports": [
+      "buildDateBucket",
+      "buildRecordSearchFields",
+      "createContextRecord",
+      "createContextModule",
+      "createContextChunk"
+    ],
+    "depends_on": [
+      "packages/context-engine/src/normalize.ts",
+      "packages/context-engine/src/hash.ts",
+      "packages/context-engine/src/tokenize.ts",
+      "packages/context-engine/src/minhash.ts",
+      "packages/context-engine/src/lsh.ts",
+      "packages/context-engine/src/types.ts"
+    ],
+    "patterns": [
+      "enrichment-pipeline"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/src/search.ts",
+    "purpose": "Fielded inverted search index with per-field weighted scoring.",
+    "layer": "shared-lib",
+    "exports": [
+      "DEFAULT_FIELD_WEIGHTS",
+      "buildFieldedIndexRecord",
+      "searchFieldedIndex"
+    ],
+    "depends_on": [
+      "packages/context-engine/src/tokenize.ts",
+      "packages/context-engine/src/records.ts",
+      "packages/context-engine/src/types.ts"
+    ],
+    "patterns": [
+      "fielded-search",
+      "weighted-scoring"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/src/tokenize.ts",
+    "purpose": "Tokenization with stopword filtering and search-text normalization.",
+    "layer": "shared-lib",
+    "exports": [
+      "DEFAULT_STOPWORDS",
+      "normalizeSearchText",
+      "tokenizeIndexText"
+    ],
+    "depends_on": [
+      "packages/context-engine/src/normalize.ts",
+      "packages/context-engine/src/types.ts"
+    ],
+    "patterns": [
+      "tokenization"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/src/types.ts",
+    "purpose": "Context-engine type contracts: ContextRecord, search fields/weights, dedupe/LSH options, Entity store adapter.",
+    "layer": "shared-lib",
+    "exports": [
+      "FieldWeights",
+      "SearchFields",
+      "ContextRecordInput",
+      "ContextRecord",
+      "MinHashOptions",
+      "LshOptions",
+      "DedupeOptions",
+      "DedupeResult",
+      "IndexDocument",
+      "FieldedIndexRecord",
+      "SearchOptions",
+      "SearchResult",
+      "TokenizeOptions",
+      "Entity",
+      "EntityStoreAdapter"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "core-schema"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/tsconfig.json",
+    "purpose": "TypeScript config extending tsconfig.base.json.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/context-engine/tsup.config.ts",
+    "purpose": "tsup build config (ESM+CJS, dts).",
+    "layer": "config",
+    "exports": [
+      "default"
+    ],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/grindr-lib/src/albums.js",
+    "purpose": "Private-album share client",
+    "layer": "shared-lib",
+    "exports": [
+      "createAlbums"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/grindr-lib/src/auth.js",
+    "purpose": "Credential store + authed request() with timeout/abort and typed errors",
+    "layer": "shared-lib",
+    "exports": [
+      "createAuth"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/grindr-lib/src/blocks.js",
+    "purpose": "hide/block/unblock + paginated listBlocks/listHides (hide and block mutually exclusive)",
+    "layer": "shared-lib",
+    "exports": [
+      "createBlocks"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/grindr-lib/src/chat.js",
+    "purpose": "Chat HTTP surface + conversationId/deriveOwnId helpers",
+    "layer": "shared-lib",
+    "exports": [
+      "conversationId",
+      "deriveOwnId",
+      "createChat"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/grindr-lib/src/compose.js",
+    "purpose": "Composer/Send resolution + greet() (native React value setter, WS-send confirm)",
+    "layer": "shared-lib",
+    "exports": [
+      "findComposer",
+      "findSendButton",
+      "fill",
+      "submit",
+      "greet",
+      "confirmCleared",
+      "isDrawerComposer"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/grindr-lib/src/dom.js",
+    "purpose": "Profile-id/cascade-tile resolution + route detection (bounded, refuses sidebar trap)",
+    "layer": "shared-lib",
+    "exports": [
+      "isPlausibleProfileId",
+      "resolveCascadeTile",
+      "resolveProfileIdFromElement",
+      "route",
+      "PROFILE_PHOTO_SELECTOR",
+      "CASCADE_TILE_SELECTOR"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/grindr-lib/src/errors.js",
+    "purpose": "GrindrError/GrindrAuthError + parseErrorCode (never carries a token)",
+    "layer": "shared-lib",
+    "exports": [
+      "parseErrorCode",
+      "GrindrError",
+      "GrindrAuthError"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/grindr-lib/src/index.d.ts",
+    "purpose": "Hand-written type surface for the vendored Grindr client library",
+    "layer": "shared-lib",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/grindr-lib/src/index.js",
+    "purpose": "Grindr client barrel: createClient + re-exports (dom, compose, limiter, reconcile helpers)",
+    "layer": "shared-lib",
+    "exports": [
+      "createClient",
+      "VERSION",
+      "conversationId",
+      "deriveOwnId",
+      "idsFromListPayload",
+      "dom",
+      "compose",
+      "createObserver",
+      "createLimiter"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/grindr-lib/src/limiter.js",
+    "purpose": "createLimiter: serialize writes behind min interval + rolling hourly cap",
+    "layer": "shared-lib",
+    "exports": [
+      "createLimiter"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/grindr-lib/src/observe.js",
+    "purpose": "Opt-in fetch/WebSocket observer that auto-captures Grindr3 auth headers",
+    "layer": "shared-lib",
+    "exports": [
+      "createObserver"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/grindr-lib/src/profiles.js",
+    "purpose": "Profile/cascade/views client",
+    "layer": "shared-lib",
+    "exports": [
+      "createProfiles"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/grindr-lib/src/reconcile.js",
+    "purpose": "idsFromListPayload + reconcileTiers (hide-only ids needing upgrade to block)",
+    "layer": "shared-lib",
+    "exports": [
+      "idsFromListPayload",
+      "reconcileTiers"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/__tests__/db.test.ts",
+    "purpose": "Tests Dexie compat layer: allDocs, compound find, export/import, thread summaries (fake-indexeddb).",
+    "layer": "test",
+    "exports": [],
+    "depends_on": [
+      "packages/store/src/db.ts",
+      "packages/store/src/export-import.ts",
+      "packages/store/src/threads.ts"
+    ],
+    "patterns": [
+      "test-only",
+      "fake-indexeddb"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/package.json",
+    "purpose": "Workspace manifest for @aggregaytor/store.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/auto-respond.ts",
+    "purpose": "Auto-respond queue: jittered scheduling delays, status lifecycle (pending\u2192draft\u2192approved\u2192sent), rate limiting.",
+    "layer": "storage",
+    "exports": [
+      "randomDelay",
+      "queueAutoRespond",
+      "getPendingAutoResponds",
+      "getDraftAutoResponds",
+      "getApprovedAutoResponds",
+      "updateAutoRespondStatus"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts",
+      "packages/store/src/types.ts",
+      "packages/store/src/db.ts"
+    ],
+    "patterns": [
+      "status-lifecycle",
+      "jittered-delay"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/block-rules.ts",
+    "purpose": "Auto-block rule CRUD, condition evaluation against messages/meta, and action execution; write-invalidated full-list cache.",
+    "layer": "storage",
+    "exports": [
+      "invalidateBlockRulesCache",
+      "createBlockRule",
+      "getAllBlockRules",
+      "updateBlockRule",
+      "deleteBlockRule",
+      "evaluateRules",
+      "executeAction"
+    ],
+    "depends_on": [
+      "packages/store/src/types.ts",
+      "packages/adapter-core/src/index.ts",
+      "packages/store/src/db.ts",
+      "packages/store/src/thread-meta.ts"
+    ],
+    "patterns": [
+      "event-driven-cache",
+      "rule-engine"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/calendar.ts",
+    "purpose": "Google Calendar integration: OAuth token storage, availability slot computation, event creation; injectable storage abstraction.",
+    "layer": "storage",
+    "exports": [
+      "setCalendarStorage",
+      "CalendarSettings",
+      "CalendarToken",
+      "getCalendarSettings",
+      "saveCalendarSettings",
+      "getCalendarToken",
+      "saveCalendarToken",
+      "getAvailableSlots",
+      "createCalendarEvent",
+      "authenticateCalendar"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts",
+      "packages/store/src/types.ts",
+      "packages/store/src/db.ts"
+    ],
+    "patterns": [
+      "oauth",
+      "storage-adapter"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/contacts.ts",
+    "purpose": "Contact CRUD with field-preserving batch upserts and key-range listing queries.",
+    "layer": "storage",
+    "exports": [
+      "upsertContact",
+      "upsertContacts",
+      "getContact",
+      "getContactsByPlatform",
+      "getAllContacts"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts",
+      "packages/store/src/types.ts",
+      "packages/store/src/db.ts"
+    ],
+    "patterns": [
+      "batch-write-pattern",
+      "field-preservation"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/db.ts",
+    "purpose": "Dexie-backed database exposing a PouchDB-shaped compat API (get/put/bulkDocs/allDocs/find) with compound indexes and legacy PouchDB migration.",
+    "layer": "storage",
+    "exports": [
+      "StoreDoc",
+      "StorePutResult",
+      "StoreInfo",
+      "StoreAllDocsOptions",
+      "StoreAllDocsRow",
+      "StoreAllDocsResult",
+      "StoreFindRequest",
+      "StoreFindResult",
+      "StoreDatabase",
+      "getDB",
+      "closeDB",
+      "destroyDB",
+      "createDB"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "compat-wrapper",
+      "compound-indexes",
+      "one-shot-migration"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/dossier.ts",
+    "purpose": "Contact dossier CRUD with category-sliced reads so LLM tasks receive only the fields they need.",
+    "layer": "storage",
+    "exports": [
+      "DOSSIER_CATEGORIES",
+      "DossierCategory",
+      "getDossier",
+      "upsertDossier",
+      "getDossierSlice",
+      "formatDossierContext",
+      "setAutoExtractedField"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts",
+      "packages/store/src/types.ts",
+      "packages/store/src/db.ts"
+    ],
+    "patterns": [
+      "category-slicing",
+      "prompt-cache-friendly"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/export-import.ts",
+    "purpose": "Full/blocked data export-import with optional AES-GCM encryption (PBKDF2 210k iterations) and chunked bulk import.",
+    "layer": "storage",
+    "exports": [
+      "exportAllData",
+      "importAllData",
+      "exportBlocked",
+      "importBlocked"
+    ],
+    "depends_on": [
+      "packages/store/src/db.ts"
+    ],
+    "patterns": [
+      "aes-gcm-encryption",
+      "chunked-import"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/google-drive-sync.ts",
+    "purpose": "Google Drive v3 backup/restore of exported data in a dedicated folder, plus OPFS snapshot write-through.",
+    "layer": "storage",
+    "exports": [
+      "backupToDrive",
+      "restoreFromDrive",
+      "getDriveBackupStatus"
+    ],
+    "depends_on": [
+      "packages/store/src/export-import.ts",
+      "packages/store/src/opfs-backup.ts"
+    ],
+    "patterns": [
+      "oauth",
+      "backup-restore"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/google-tasks.ts",
+    "purpose": "Google Tasks REST sync: push local CRUD, paginated pull, two-way merge via chrome.identity auth.",
+    "layer": "storage",
+    "exports": [
+      "createGoogleTask",
+      "updateGoogleTask",
+      "deleteGoogleTask",
+      "pullGoogleTasks",
+      "syncGoogleTasks",
+      "authenticateGoogle",
+      "isGoogleAuthenticated"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "oauth",
+      "paginated-sync"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/index.ts",
+    "purpose": "Barrel export of the whole store API: db, messages, contacts, threads, meta, reminders, auto-respond, pictures, block rules, calendar, ML, sentiment, dossier, tasks, Google sync, export/import, backups.",
+    "layer": "storage",
+    "exports": [
+      "MessageDoc",
+      "ContactDoc",
+      "ThreadSummary",
+      "ThreadMetaDoc",
+      "ReminderDoc",
+      "AutoRespondDoc",
+      "AutoRespondTier",
+      "AutoRespondStatus",
+      "AutoRespondSettings",
+      "PictureDoc",
+      "BlockRuleDoc",
+      "BlockRuleCondition",
+      "PreferenceFeedbackDoc",
+      "PreferenceModelDoc",
+      "ProfileFeatures",
+      "SentimentScore",
+      "CalendarEventDoc",
+      "AutoRespondSession",
+      "TimeSlot",
+      "DEFAULT_AUTO_RESPOND_SETTINGS",
+      "getDB",
+      "closeDB",
+      "destroyDB",
+      "createDB",
+      "StoreDatabase",
+      "StoreDoc",
+      "StoreFindRequest",
+      "StoreFindResult",
+      "LruIdbCache",
+      "LruIdbCacheOptions",
+      "upsertMessage",
+      "upsertMessages",
+      "getMessagesByThread",
+      "getMessagesByContact",
+      "getRecentMessages",
+      "markThreadRead",
+      "getUnreadCount",
+      "invalidateUnreadCountCache",
+      "purgeOldestMessages",
+      "PurgeResult",
+      "upsertContact",
+      "upsertContacts",
+      "getContact",
+      "getContactsByPlatform",
+      "getAllContacts",
+      "getThreadSummaries",
+      "getThreadUnreadCounts",
+      "getThreadMeta",
+      "upsertThreadMeta",
+      "getAllThreadMeta",
+      "getBookmarkedThreads",
+      "getArchivedThreads",
+      "createReminder",
+      "getReminders",
+      "markReminderNotified",
+      "deleteReminder",
+      "queueAutoRespond",
+      "getPendingAutoResponds",
+      "getDraftAutoResponds",
+      "getApprovedAutoResponds",
+      "updateAutoRespondStatus",
+      "randomDelay",
+      "addPicture",
+      "getAllPictures",
+      "getPicture",
+      "getPictureByTag",
+      "incrementPictureStat",
+      "deletePicture",
+      "createBlockRule",
+      "getAllBlockRules",
+      "updateBlockRule",
+      "deleteBlockRule",
+      "evaluateRules",
+      "executeAction",
+      "invalidateBlockRulesCache",
+      "getCalendarSettings",
+      "saveCalendarSettings",
+      "getCalendarToken",
+      "saveCalendarToken",
+      "getAvailableSlots",
+      "createCalendarEvent",
+      "authenticateCalendar",
+      "CalendarSettings",
+      "CalendarToken",
+      "recordFeedback",
+      "predictPreference",
+      "getModelStats",
+      "getAllFeedback",
+      "retrainModel",
+      "extractFeatures",
+      "analyzeConversationSentiment",
+      "formatSentimentSummary",
+      "getDossier",
+      "upsertDossier",
+      "setAutoExtractedField",
+      "getDossierSlice",
+      "formatDossierContext",
+      "DOSSIER_CATEGORIES",
+      "DossierCategory",
+      "ContactDossierDoc",
+      "TaskDoc",
+      "DEFAULT_DOSSIER",
+      "createTask",
+      "getAllTasks",
+      "updateTask",
+      "deleteTask",
+      "getTasksByContact",
+      "createGoogleTask",
+      "updateGoogleTask",
+      "deleteGoogleTask",
+      "pullGoogleTasks",
+      "syncGoogleTasks",
+      "authenticateGoogle",
+      "isGoogleAuthenticated",
+      "startSync",
+      "stopSync",
+      "SyncConfig",
+      "exportAllData",
+      "importAllData",
+      "exportBlocked",
+      "importBlocked",
+      "backupToDrive",
+      "restoreFromDrive",
+      "getDriveBackupStatus",
+      "saveOpfsSnapshotData",
+      "getOpfsSnapshotStatus",
+      "restoreFromOpfsSnapshot",
+      "deleteOpfsSnapshot"
+    ],
+    "depends_on": [
+      "packages/store/src/types.ts",
+      "packages/store/src/db.ts",
+      "packages/store/src/lru-idb-cache.ts",
+      "packages/store/src/messages.ts",
+      "packages/store/src/contacts.ts",
+      "packages/store/src/threads.ts",
+      "packages/store/src/thread-meta.ts",
+      "packages/store/src/reminders.ts",
+      "packages/store/src/auto-respond.ts",
+      "packages/store/src/pictures.ts",
+      "packages/store/src/block-rules.ts",
+      "packages/store/src/calendar.ts",
+      "packages/store/src/preference-ml.ts",
+      "packages/store/src/sentiment.ts",
+      "packages/store/src/dossier.ts",
+      "packages/store/src/tasks.ts",
+      "packages/store/src/google-tasks.ts",
+      "packages/store/src/sync.ts",
+      "packages/store/src/export-import.ts",
+      "packages/store/src/google-drive-sync.ts",
+      "packages/store/src/opfs-backup.ts"
+    ],
+    "patterns": [
+      "barrel-export"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/lru-idb-cache.ts",
+    "purpose": "Two-tier LRU cache: capped in-memory Map hot tier + separate IndexedDB cold tier with write-through and lazy TTL.",
+    "layer": "storage",
+    "exports": [
+      "LruIdbCacheOptions",
+      "LruIdbCache"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "two-tier-cache",
+      "lru",
+      "write-through"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/messages.ts",
+    "purpose": "Message CRUD: batched upserts (allDocs+bulkDocs), thread/contact queries, read marking, unread counting with cache, oldest-message purge with protected contacts.",
+    "layer": "storage",
+    "exports": [
+      "upsertMessage",
+      "upsertMessages",
+      "getMessagesByThread",
+      "getMessagesByContact",
+      "getRecentMessages",
+      "markThreadRead",
+      "getUnreadCount",
+      "invalidateUnreadCountCache",
+      "PurgeResult",
+      "purgeOldestMessages"
+    ],
+    "depends_on": [
+      "packages/context-engine/src/index.ts",
+      "packages/adapter-core/src/index.ts",
+      "packages/store/src/types.ts",
+      "packages/store/src/db.ts"
+    ],
+    "patterns": [
+      "batch-write-pattern",
+      "deterministic-ids",
+      "protected-purge"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/opfs-backup.ts",
+    "purpose": "Supplemental local snapshots in OPFS with status inspection and restore.",
+    "layer": "storage",
+    "exports": [
+      "OpfsBackupStatus",
+      "saveOpfsSnapshotData",
+      "getOpfsSnapshotStatus",
+      "restoreFromOpfsSnapshot",
+      "deleteOpfsSnapshot"
+    ],
+    "depends_on": [
+      "packages/store/src/export-import.ts"
+    ],
+    "patterns": [
+      "opfs",
+      "backup-restore"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/pictures.ts",
+    "purpose": "Picture library CRUD with tag lookup and sent/response counters.",
+    "layer": "storage",
+    "exports": [
+      "addPicture",
+      "getAllPictures",
+      "getPicture",
+      "incrementPictureStat",
+      "deletePicture",
+      "getPictureByTag"
+    ],
+    "depends_on": [
+      "packages/store/src/types.ts",
+      "packages/store/src/db.ts"
+    ],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/pouchdb-browser.d.ts",
+    "purpose": "Ambient module declaration stub for pouchdb-browser.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "type-shim"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/pouchdb-compat.d.ts",
+    "purpose": "Global PouchDB namespace shim mapping onto the Dexie StoreDatabase compat type.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [
+      "packages/store/src/db.ts"
+    ],
+    "patterns": [
+      "type-shim"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/preference-ml.ts",
+    "purpose": "Client-side logistic-regression preference model: feature extraction, feedback recording, prediction, retraining.",
+    "layer": "storage",
+    "exports": [
+      "extractFeatures",
+      "recordFeedback",
+      "predictPreference",
+      "getModelStats",
+      "getAllFeedback",
+      "retrainModel"
+    ],
+    "depends_on": [
+      "packages/store/src/types.ts",
+      "packages/adapter-core/src/index.ts",
+      "packages/store/src/db.ts"
+    ],
+    "patterns": [
+      "client-side-ml",
+      "logistic-regression"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/reminders.ts",
+    "purpose": "Reminder/appointment CRUD with due-date queries.",
+    "layer": "storage",
+    "exports": [
+      "createReminder",
+      "getReminders",
+      "markReminderNotified",
+      "deleteReminder"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts",
+      "packages/store/src/types.ts",
+      "packages/store/src/db.ts"
+    ],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/sentiment.ts",
+    "purpose": "Pattern-based conversation sentiment scoring (interest/engagement/commitment) with summary formatting.",
+    "layer": "storage",
+    "exports": [
+      "analyzeConversationSentiment",
+      "formatSentimentSummary"
+    ],
+    "depends_on": [
+      "packages/store/src/types.ts"
+    ],
+    "patterns": [
+      "regex-heuristics"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/sync.ts",
+    "purpose": "Stub: remote CouchDB replication intentionally unsupported on the Dexie store (startSync throws).",
+    "layer": "storage",
+    "exports": [
+      "SyncConfig",
+      "startSync",
+      "stopSync"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "intentional-stub"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/tasks.ts",
+    "purpose": "Task CRUD (user to-dos, optionally contact-linked) using key-range listing.",
+    "layer": "storage",
+    "exports": [
+      "createTask",
+      "getAllTasks",
+      "updateTask",
+      "deleteTask",
+      "getTasksByContact"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts",
+      "packages/store/src/types.ts",
+      "packages/store/src/db.ts"
+    ],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/thread-meta.ts",
+    "purpose": "Per-thread metadata CRUD: bookmark, notes, archive, hide, per-thread auto-respond settings; per-call default objects to avoid shared mutation.",
+    "layer": "storage",
+    "exports": [
+      "getThreadMeta",
+      "upsertThreadMeta",
+      "getAllThreadMeta",
+      "getBookmarkedThreads",
+      "getArchivedThreads"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts",
+      "packages/store/src/types.ts",
+      "packages/store/src/db.ts"
+    ],
+    "patterns": [
+      "per-call-defaults"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/threads.ts",
+    "purpose": "Computes ThreadSummary inbox rows on the fly by grouping messages and batch-joining contacts (threads are not stored docs).",
+    "layer": "storage",
+    "exports": [
+      "getThreadSummaries",
+      "getThreadUnreadCounts"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts",
+      "packages/store/src/types.ts",
+      "packages/store/src/db.ts"
+    ],
+    "patterns": [
+      "derived-view",
+      "batched-joins"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/src/types.ts",
+    "purpose": "All persisted document types (docType discriminator): MessageDoc, ContactDoc, ThreadMeta, AutoRespond, Picture, BlockRule, Preference ML, Calendar, Dossier, Task.",
+    "layer": "storage",
+    "exports": [
+      "MessageDoc",
+      "ContactDoc",
+      "AutoRespondSettings",
+      "DEFAULT_AUTO_RESPOND_SETTINGS",
+      "ThreadMetaDoc",
+      "ReminderDoc",
+      "AutoRespondTier",
+      "AutoRespondStatus",
+      "AutoRespondDoc",
+      "PictureDoc",
+      "BlockRuleCondition",
+      "BlockRuleDoc",
+      "PreferenceFeedbackDoc",
+      "ProfileFeatures",
+      "PreferenceModelDoc",
+      "SentimentScore",
+      "CalendarEventDoc",
+      "AutoRespondSession",
+      "TimeSlot",
+      "ContactDossierDoc",
+      "TaskDoc",
+      "DEFAULT_DOSSIER",
+      "ThreadSummary"
+    ],
+    "depends_on": [
+      "packages/adapter-core/src/index.ts"
+    ],
+    "patterns": [
+      "core-schema",
+      "doc-type-discriminator"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/tsconfig.json",
+    "purpose": "TypeScript config extending tsconfig.base.json.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/store/tsup.config.ts",
+    "purpose": "tsup build config (ESM+CJS, dts) with core/context-engine/pouchdb externals.",
+    "layer": "config",
+    "exports": [
+      "default"
+    ],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "pnpm-workspace.yaml",
+    "purpose": "Declares the pnpm workspace globs: packages/*, adapters/*, extensions/*.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "pnpm-workspace"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "prompts.md",
+    "purpose": "Versioned record of user requests",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "scripts/check-doc-indexes.mjs",
+    "purpose": "Dependency-free validator: every path in high_signal_file_index.json and every path-like code-span in codebase-overview.md must exist; warns on unindexed source files; --prune drops dead JSON entries.",
+    "layer": "tooling",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "doc-drift-check",
+      "ci-gate"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "scripts/rotate-workflow-logs.mjs",
+    "purpose": "Rotates old sections of memory.md and prompts.md into docs/archive/ once either file exceeds a 200 KB size limit, with --dry-run and --force flags.",
+    "layer": "tooling",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "log-rotation"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "scripts/semantic_indexer.py",
+    "purpose": "Local semantic embedding pipeline: chunks repo files, embeds via Ollama, stores in ChromaDB at .semantic-index/ with content-hash incremental re-embedding; --query/--stats modes.",
+    "layer": "tooling",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "semantic-index",
+      "content-hash-incremental",
+      "graceful-degradation"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "scripts/watch_and_index.sh",
+    "purpose": "macOS watcher: fswatch (or 30s find -newer polling fallback) over source dirs triggering semantic_indexer.py re-index.",
+    "layer": "tooling",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "file-watcher"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "skills/accessibility-ux-reviewer/SKILL.md",
+    "purpose": "Accessibility/UX review skill: WCAG 2.2, ARIA APG, keyboard and focus review guidance.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "skill"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "skills/chrome-dev-context/SKILL.md",
+    "purpose": "Chrome MV3 + DevTools MCP skill: extension architecture, chrome.* APIs, MV3 constraints.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "skill"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "skills/code-reviewer/SKILL.md",
+    "purpose": "Code review skill: Google eng-practices reviewer standards, OWASP review coverage.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "skill"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "skills/html-css-expert/SKILL.md",
+    "purpose": "HTML/CSS skill: semantics, cascade, layout, responsive authoring.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "skill"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "skills/javascript-nodejs-expert/SKILL.md",
+    "purpose": "JavaScript/Node.js skill: language semantics, runtime APIs, async flows.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "skill"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "skills/mongodb-expert/SKILL.md",
+    "purpose": "MongoDB skill: schema design, MQL, aggregations, indexes, transactions.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "skill"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "skills/mongodb-performance-troubleshooting-expert/SKILL.md",
+    "purpose": "MongoDB performance skill: explain plans, profiler, index-use debugging.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "skill"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "skills/performance-profiling-expert/SKILL.md",
+    "purpose": "Performance/profiling skill: DevTools traces, Lighthouse, perf_hooks.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "skill"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "skills/security-reviewer/SKILL.md",
+    "purpose": "Security review skill: OWASP framing, CSP/boundary analysis, extension permission review.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "skill"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "skills/software-architect/SKILL.md",
+    "purpose": "Software architecture skill: 42010/arc42/C4, quality-attribute tradeoffs, ADRs.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "skill"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "skills/testing-and-vitest-expert/SKILL.md",
+    "purpose": "Testing/Vitest skill: test authoring, mocking, coverage, config.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "skill"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "skills/typescript-expert/SKILL.md",
+    "purpose": "TypeScript skill: type design, narrowing, generics, TSConfig strategy.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "skill"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "tools/debug-server/README.md",
+    "purpose": "Setup and usage docs for the Aggregaytor debug MCP server.",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "tools/debug-server/package.json",
+    "purpose": "Manifest for the MCP debug server (@modelcontextprotocol/sdk, ws).",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "tools/debug-server/src/server.ts",
+    "purpose": "MCP stdio server exposing extension-introspection tools over a WebSocket bridge on port 9222.",
+    "layer": "tooling",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "mcp-server",
+      "websocket-bridge"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "tools/debug-server/tsconfig.json",
+    "purpose": "TypeScript config for the debug server.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "tsconfig.base.json",
+    "purpose": "Shared strict TypeScript compiler options (ES2022, bundler resolution) extended by every package.",
+    "layer": "config",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "shared-tsconfig"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "vitest.config.ts",
+    "purpose": "Root Vitest config: node env, forks pool, excludes .claude/worktrees duplicate checkouts from test collection.",
+    "layer": "config",
+    "exports": [
+      "default"
+    ],
+    "depends_on": [],
+    "patterns": [
+      "worktree-exclusion"
+    ],
+    "last_updated": "2026-08-30"
+  }
+]
