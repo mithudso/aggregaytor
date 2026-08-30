@@ -33,10 +33,14 @@ namespaced: `store.getAllContacts`, `context.tokenizeIndexText`, `core.walkPaylo
 - **Sender-origin**: allowed only when the sender is the extension itself
   (`sender.id === chrome.runtime.id && !sender.tab`). Content scripts and external
   extensions are refused unconditionally; an undefined sender fails closed.
-- **Read vs write**: an operation whose name starts with a mutating verb
-  (`upsert/delete/put/save/set/update/purge/clear/sync/block/hide/send/…`) is classified
-  `write` and refused unless the caller passes `confirmWrite: true` (or a stored debug
-  token ≥16 chars). Reads run freely for a trusted origin.
+- **Read vs write (fail-closed)**: an operation runs without `confirmWrite` ONLY when its
+  name is a confident read (starts with `get/list/query/find/search/read/count/is/has/…`
+  and is not force-classified as a write). Every destructive, secret-touching, or
+  ambiguous operation — including `destroyDB`, `restoreFromOpfsSnapshot`, `closeDB`,
+  `clearIndex`, `getOrCreateBackupKey`, and anything that doesn't match a read prefix
+  (e.g. pure computes like `tokenize*`/`normalize*`) — defaults to `write` and is refused
+  unless the caller passes `confirmWrite: true` (or a stored debug token ≥16 chars). A
+  denylist of write verbs was rejected because it fails open; this classifier fails closed.
 - Every failure returns `{ ok:false, error }`; `OPS_RUN` never throws.
 
 ### From the extension or an API caller (chrome.runtime messaging)
