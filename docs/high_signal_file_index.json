@@ -904,6 +904,28 @@
     "last_updated": "2026-08-30"
   },
   {
+    "path": "docs/method-catalog.md",
+    "purpose": "Human-readable method catalog grouped by file (generated)",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "generated"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/method-registry.json",
+    "purpose": "Machine-readable per-method registry (doc, log, error, pure, surface, reachableVia) \u2014 consumed by other sessions",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "generated"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
     "path": "docs/mongodb-expert-context.md",
     "purpose": "Full MongoDB reference context backing the matching skill.",
     "layer": "docs",
@@ -966,6 +988,15 @@
   {
     "path": "docs/runbooks/extension-debugging.md",
     "purpose": "Debugging runbook: SW inspection, build-hash auto-reload, error-logger dump, debug bridge",
+    "layer": "docs",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "docs/runbooks/operations-registry.md",
+    "purpose": "Runbook: the method registry + how to invoke any method via the gated OPS_RUN command (CLI/extension/API)",
     "layer": "docs",
     "exports": [],
     "depends_on": [],
@@ -1160,6 +1191,20 @@
       "model-discovery",
       "family-ranking"
     ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "extensions/aggregaytor/background/operations-registry.ts",
+    "purpose": "Reflective, origin-gated OPS_RUN/OPS_LIST invocation surface: registers every module export as a callable operation",
+    "layer": "extension-background",
+    "exports": [
+      "OperationEntry",
+      "listOperations",
+      "runOperation",
+      "OpsRunResult"
+    ],
+    "depends_on": [],
+    "patterns": [],
     "last_updated": "2026-08-30"
   },
   {
@@ -3171,6 +3216,15 @@
       "doc-drift-check",
       "ci-gate"
     ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "scripts/gen-method-registry.mjs",
+    "purpose": "Deterministic method inventory generator: emits docs/method-registry.json + method-catalog.md; --check is the CI doc-coverage gate",
+    "layer": "tooling",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [],
     "last_updated": "2026-08-30"
   },
   {

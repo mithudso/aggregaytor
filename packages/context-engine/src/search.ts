@@ -27,6 +27,17 @@ export const DEFAULT_FIELD_WEIGHTS: FieldWeights = {
   segment: 1,
 };
 
+/**
+ * Projects a context record into the flat `IndexDocument` shape stored in a
+ * fielded index, filling defaults for every missing field.
+ *
+ * Search fields are reused from the record when present, else rebuilt on the
+ * fly. `base_rank` encodes the kind precedence used by the scorer: modules
+ * outrank chunks (2 vs 1).
+ *
+ * @param record - Partial context record to project.
+ * @returns The index document.
+ */
 function buildIndexDocument(record: Partial<ContextRecord>): IndexDocument {
   return {
     id: record.id || '',
@@ -48,6 +59,19 @@ function buildIndexDocument(record: Partial<ContextRecord>): IndexDocument {
   };
 }
 
+/**
+ * Assembles a single searchable index record for one entity from its module and
+ * chunk records.
+ *
+ * The record id is derived as `<entityId>_active`, and all modules then chunks
+ * are projected into `IndexDocument`s under `documents`.
+ *
+ * @param entityId - Owning entity/account id.
+ * @param modules - Module-kind records (higher base rank).
+ * @param chunks - Chunk-kind records (lower base rank).
+ * @param generatedAt - ISO timestamp stamped on the index (defaults to now).
+ * @returns The fielded index record ready for `searchFieldedIndex`.
+ */
 export function buildFieldedIndexRecord(
   entityId: string,
   modules: ContextRecord[] = [],
@@ -65,6 +89,19 @@ export function buildFieldedIndexRecord(
   };
 }
 
+/**
+ * Scores a document against the query tokens: a weighted count of per-field
+ * token matches, plus a small base-rank and recency bonus.
+ *
+ * Each field contributes `matches * weight`, so a hit in `title` (weight 8)
+ * counts far more than one in `body` (weight 1). The recency term is capped at
+ * 2 so freshness nudges ties without dominating relevance.
+ *
+ * @param doc - Index document to score.
+ * @param queryTokens - Tokenized query.
+ * @param weights - Per-field weights (defaults merged in by the caller).
+ * @returns The document's numeric relevance score.
+ */
 function scoreIndexDocument(
   doc: IndexDocument,
   queryTokens: string[],
@@ -87,6 +124,18 @@ function scoreIndexDocument(
   return score;
 }
 
+/**
+ * Tests whether a document is recent enough to be returned, given a per-segment
+ * maximum age.
+ *
+ * Fail-open: if the document's segment has no configured limit (or the limit is
+ * 0), or the document has no parseable date, it is considered within age. Only
+ * a document with both a limit and a date older than it is excluded.
+ *
+ * @param doc - Index document under test.
+ * @param maxAgeDaysBySegment - Map of segment → max age in days.
+ * @returns True if the document is within the allowed age.
+ */
 function isDocumentWithinAge(
   doc: IndexDocument,
   maxAgeDaysBySegment: Record<string, number>,
@@ -99,6 +148,23 @@ function isDocumentWithinAge(
   return Date.now() - ts <= maxAgeDays * 86400000;
 }
 
+/**
+ * Runs a fielded, weighted search over an index record and returns the top
+ * modules and chunks.
+ *
+ * Filters by requested segments and per-segment age, scores each surviving
+ * document (an empty query falls back to base-rank ordering), sorts by score
+ * then recency, and fills two capped result buckets (`modules` and `chunks`).
+ * Modules and chunks are capped separately so chunk noise cannot crowd out
+ * modules.
+ *
+ * @param indexRecord - The fielded index to search.
+ * @param queryText - Raw query (tokenized internally, capped at 32 tokens).
+ * @param opts - `segments` allow-list, `maxResults` (modules, default 24),
+ *   `maxChunks` (default 12), `maxAgeDaysBySegment`, and `fieldWeights`
+ *   overrides merged over `DEFAULT_FIELD_WEIGHTS`.
+ * @returns `{ query_tokens, modules, chunks }`, each result carrying its score.
+ */
 export function searchFieldedIndex(
   indexRecord: FieldedIndexRecord,
   queryText: string,

@@ -15,6 +15,19 @@ const ENGAGEMENT_POSITIVE = /\?|tell me|what about|how about|wbu|hbu|you\?|pics|
 const COMMITMENT_POSITIVE = /\b(tonight|tomorrow|when|free|available|meet|come over|host|my place|your place|address|omw|on my way|heading|see you|what time|down)\b/i;
 const COMMITMENT_NEGATIVE = /\b(maybe|idk|not sure|we'll see|sometime|another time|rain check|later)\b/i;
 
+/**
+ * Score a conversation's interest, engagement, and commitment from heuristics
+ * over the message history.
+ *
+ * Pure function (no I/O). Combines response ratio, message length, keyword
+ * regexes, question-asking, response speed, conversation depth, and
+ * time-specific mentions. All sub-scores are clamped to [0, 1] and `overall`
+ * is their weighted blend (0.3 interest + 0.4 engagement + 0.3 commitment).
+ *
+ * @param messages  The thread's messages (any order).
+ * @returns A SentimentScore with `signals` explaining the drivers; a zeroed
+ *          score with a "No messages" signal when the thread is empty.
+ */
 export function analyzeConversationSentiment(messages: MessageDoc[]): SentimentScore {
   if (!messages.length) {
     return { interest: 0, engagement: 0, commitment: 0, overall: 0, signals: ['No messages'] };
@@ -106,6 +119,14 @@ interface ResponsePair {
   delayMs: number;
 }
 
+/**
+ * Extract out→in reply pairs (with their delay) so response speed can be
+ * scored. Sorts by timestamp, then pairs each inbound message that directly
+ * follows an outbound one.
+ *
+ * @param messages  The thread's messages.
+ * @returns One ResponsePair per our-message-then-their-reply transition.
+ */
 function getResponsePairs(messages: MessageDoc[]): ResponsePair[] {
   const sorted = [...messages].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   const pairs: ResponsePair[] = [];

@@ -53,6 +53,13 @@ export class DoubleListAdapter extends BaseAdapter {
   private currentUser = '';
   private seenMessageIds = new Set<string>();
 
+  /**
+   * Bring the adapter online. Seeds self-IDs (from page globals, the DOM, and
+   * localStorage), wires a {@link createDOMExtractor} that parses newly-rendered
+   * message elements, scans messages already on the page, and installs
+   * fetch/XHR interception. DoubleList surfaces DMs through both server-rendered
+   * HTML and Pusher pushes, so both the DOM and network paths are needed.
+   */
   async init(): Promise<void> {
     log.info('Initializing...');
     this.selfIds.seedFromWindow(window as Window & typeof globalThis);
@@ -80,6 +87,16 @@ export class DoubleListAdapter extends BaseAdapter {
     log.info(`Initialized. Self IDs: ${[...this.selfIds.ids].join(', ')}`);
   }
 
+  /**
+   * Gate which intercepted requests are parsed as DoubleList data.
+   *
+   * Cheap substring pre-check, then static-asset rejection (CSS/JS/images/
+   * fonts), then a real host check via {@link isDoubleListHost} so a look-alike
+   * third-party URL cannot inject forged payloads.
+   *
+   * @param url - The request URL seen by the network interceptor.
+   * @returns `true` only for genuinely DoubleList-owned, non-asset URLs.
+   */
   protected shouldInterceptUrl(url: string): boolean {
     const s = String(url).toLowerCase();
     if (!s.includes('doublelist.com')) return false;
@@ -90,6 +107,19 @@ export class DoubleListAdapter extends BaseAdapter {
     return isDoubleListHost(url);
   }
 
+  /**
+   * Extract DoubleList messages and contacts from an intercepted JSON payload.
+   *
+   * Walks the (untrusted) response with {@link walkPayload}; each object node is
+   * handled by {@link visitPayloadObject}, which is wrapped so a throw on one
+   * node cannot abort the walk. Messages are deduplicated before return;
+   * contacts are emitted directly as a `'contacts'` event.
+   *
+   * @param url     - Source URL (or `'[ws]'` for a Pusher frame), recorded in
+   *                  message metadata.
+   * @param payload - The parsed JSON body; may be any shape.
+   * @returns The deduplicated messages extracted from this payload.
+   */
   protected parseApiResponse(url: string, payload: unknown): UnifiedMessage[] {
     const messages: UnifiedMessage[] = [];
     const contacts: UnifiedContact[] = [];
@@ -166,16 +196,39 @@ export class DoubleListAdapter extends BaseAdapter {
     });
   }
 
+  /**
+   * Parse a DoubleList real-time (Pusher) frame into messages.
+   *
+   * Frames carry the same object shapes as REST responses, so text frames are
+   * JSON-parsed and handed to {@link parseApiResponse} with the synthetic URL
+   * `'[ws]'`. Binary and non-JSON frames yield `[]`. The JSON.parse is
+   * deliberately guarded and silent — non-JSON control frames are a normal part
+   * of the stream, so logging each would be noise.
+   *
+   * @param data - The raw frame (string or ArrayBuffer) from the interceptor.
+   * @returns Extracted messages, or `[]` for binary/unparseable frames.
+   */
   protected parseWebSocketFrame(data: string | ArrayBuffer): UnifiedMessage[] {
     const text = typeof data === 'string' ? data : '';
     if (!text) return [];
     try {
       const parsed = JSON.parse(text);
       if (parsed && typeof parsed === 'object') return this.parseApiResponse('[ws]', parsed);
-    } catch {}
+    } catch { /* non-JSON control frame — expected, deliberately silent */ }
     return [];
   }
 
+  /**
+   * Filter out messages already seen this session (by exact id and by a
+   * contact+body+minute content key), then cap the seen-set to bound memory.
+   *
+   * The same message arrives via multiple paths (DOM scrape, REST, Pusher) with
+   * differing ids, so content-keying catches near-duplicates the id check
+   * misses. When the seen-set passes 3000 entries the oldest ~1000 are dropped.
+   *
+   * @param messages - Freshly extracted messages, possibly containing dupes.
+   * @returns Only the messages not previously emitted.
+   */
   private dedup(messages: UnifiedMessage[]): UnifiedMessage[] {
     const result = messages.filter(m => {
       if (this.seenMessageIds.has(m.id)) return false;
@@ -192,6 +245,16 @@ export class DoubleListAdapter extends BaseAdapter {
     return result;
   }
 
+  /**
+   * Populate {@link selfIds} (and `currentUser`) with the logged-in user's ID so
+   * outgoing messages can be direction-detected and the user's own profile is
+   * skipped during contact extraction.
+   *
+   * Two strategies: profile links / "my-profile" markers in the DOM, and
+   * user/auth/session keys in localStorage. Best-effort — the whole scan is
+   * wrapped so a hostile DOM or unreadable storage can't abort init(); a failure
+   * is logged at debug and simply leaves self-IDs unseeded from this source.
+   */
   private detectCurrentUser(): void {
     try {
       const links = document.querySelectorAll('a[href*="/profile/"], [class*="my-profile"], [class*="user-name"]');
@@ -211,11 +274,19 @@ export class DoubleListAdapter extends BaseAdapter {
               if (data[k] && typeof data[k] === 'string') { this.selfIds.ids.add(data[k]); this.currentUser = this.currentUser || data[k]; }
             }
           }
-        } catch {}
+        } catch { /* localStorage value not JSON — expected, skip this key */ }
       }
-    } catch {}
+    } catch (err) {
+      log.debug('Self-ID detection failed:', err);
+    }
   }
 
+  /**
+   * Parse messages already present in the DOM at init time (the DOM extractor
+   * only fires on subsequently-added nodes). Emits any messages (deduplicated)
+   * and contacts found, and logs the count so a session can confirm the initial
+   * scan ran.
+   */
   private scanExistingMessages(): void {
     const elements = document.querySelectorAll('[data-mess-id], .notification-in-app-message-popup, .view_message');
     const messages: UnifiedMessage[] = [];
@@ -232,7 +303,23 @@ export class DoubleListAdapter extends BaseAdapter {
     if (contacts.length) this.emit({ type: 'contacts', payload: contacts });
   }
 
+  /**
+   * Turn one DoubleList message DOM element into a normalized message (and, for
+   * inbound messages, the sender contact).
+   *
+   * Reads `data-mess-id` / `data-mess-channel` / `data-receiver-id`, the sender
+   * name from an `h5` (preferring the `(username)` form), the body from a nested
+   * `p`, a relative or absolute timestamp, and a nearby avatar. Direction is
+   * outbound when the sender matches a known self-ID. The whole body is wrapped
+   * so a malformed element yields `null` instead of throwing out of the caller's
+   * batch loop.
+   *
+   * @param el - A candidate message element from the DOM.
+   * @returns `{ message, contact? }`, or `null` when the element has no usable
+   *          body (too short/empty) or parsing threw.
+   */
   private parseMessageElement(el: Element): { message?: UnifiedMessage; contact?: UnifiedContact } | null {
+    try {
     const messId = el.getAttribute('data-mess-id');
     const channel = el.getAttribute('data-mess-channel') || '';
     const receiverId = el.getAttribute('data-receiver-id') || '';
@@ -282,8 +369,24 @@ export class DoubleListAdapter extends BaseAdapter {
     } : undefined;
 
     return { message, contact };
+    } catch (err) {
+      log.debug('Skipped unparseable DoubleList DOM element:', err);
+      return null;
+    }
   }
 
+  /**
+   * Convert a DoubleList relative-time label ("just now", "yesterday",
+   * "5 months ago") into an ISO timestamp.
+   *
+   * Pure helper (no logging). The unit alternatives are ordered longest-prefix
+   * first so "months" matches `mo` before the bare `m` (minutes) — reversing
+   * that order silently mis-scaled month-old messages by four orders of
+   * magnitude.
+   *
+   * @param text - The raw relative-time label from the DOM.
+   * @returns An ISO 8601 timestamp, or `null` if the label isn't recognised.
+   */
   private parseRelativeTime(text: string): string | null {
     if (!text) return null;
     const t = text.trim().toLowerCase();

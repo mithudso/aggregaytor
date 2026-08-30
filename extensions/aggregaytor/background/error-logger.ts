@@ -41,6 +41,14 @@ let buffer: ErrorLogEntry[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let rehydrated = false;
 
+/**
+ * Load the persisted log into the in-memory buffer on first use so entries
+ * survive SW restarts and extension reloads. Runs at most once per context
+ * (guarded on `rehydrated`).
+ * @returns nothing; a storage read failure is deliberately swallowed — this is
+ *          the error logger itself, so it must never throw or it would drop the
+ *          very errors it exists to capture.
+ */
 async function rehydrate(): Promise<void> {
   if (rehydrated) return;
   rehydrated = true;
@@ -51,6 +59,13 @@ async function rehydrate(): Promise<void> {
   } catch {}
 }
 
+/**
+ * Schedule a single debounced flush of the in-memory buffer to storage,
+ * coalescing a burst of errors into one write (~1s). No-op if a flush is
+ * already pending.
+ * @returns nothing; the write failure inside the timer is deliberately
+ *          swallowed (the logger must not throw from a background flush).
+ */
 function scheduleFlush(): void {
   if (flushTimer) return;
   flushTimer = setTimeout(async () => {
@@ -65,6 +80,14 @@ function scheduleFlush(): void {
 // gets a serialized-size budget rather than a string slice: without one, a
 // single caller could park megabytes per entry × MAX_ENTRIES in storage.
 const MAX_CONTEXT_BYTES = 4000;
+/**
+ * Bound an untrusted `context` value to a serialized-size budget before it's
+ * stored, so a single caller can't park megabytes per entry × MAX_ENTRIES.
+ * Non-objects are stringified and sliced; unserializable (cyclic) values are
+ * flagged; oversized objects are replaced with a truncated preview.
+ * @param context caller-supplied context (from untrusted contexts via LOG_ERROR).
+ * @returns a bounded object safe to persist, or `undefined` when `context` is null.
+ */
 function boundContext(context: unknown): Record<string, unknown> | undefined {
   if (context == null) return undefined;
   if (typeof context !== 'object' || Array.isArray(context)) {
@@ -81,7 +104,13 @@ function boundContext(context: unknown): Record<string, unknown> | undefined {
   return { _truncated: true, preview: serialized.slice(0, MAX_CONTEXT_BYTES) };
 }
 
-/** Append an error entry. Caps at MAX_ENTRIES with FIFO eviction. */
+/**
+ * Append one error entry to the rolling buffer and schedule a flush. Every
+ * free-form field is bounded (the entry may originate from an untrusted content
+ * script via LOG_ERROR) and the buffer is FIFO-capped at MAX_ENTRIES.
+ * @param entry the error to record; `ts` defaults to now if omitted.
+ * @returns nothing; does not throw for malformed input (fields are coerced).
+ */
 export async function logError(entry: Omit<ErrorLogEntry, 'ts'> & { ts?: string }): Promise<void> {
   await rehydrate();
   const full: ErrorLogEntry = {
@@ -153,6 +182,13 @@ export async function exportErrorLog(): Promise<{ id: number | null; count: numb
   }
 }
 
+/**
+ * Read a Blob into a base64 `data:` URL. Needed because the MV3 service worker
+ * lacks stable `URL.createObjectURL`, so downloads must use a data URL.
+ * @param blob the blob to encode.
+ * @returns the data URL, or `null` on any read error (never rejects) so the
+ *          caller can degrade gracefully instead of throwing from the logger.
+ */
 function blobToDataUrl(blob: Blob): Promise<string | null> {
   return new Promise((resolve) => {
     const reader = new FileReader();
@@ -169,6 +205,13 @@ function blobToDataUrl(blob: Blob): Promise<string | null> {
  * automatically participate. Idempotent — calling twice is a no-op.
  */
 let _globalsInstalled = false;
+/**
+ * Install global `error` / `unhandledrejection` capture plus a `console.error`
+ * patch that forwards to the persisted error log, tagged with `source`.
+ * Idempotent per context; must never throw (it is the error path itself).
+ * @param source short label for the capturing context (e.g. 'service-worker')
+ * @returns nothing
+ */
 export function installGlobalErrorCapture(source: string): void {
   if (_globalsInstalled) return;
   _globalsInstalled = true;

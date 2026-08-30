@@ -135,6 +135,7 @@ async function decrypt(
  */
 let _backupKeyPromise: Promise<string> | null = null;
 
+/** True when chrome.storage.local is reachable (i.e. running in an extension context). */
 function chromeLocalStorageAvailable(): boolean {
   return typeof chrome !== 'undefined' && !!chrome?.storage?.local;
 }

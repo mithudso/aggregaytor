@@ -55,6 +55,16 @@ const _storageCache = new Map<string, unknown>();
 const _storagePending = new Map<string, Promise<unknown>>();
 let _storageListenerInstalled = false;
 
+/**
+ * Install the one-time `chrome.storage.onChanged` listener that reactively
+ * evicts cached settings keys the moment they're written anywhere. Idempotent
+ * — guarded on `_storageListenerInstalled` so repeated calls are no-ops.
+ *
+ * Why: the cache has zero TTL and relies entirely on this listener for
+ * freshness; without it a stale value could be served indefinitely.
+ * @returns nothing. A missing `chrome.storage` API (unit tests) is swallowed
+ *          so callers fall through to live reads instead of throwing.
+ */
 function installStorageListener(): void {
   if (_storageListenerInstalled) return;
   _storageListenerInstalled = true;
@@ -70,6 +80,20 @@ function installStorageListener(): void {
   }
 }
 
+/**
+ * Read a `chrome.storage.local` key through the module's settings cache,
+ * coalescing concurrent reads of the same key into a single in-flight fetch.
+ *
+ * Why: LLM hot paths read several settings keys per call; caching turns the
+ * repeat reads into free in-memory lookups (invalidated reactively — see
+ * `installStorageListener`). Serving a shared in-flight promise prevents a
+ * burst of callers from each issuing their own storage round-trip.
+ * @param key storage key to read.
+ * @returns the cached/fetched value (`T`), or `undefined` when the key is unset.
+ * @throws the underlying `chrome.storage.local.get` rejection — deliberately
+ *         propagated (the pending entry is cleared first) so callers decide how
+ *         to degrade rather than silently receiving a wrong value.
+ */
 async function getCachedStorage<T>(key: string): Promise<T | undefined> {
   installStorageListener();
   if (_storageCache.has(key)) return _storageCache.get(key) as T;
@@ -121,10 +145,24 @@ const GEMINI_FALLBACK_MAP: Record<string, string> = {
   'gemini-2.5-flash': 'gemini-3.1-flash-preview',
 };
 
+/**
+ * Whether the current wall-clock time is at or past the announced Gemini 2.5
+ * deprecation date. Pure predicate; drives auto-remapping of pinned models.
+ * @returns true once `Date.now()` reaches `GEMINI_DEPRECATION_DATE`.
+ */
 function isGeminiDeprecated(): boolean {
   return Date.now() >= GEMINI_DEPRECATION_DATE.getTime();
 }
 
+/**
+ * Remap a deprecated Gemini 2.5 model id to its live successor once the
+ * deprecation date has passed, so older saved settings keep working.
+ * Only affects the `gemini` provider and only auto-picked (not user-pinned)
+ * models — see `getModelForTask`.
+ * @param provider active provider; non-gemini values pass `model` through.
+ * @param model the model id to potentially remap.
+ * @returns the successor id if a mapping applies, else `model` unchanged.
+ */
 function applyDeprecationFallback(provider: LLMProvider, model: string): string {
   if (provider !== 'gemini') return model;
   if (!isGeminiDeprecated()) return model;
@@ -181,6 +219,12 @@ const PROVIDER_RPM: Record<string, number> = {
 const providerRequestCounts = new Map<string, number[]>();
 const PROVIDER_TS_HARD_CAP = 2000;
 
+/**
+ * Count requests made to `provider` within the trailing 60s window, pruning
+ * aged-out timestamps as a side effect. Hot path — no logging.
+ * @param provider provider id whose rolling window to measure.
+ * @returns number of requests in the last 60 seconds.
+ */
 function getProviderRPMUsed(provider: string): number {
   const now = Date.now();
   const timestamps = providerRequestCounts.get(provider) || [];
@@ -189,6 +233,13 @@ function getProviderRPMUsed(provider: string): number {
   return recent.length;
 }
 
+/**
+ * Record a just-issued request against `provider`'s rolling RPM window, pruning
+ * on write and enforcing a hard entry cap so the array can't grow unbounded
+ * during a single 60s burst. Hot path — no logging.
+ * @param provider provider id that a request was sent to.
+ * @returns nothing; mutates `providerRequestCounts` in place.
+ */
 function recordProviderRequest(provider: string): void {
   const now = Date.now();
   let timestamps = providerRequestCounts.get(provider) || [];
@@ -212,6 +263,12 @@ function recordProviderRequest(provider: string): void {
   providerRequestCounts.set(provider, timestamps);
 }
 
+/**
+ * Whether `provider` is within one request of its known RPM ceiling, used to
+ * cycle proactively before an actual 429. Leaves a 1-request buffer.
+ * @param provider provider id to check.
+ * @returns true when used RPM is at or above `limit - 1`.
+ */
 function isProviderNearLimit(provider: string): boolean {
   const limit = PROVIDER_RPM[provider] || 10;
   const used = getProviderRPMUsed(provider);
@@ -295,11 +352,22 @@ const DEFAULT_RATE_SETTINGS: LLMRateSettings = {
   anthropicCacheTTL: 'short', // conservative default — heavy users benefit most from 5-min
 };
 
+/**
+ * Read the LLM rate/feature settings, merged over defaults so a partial or
+ * missing stored record still yields a complete, safe settings object.
+ * @returns the effective {@link LLMRateSettings} (defaults ∪ stored).
+ */
 export async function getLLMRateSettings(): Promise<LLMRateSettings> {
   const stored = await getCachedStorage<Partial<LLMRateSettings>>(RATE_SETTINGS_KEY);
   return { ...DEFAULT_RATE_SETTINGS, ...(stored || {}) };
 }
 
+/**
+ * Persist a partial patch to the LLM rate settings (merged over current
+ * values) and invalidate the cache so the next read reflects the write.
+ * @param settings partial settings to merge and save.
+ * @returns nothing; throws only if `chrome.storage.local.set` rejects.
+ */
 export async function saveLLMRateSettings(settings: Partial<LLMRateSettings>): Promise<void> {
   const existing = await getLLMRateSettings();
   const merged = { ...existing, ...settings };
@@ -320,6 +388,12 @@ interface QueuedRequest {
 const requestQueue: QueuedRequest[] = [];
 let queueProcessing = false;
 
+/**
+ * Stable-sort the pending request queue so higher-priority features
+ * (interactive < background < batch) drain first. Called before each queue
+ * step so a late-arriving interactive request jumps ahead of background work.
+ * @returns nothing; sorts `requestQueue` in place.
+ */
 function sortQueueByPriority(): void {
   requestQueue.sort((a, b) => {
     const pA = PRIORITY_ORDER[FEATURE_PRIORITY[a.feature] || 'background'] ?? 1;
@@ -338,6 +412,13 @@ const BASE_BACKOFF_MS = 2000;
 const LLM_FETCH_TIMEOUT_MS = 60_000;
 let rateLimitLoggedAt = 0;
 
+/**
+ * Whether the global request-rate cap has been reached in the trailing 60s,
+ * pruning aged-out timestamps as a side effect. `maxPerMin <= 0` means
+ * unlimited. Hot path — no logging.
+ * @param maxPerMin configured requests-per-minute ceiling (0 = unlimited).
+ * @returns true when the recent request count meets or exceeds the cap.
+ */
 function isRateLimited(maxPerMin: number): boolean {
   if (maxPerMin <= 0) return false;
   const now = Date.now();
@@ -345,6 +426,12 @@ function isRateLimited(maxPerMin: number): boolean {
   return requestTimestamps.length >= maxPerMin;
 }
 
+/**
+ * Entry point for draining the request queue. Ensures only one drain loop runs
+ * at a time and, critically, always clears the `queueProcessing` guard even if
+ * the drain throws (see the inline note) so the queue can never wedge.
+ * @returns nothing; resolves when the current drain pass ends.
+ */
 async function processQueue(): Promise<void> {
   if (queueProcessing) return;
   queueProcessing = true;
@@ -362,6 +449,15 @@ async function processQueue(): Promise<void> {
   }
 }
 
+/**
+ * Serial queue-drain loop: honours global backoff and the per-minute rate cap,
+ * executes each queued request, and applies exponential backoff + bounded
+ * retries on 429s, 5xx, and network errors. Background requests are dropped
+ * (rejected) when rate-limited so interactive ones aren't starved. State
+ * transitions (backoff, drops, retries) are logged via the file's console
+ * convention.
+ * @returns nothing; resolves when the queue is empty or fully drained/dropped.
+ */
 async function drainQueue(): Promise<void> {
   while (requestQueue.length > 0) {
     sortQueueByPriority(); // interactive requests first
@@ -516,6 +612,11 @@ async function queuedFetch(url: string, init: RequestInit, feature: string): Pro
   });
 }
 
+/**
+ * Read the user's active LLM config (provider/apiKey/model) from cached
+ * storage, defaulting to the keyless `local` provider when unset.
+ * @returns a fully-populated {@link LLMConfig}; never throws for a missing key.
+ */
 export async function getLLMConfig(): Promise<LLMConfig> {
   const settings = await getCachedStorage<Partial<LLMConfig>>(SETTINGS_KEY) || {};
   return {
@@ -537,6 +638,14 @@ export async function getAllProviderKeys(): Promise<Record<string, string>> {
   return keys || {};
 }
 
+/**
+ * Persist a single provider's API key into the failover key store and
+ * invalidate the cache. Spreads the cached object first so the shared cache
+ * instance isn't mutated (see {@link getAllProviderKeys}).
+ * @param provider provider id the key belongs to.
+ * @param apiKey the API key to store.
+ * @returns nothing; throws only if `chrome.storage.local.set` rejects.
+ */
 export async function saveProviderKey(provider: string, apiKey: string): Promise<void> {
   const keys = await getAllProviderKeys();
   const next = { ...keys, [provider]: apiKey };
@@ -550,27 +659,56 @@ export async function saveProviderKey(provider: string, apiKey: string): Promise
 // this first, then falls back to the active LLMConfig.model (if same
 // provider), then to DEFAULT_MODELS.
 const PROVIDER_MODELS_KEY = 'aggregaytor_provider_models_v1';
+/**
+ * Read the auto-updater's per-provider model override, if any.
+ * @param provider provider id to look up.
+ * @returns the override model id, or `undefined` when none is set — a storage
+ *          read failure is deliberately swallowed and also returns `undefined`
+ *          so the caller falls back to the default model.
+ */
 export async function getProviderModelOverride(provider: string): Promise<string | undefined> {
   try {
     const got = await getCachedStorage<Record<string, string>>(PROVIDER_MODELS_KEY);
     return got?.[provider];
   } catch { return undefined; }
 }
+/**
+ * Write a per-provider model override (used by the model auto-updater) and
+ * invalidate the cache. Spreads the cached map first to avoid mutating it.
+ * @param provider provider id the override applies to.
+ * @param model the newer model id to prefer for this provider.
+ * @returns nothing; throws only if `chrome.storage.local.set` rejects.
+ */
 export async function setProviderModelOverride(provider: string, model: string): Promise<void> {
   const got = await getCachedStorage<Record<string, string>>(PROVIDER_MODELS_KEY);
   const next = { ...(got || {}), [provider]: model };
   await chrome.storage.local.set({ [PROVIDER_MODELS_KEY]: next });
   invalidateStorageCache(PROVIDER_MODELS_KEY);
 }
-/** NOTE: like getAllProviderKeys, this returns the cached instance. Spread it
- *  before adding or overriding entries. */
+/**
+ * Read every stored per-provider model override.
+ * NOTE: like getAllProviderKeys, this returns the cached instance. Spread it
+ * before adding or overriding entries.
+ * @returns a `{ provider: modelId }` map (empty object when none stored).
+ */
 export async function getAllProviderModels(): Promise<Record<string, string>> {
   const got = await getCachedStorage<Record<string, string>>(PROVIDER_MODELS_KEY);
   return got || {};
 }
+/**
+ * The shipped default model id for a provider. Pure lookup.
+ * @param provider provider to resolve.
+ * @returns the `DEFAULT_MODELS` entry for `provider`.
+ */
 export function getDefaultModel(provider: LLMProvider): string {
   return DEFAULT_MODELS[provider];
 }
+/**
+ * Resolve the model a provider should actually use: auto-updater override if
+ * present, otherwise the shipped default.
+ * @param provider provider to resolve a model for.
+ * @returns the effective model id.
+ */
 export async function getEffectiveModelForProvider(provider: LLMProvider): Promise<string> {
   const override = await getProviderModelOverride(provider);
   if (override) return override;
@@ -606,6 +744,12 @@ async function getConfigWithFailover(rateLimitedProvider?: string): Promise<LLMC
   return primary;
 }
 
+/**
+ * Snapshot the request-queue + rate-limiter state for the debug/status UIs:
+ * queue depth, requests in the last minute, remaining global backoff, and
+ * per-provider RPM usage vs. limit. Pure read — no logging.
+ * @returns a plain status object (see fields inline).
+ */
 export function getLLMQueueStatus() {
   const now = Date.now();
   const providerUsage: Record<string, { used: number; limit: number }> = {};
@@ -620,6 +764,13 @@ export function getLLMQueueStatus() {
   };
 }
 
+/**
+ * Persist a partial LLM config patch (merged over current), invalidate the
+ * cache, and mirror the key into the failover key store when both provider and
+ * apiKey are present so failover can reach it later.
+ * @param config partial config to merge and save.
+ * @returns nothing; throws only if a `chrome.storage.local.set` rejects.
+ */
 export async function saveLLMConfig(config: Partial<LLMConfig>): Promise<void> {
   const existing = await getLLMConfig();
   await chrome.storage.local.set({
@@ -723,11 +874,22 @@ export const PERSONALITY_PRESETS: Record<string, { label: string; description: s
   },
 };
 
+/**
+ * Read the persona/style settings merged over defaults, so a partial or
+ * missing record still yields a complete object.
+ * @returns the effective {@link PersonalitySettings}.
+ */
 export async function getPersonalitySettings(): Promise<PersonalitySettings> {
   const stored = await getCachedStorage<Partial<PersonalitySettings>>(PERSONALITY_SETTINGS_KEY);
   return { ...DEFAULT_PERSONALITY, ...(stored || {}) };
 }
 
+/**
+ * Persist a partial personality-settings patch (merged over current) and
+ * invalidate the cache so the next prompt build sees it.
+ * @param settings partial personality settings to merge and save.
+ * @returns nothing; throws only if `chrome.storage.local.set` rejects.
+ */
 export async function savePersonalitySettings(settings: Partial<PersonalitySettings>): Promise<void> {
   const existing = await getPersonalitySettings();
   await chrome.storage.local.set({ [PERSONALITY_SETTINGS_KEY]: { ...existing, ...settings } });
@@ -827,6 +989,16 @@ const responseCache = new LruIdbCache<{ response: string; tokens: number }>({
   ttlMs: CACHE_TTL_MS,
 });
 
+/**
+ * Derive a collision-resistant cache/coalesce key from the full system+user
+ * prompts and feature. Hashes the entire prompt text (not slices) because this
+ * key also drives in-flight coalescing — a collision would hand one contact's
+ * response to another's request. Pure/hot — no logging.
+ * @param systemPrompt full system prompt.
+ * @param userPrompt full user prompt.
+ * @param feature feature tag (namespaces the key).
+ * @returns a short deterministic key string (`c_<base36 hash>`).
+ */
 function getCacheKey(systemPrompt: string, userPrompt: string, feature: string): string {
   // Hash the FULL prompts, not slices. The old key hashed only the first 200
   // chars of the system prompt plus the last 500 of the user prompt, so two
@@ -842,6 +1014,12 @@ function getCacheKey(systemPrompt: string, userPrompt: string, feature: string):
   return `c_${hash.toString(36)}`;
 }
 
+/**
+ * Look up a previously cached provider response by cache key. Logs a cache hit
+ * (token savings) via the file's console convention.
+ * @param key cache key from {@link getCacheKey}.
+ * @returns the cached response text, or `null` on a miss/expired entry.
+ */
 async function getCachedResponse(key: string): Promise<string | null> {
   const entry = await responseCache.get(key);
   if (!entry) return null;
@@ -849,6 +1027,15 @@ async function getCachedResponse(key: string): Promise<string | null> {
   return entry.response;
 }
 
+/**
+ * Store a provider response under `key` for later reuse. Delegates LRU/TTL/cap
+ * eviction to {@link LruIdbCache}.
+ * @param key cache key from {@link getCacheKey}.
+ * @param response the provider response text to cache.
+ * @param estimatedTokens estimated token count (for savings reporting).
+ * @returns nothing; the cold-tier IDB write may reject and is the caller's to
+ *          handle (callers use fire-and-forget `.catch()`).
+ */
 async function setCachedResponse(key: string, response: string, estimatedTokens: number): Promise<void> {
   // LruIdbCache handles its own LRU + cap eviction + TTL.
   await responseCache.set(key, { response, tokens: estimatedTokens });
@@ -904,6 +1091,16 @@ function renderTranscript(messages: Message[], contactName: string): string {
   }).join('\n');
 }
 
+/**
+ * Serialize the most-recent message window into a compact transcript string
+ * for prompting, memoized by (contact, feature, count, last-timestamp) with a
+ * short TTL so back-to-back LLM calls on one thread reuse the work. Hot path —
+ * no logging.
+ * @param messages full message list (only the last window is used).
+ * @param contactName display name used as the inbound speaker label.
+ * @param feature feature tag selecting the window size (default `suggestions`).
+ * @returns the rendered `Speaker: body` transcript.
+ */
 function buildConversationContext(messages: Message[], contactName: string, feature = 'suggestions'): string {
   const windowSize = CONTEXT_WINDOWS[feature] || 15;
   const recent = messages.slice(-windowSize);
@@ -938,12 +1135,26 @@ function buildConversationContext(messages: Message[], contactName: string, feat
 const lastDossierExtractTimestamp = new Map<string, string>();
 const DOSSIER_TS_CAP = 2000;
 
+/**
+ * Return only messages newer than the last dossier extraction for a contact,
+ * so extraction processes deltas instead of the whole thread. Pure — no logging.
+ * @param contactId contact whose extraction cursor to consult.
+ * @param messages the contact's full message list.
+ * @returns messages after the stored cursor, or all messages on first run.
+ */
 function getNewMessagesSinceLastExtraction(contactId: string, messages: Message[]): Message[] {
   const lastTs = lastDossierExtractTimestamp.get(contactId);
   if (!lastTs) return messages; // first extraction — use all
   return messages.filter(m => m.timestamp > lastTs);
 }
 
+/**
+ * Advance the dossier-extraction cursor for a contact to the newest processed
+ * message timestamp, with FIFO eviction once the tracker map hits its cap.
+ * @param contactId contact whose cursor to advance.
+ * @param messages the messages just processed (max timestamp becomes the cursor).
+ * @returns nothing; no-op for an empty `messages`.
+ */
 function markDossierExtracted(contactId: string, messages: Message[]): void {
   if (!messages.length) return;
   const latest = messages.reduce((a, b) => a.timestamp > b.timestamp ? a : b);
@@ -1018,6 +1229,14 @@ const TIERED_MODELS: Record<string, Record<string, string>> = {
   },
 };
 
+/**
+ * Choose the model id for a request: honour a user-pinned model verbatim,
+ * else pick the provider's model for the feature's cost tier, applying the
+ * Gemini deprecation remap only to auto-picked models. Pure — no logging.
+ * @param config active config (its `model`, if set, wins).
+ * @param feature feature tag mapped to a premium/standard/economy tier.
+ * @returns the resolved model id.
+ */
 function getModelForTask(config: LLMConfig, feature: string): string {
   // If user explicitly set a model, always use it — deprecation swapping is
   // on auto-pick only. A user who pinned "gemini-2.5-flash" knows what they
@@ -1033,6 +1252,12 @@ function getModelForTask(config: LLMConfig, feature: string): string {
 }
 
 // 6. Token estimation — rough estimate to track usage
+/**
+ * Rough token estimate (≈4 chars/token) for usage/savings accounting only —
+ * not billing-accurate. Pure/hot — no logging.
+ * @param text text to estimate.
+ * @returns estimated token count.
+ */
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4); // rough approximation: 4 chars per token
 }
@@ -1042,6 +1267,12 @@ let totalTokensSaved = 0;
 let totalCacheHits = 0;
 let totalApiCalls = 0;
 
+/**
+ * Snapshot the LLM optimization counters and in-memory cache sizes for the
+ * settings/debug UI. Cache sizes report the MEM tier only (see inline note).
+ * Pure read — no logging.
+ * @returns a plain stats object (tokens saved, cache hits, API calls, sizes).
+ */
 export function getLLMOptimizationStats() {
   // v0.57.73: cacheSize / summaryCacheSize now report MEM-TIER size only
   // (sync). Cold-tier counts would need a coldSize() async call which
@@ -1101,6 +1332,20 @@ export function clearLLMCaches(): { cleared: Record<string, number> } {
 const inflightRequests = new Map<string, Promise<string>>();
 let totalCoalesced = 0;
 
+/**
+ * De-duplicate concurrent identical prompts: if an in-flight call with the same
+ * cache key exists, return its promise instead of issuing a second provider
+ * request; otherwise call {@link callProvider} and track it until it settles.
+ * Logs each coalesced hit.
+ * @param config provider config to call with.
+ * @param systemPrompt system prompt.
+ * @param userPrompt user prompt.
+ * @param feature feature tag (priority/routing/keying).
+ * @param opts optional temperature/maxTokens/jsonMode overrides.
+ * @returns the provider response text.
+ * @throws whatever {@link callProvider} throws (propagated to every coalesced
+ *         caller sharing the in-flight promise).
+ */
 async function coalescedCallProvider(
   config: LLMConfig, systemPrompt: string, userPrompt: string,
   feature: string, opts?: { temperature?: number; maxTokens?: number; jsonMode?: boolean },
@@ -1136,6 +1381,18 @@ const conversationSummaryCache = new LruIdbCache<{ summary: string; messageCount
   ttlMs: SUMMARY_CACHE_TTL,
 });
 
+/**
+ * Build a token-efficient conversation context: when the thread exceeds the
+ * feature's window, prepend a cheap local (no-LLM) summary of the older
+ * messages (reusing a cached summary when it still covers roughly the same
+ * span) to the recent-window transcript. The summary cache write is
+ * fire-and-forget.
+ * @param messages full message list.
+ * @param contactName inbound speaker label.
+ * @param contactId key for the per-contact summary cache.
+ * @param feature feature tag selecting the window size.
+ * @returns the composed context string (summary + recent transcript).
+ */
 async function getCompactConversationContext(
   messages: Message[], contactName: string, contactId: string, feature: string,
 ): Promise<string> {
@@ -1173,6 +1430,12 @@ async function getCompactConversationContext(
   return `[Earlier: ${summary}]\n\n${renderTranscript(recentMessages, contactName)}`;
 }
 
+/**
+ * Extract the top few recurring hookup/logistics keywords from a message set,
+ * for the cheap local conversation summary. Pure — no logging.
+ * @param messages messages to scan.
+ * @returns a comma-joined list of up to 5 most-frequent matched topics.
+ */
 function extractTopics(messages: Message[]): string {
   const keywords = new Map<string, number>();
   const topicPatterns = /\b(host|travel|meet|tonight|tomorrow|pics|photo|looking for|top|bottom|vers|fun|chill|hang|hookup|date|drink|place|car|hotel|address|age|height|weight)\b/gi;
@@ -1437,6 +1700,13 @@ async function callProvider(
 
 // ── Local fallback ──────────────────────────────────────────────────────────
 
+/**
+ * Zero-cost, no-API reply suggestions derived from simple pattern matching on
+ * the last message. Used when no provider is configured or as a fallback when a
+ * provider call fails. Pure — no logging.
+ * @param messages conversation messages (only the last drives the heuristics).
+ * @returns up to 4 suggested reply strings (never empty).
+ */
 function localSuggestions(messages: Message[]): string[] {
   const last = messages[messages.length - 1];
   if (!last) return ['Hey, what\'s up?', 'How\'s it going?'];
@@ -1477,6 +1747,17 @@ function localSuggestions(messages: Message[]): string[] {
 
 // ── Main entry point ────────────────────────────────────────────────────────
 
+/**
+ * Produce reply suggestions for a conversation: builds the context-aware
+ * system prompt, calls the best available provider (coalesced), and falls back
+ * to {@link localSuggestions} when disabled, keyless, or on error. Expected
+ * disabled/rate-limited states log at info level; real failures log as errors.
+ * @param messages conversation history.
+ * @param contactName display name of the other party.
+ * @param platform platform the chat is on.
+ * @param contactId optional contact id enabling per-contact dossier context.
+ * @returns suggestions plus the provider that produced them (and any error).
+ */
 export async function generateSuggestions(
   messages: Message[],
   contactName: string,
@@ -1568,6 +1849,14 @@ const AGGRESSIVENESS_PROMPTS: Record<string, string> = {
 const _promptModuleCache = new Map<string, string>();
 const PROMPT_MODULE_CACHE_CAP = 100;
 
+/**
+ * Store a computed prompt-module string under `key`, evicting the oldest entry
+ * (FIFO) once the module cache exceeds its cap, and return the value for
+ * convenient inline use. Pure bookkeeping — no logging.
+ * @param key stable hash key for the module inputs.
+ * @param value the computed module string.
+ * @returns `value` unchanged.
+ */
 function cachePromptModule(key: string, value: string): string {
   _promptModuleCache.set(key, value);
   if (_promptModuleCache.size > PROMPT_MODULE_CACHE_CAP) {
@@ -1658,7 +1947,11 @@ async function contactContextModule(
     const body = formatDossierContext(slice);
     if (!body) return cachePromptModule(cacheKey, '');
     return cachePromptModule(cacheKey, `WHAT WE KNOW ABOUT THEM:\n${body}`);
-  } catch {
+  } catch (err) {
+    // Dossier read/format failed — degrade gracefully to no contact context
+    // (the prompt is still valid without it). Warn, don't error: a missing
+    // dossier is non-fatal and shouldn't surface in the rolling error log.
+    console.warn(`${LOG} contact context skipped for ${contactId}:`, (err as Error)?.message || err);
     return '';
   }
 }
@@ -1758,6 +2051,18 @@ export interface AutoRespondResult {
   error?: string;
 }
 
+/**
+ * Generate a single auto-reply plus a safety tier (low/medium/high) governing
+ * whether it may be auto-sent. Short-circuits to a local reply when
+ * auto-respond is disabled, keyless, or the provider errors; expected
+ * disabled/rate-limited states log at info level, real failures as errors.
+ * @param messages conversation history.
+ * @param contactName the other party's display name.
+ * @param platform platform the chat is on.
+ * @param settings optional aggressiveness/logistics/picture preferences.
+ * @param contactId optional contact id enabling per-contact dossier context.
+ * @returns the response, its tier/reason, any picture suggestion, and provider.
+ */
 export async function generateAutoResponse(
   messages: Message[],
   contactName: string,
@@ -1833,6 +2138,15 @@ export async function generateAutoResponse(
   }
 }
 
+/**
+ * Parse the model's auto-respond JSON into a validated result, tolerating
+ * non-JSON output by falling back to plain text with a conservative,
+ * keyword-based tier classification. Untrusted-input safe: the `JSON.parse` is
+ * guarded and every field is coerced/whitelisted. No logging (a non-JSON
+ * completion is an expected model quirk, not a fault).
+ * @param text raw model output.
+ * @returns `{ response, tier, reason, sendPicture }` with a safe default tier.
+ */
 function parseAutoRespondJson(text: string): { response: string; tier: 'low' | 'medium' | 'high'; reason: string; sendPicture: { tag: string } | null } {
   try {
     const parsed = JSON.parse(text);
@@ -1852,6 +2166,13 @@ function parseAutoRespondJson(text: string): { response: string; tier: 'low' | '
   }
 }
 
+/**
+ * Produce an opening greeting for a brand-new contact by reusing the
+ * auto-respond path with an empty conversation. Falls back to a canned,
+ * time-of-day-appropriate line when keyless, degenerate, or on error.
+ * @param platform platform the greeting is for.
+ * @returns an {@link AutoRespondResult} (always tier `low`).
+ */
 export async function generateGreeting(
   platform: string,
 ): Promise<AutoRespondResult> {
@@ -1879,13 +2200,25 @@ export async function generateGreeting(
       return { response: 'Hey, how\'s it going?', tier: 'low', reason: 'greeting', sendPicture: null, provider: 'local' };
     }
     return result;
-  } catch {
+  } catch (err) {
+    // generateAutoResponse already handles its own provider errors, so
+    // reaching here is unexpected — warn (not error) and serve a canned line.
+    console.warn(`${LOG} Greeting generation failed, using canned line:`, (err as Error)?.message || err);
     return { response: 'Hey, how\'s it going?', tier: 'low', reason: 'greeting fallback', sendPicture: null, provider: 'local' };
   }
 }
 
 // ── Nickname generation ──────────────────────────────────────────────────────
 
+/**
+ * Generate a short descriptive nickname for a contact from their profile
+ * metadata + last message. Falls back to a locally-composed descriptor when
+ * keyless, disabled, or on provider error (nicknames are trivial/economy tier).
+ * @param metadata profile fields (body, position, age, ethnicity, ...).
+ * @param lastMessageBody the contact's most recent message (context clue).
+ * @param platform platform, used in the fallback label.
+ * @returns a nickname string (never empty).
+ */
 export async function generateNickname(
   metadata: Record<string, unknown>,
   lastMessageBody: string,
@@ -1927,13 +2260,27 @@ Return ONLY the nickname, nothing else.`;
   try {
     const text = await callProvider(config, '', prompt, 'nickname', { temperature: 1.0, maxTokens: 20 });
     return text.replace(/^["']|["']$/g, '').trim().slice(0, 30) || `${platform} Guy`;
-  } catch {
+  } catch (err) {
+    // Provider fetch failed — nicknames are cosmetic, so degrade to a generic
+    // label. Warn (not error) so this expected fallback stays out of the
+    // rolling error log, consistent with the other feature paths.
+    console.warn(`${LOG} Nickname generation failed, using generic label:`, (err as Error)?.message || err);
     return `${platform.charAt(0).toUpperCase() + platform.slice(1)} Guy`;
   }
 }
 
 // ── Dossier auto-extraction ─────────────────────────────────────────────────
 
+/**
+ * Extract new personal/profile fields the contact revealed in conversation,
+ * via the LLM in JSON mode, returning only fields with fresh values. Falls back
+ * to the regex-based {@link localDossierExtraction} when keyless, disabled, or
+ * on error; a non-JSON completion logs a preview and yields no fields.
+ * @param messages conversation history (recent window is analyzed).
+ * @param contactName the other party's name (whose info to extract).
+ * @param existingDossier already-known fields, shown to the model to dedupe.
+ * @returns a `{ field: value }` map of newly-found info (possibly empty).
+ */
 export async function extractDossierFields(
   messages: Message[],
   contactName: string,
@@ -2020,6 +2367,13 @@ Return ONLY a JSON object with the fields you found new info for. Omit fields wi
   }
 }
 
+/**
+ * Regex-based, no-API dossier extraction over inbound messages — the fallback
+ * for {@link extractDossierFields}. Pulls phone, age/birth-year, position,
+ * hosting/transport, and name when clearly stated. Pure — no logging.
+ * @param messages conversation messages (only inbound are scanned).
+ * @returns a `{ field: value }` map of confidently-matched fields (possibly empty).
+ */
 export function localDossierExtraction(messages: Message[]): Record<string, string> {
   const result: Record<string, string> = {};
   const inbound = messages.filter(m => m.direction === 'in').map(m => m.body.toLowerCase());
@@ -2053,6 +2407,16 @@ export function localDossierExtraction(messages: Message[]): Record<string, stri
 
 // ── Conversation summary ────────────────────────────────────────────────────
 
+/**
+ * Summarize a conversation's state and extract any agreed commitments via the
+ * LLM in JSON mode. Falls back to {@link localSummary} when keyless, disabled,
+ * or on error; a non-JSON completion degrades to a truncated text summary.
+ * Expected disabled/rate-limited states log at info level, real failures as errors.
+ * @param messages conversation history.
+ * @param contactName the other party's name.
+ * @param platform platform the chat is on.
+ * @returns `{ text, commitments }` summary of the conversation.
+ */
 export async function generateConversationSummary(
   messages: Message[],
   contactName: string,
@@ -2106,6 +2470,13 @@ Return ONLY the JSON object.`;
   }
 }
 
+/**
+ * No-API conversation summary: message counts, last-message preview, and a
+ * regex sweep for logistics commitments. Fallback for
+ * {@link generateConversationSummary}. Pure — no logging.
+ * @param messages conversation messages.
+ * @returns `{ text, commitments }` derived locally.
+ */
 function localSummary(messages: Message[]): { text: string; commitments: string[] } {
   if (!messages.length) return { text: 'No conversation yet.', commitments: [] };
   const inbound = messages.filter(m => m.direction === 'in');
@@ -2126,6 +2497,13 @@ function localSummary(messages: Message[]): { text: string; commitments: string[
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * Best-effort parse of a model completion into a string array, tolerating
+ * OpenAI json_object wrapping and prose-embedded arrays. Untrusted-input safe:
+ * both `JSON.parse` attempts are guarded and non-string members are filtered.
+ * @param text raw model output.
+ * @returns the parsed string array, or a small canned default if unparseable.
+ */
 function parseJsonArray(text: string): string[] {
   try {
     // Try direct parse
@@ -2297,6 +2675,12 @@ Return up to ${limit} matches, ranked by relevance. Only include contacts that a
   }
 }
 
+/**
+ * Format an ISO timestamp as a coarse relative-age string (e.g. `5m ago`,
+ * `3h ago`, `2mo ago`) for the compact contact table. Pure — no logging.
+ * @param iso ISO-8601 timestamp string.
+ * @returns a human-readable relative-time string.
+ */
 function timeSince(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
   if (ms < 0) return 'just now';

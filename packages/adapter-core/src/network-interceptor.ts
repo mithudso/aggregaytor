@@ -403,14 +403,22 @@ export function installWebSocketInterceptor(
   // `WebSocket.toString()` no longer read as native code. All three are
   // observable from the page, which this interceptor must not be.
   const WrappedWebSocket = new Proxy(NativeWebSocket, {
+    /**
+     * Proxy `construct` trap: build the real socket via `Reflect.construct`
+     * (preserving `newTarget` so subclasses keep their prototype), hook it for
+     * message observation, and return it. @returns the constructed WebSocket.
+     */
     construct(ctor, args, newTarget) {
       const ws = Reflect.construct(ctor, args, newTarget) as WebSocket;
       hookSocket(ws, 'ws-constructor');
       return ws;
     },
+    /**
+     * Proxy `get` trap: answer the double-patch sentinel (`PATCH_FLAG`) from the
+     * trap itself so no property is ever written onto the native constructor;
+     * everything else forwards to the target. @returns the property value.
+     */
     get(ctor, prop, receiver) {
-      // Answer the double-patch sentinel from the trap so we never define a
-      // property on the native constructor that would outlive cleanup.
       if (prop === PATCH_FLAG) return true;
       return Reflect.get(ctor, prop, receiver);
     },
@@ -447,6 +455,11 @@ export function installWebSocketInterceptor(
     const origSet = origOnMsgDesc.set;
     const origGet = origOnMsgDesc.get;
     Object.defineProperty(NativeWebSocket.prototype, 'onmessage', {
+      /**
+       * Patched `onmessage` setter: hook the socket when a handler is assigned
+       * (`ws.onmessage = fn`), then delegate to the native setter so page
+       * behavior is unchanged. @param fn the page's message handler (or null).
+       */
       set(fn) {
         if (fn) hookSocket(this, 'ws-proto-onmessage');
         origSet.call(this, fn);

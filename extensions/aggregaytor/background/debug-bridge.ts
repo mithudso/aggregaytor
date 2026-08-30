@@ -30,6 +30,7 @@ import {
   getThreadMeta, getAllThreadMeta, getDossier, getUnreadCount,
 } from '@aggregaytor/store';
 import { getLLMConfig, getLLMRateSettings, getLLMQueueStatus } from './llm.js';
+import { runOperation, listOperations } from './operations-registry.js';
 
 const LOG = '[Aggregaytor:Debug]';
 
@@ -98,18 +99,37 @@ export async function authorizeDebugCommand(
   return ok;
 }
 
-/**
- * Clamp a caller-supplied `limit` into a sane range. Callers reach this module
- * through an untrusted message boundary, so an unbounded `limit` would let a
- * single command pull the entire corpus into the service worker's heap.
- */
+/** Hard ceiling on any debug-command result count (heap-safety bound). */
 const MAX_DEBUG_LIMIT = 500;
+/**
+ * Clamp a caller-supplied `limit` from the untrusted debug boundary into
+ * `[1, MAX_DEBUG_LIMIT]`, falling back to `fallback` for a non-finite or
+ * non-positive input, so one command can't pull the whole corpus into heap.
+ * @param value raw limit from the message params (untrusted)
+ * @param fallback default when `value` is missing/invalid
+ * @returns an integer in [1, 500]
+ */
 function clampLimit(value: unknown, fallback: number): number {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return Math.min(Math.floor(n), MAX_DEBUG_LIMIT);
 }
 
+/**
+ * Dispatch a single read-mostly debug command to its handler. Reached only
+ * after {@link authorizeDebugCommand} has passed in the service worker's
+ * `DEBUG_COMMAND` case, so callers are trusted extension pages; even so, every
+ * handler stays read-only and bounded (clamped limits via {@link clampLimit},
+ * plain-object selector checks) as defense in depth.
+ *
+ * `params` crosses an untrusted message boundary — individual handlers validate
+ * what they consume (e.g. `execute_query` rejects non-plain-object selectors).
+ * @param type the debug command name (unknown types return an `{ error }` object).
+ * @param params command arguments; caller-supplied and treated as untrusted.
+ * @returns the command's result payload, or `{ error }` for unknown/invalid input.
+ * @throws propagates underlying store/IO errors to the service worker's
+ *         top-level `DEBUG_COMMAND` try/catch (handler behavior is unchanged).
+ */
 export async function handleDebugCommand(type: string, params: Record<string, any> = {}): Promise<any> {
   switch (type) {
     case 'query_messages': {
@@ -207,6 +227,22 @@ export async function handleDebugCommand(type: string, params: Record<string, an
     case 'get_service_worker_logs': {
       // Service worker logs aren't persisted — return a note
       return { note: 'Service worker logs are only visible in chrome://extensions → service worker inspector. Set log level to debug for more output.' };
+    }
+
+    // Reflective operations surface for the CLI/MCP path (the extension + API
+    // paths hit the service worker's top-level OPS_LIST/OPS_RUN cases directly).
+    // Both routes call the same runOperation. Already behind the DEBUG_COMMAND
+    // origin gate; writes still require params.confirmWrite.
+    case 'ops_list': {
+      return { operations: listOperations() };
+    }
+
+    case 'ops_run': {
+      return runOperation(
+        String(params.name || ''),
+        Array.isArray(params.args) ? params.args : [],
+        { allowWrite: params.confirmWrite === true },
+      );
     }
 
     default:

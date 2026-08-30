@@ -10,6 +10,18 @@ import { initTextExpander } from './text-expander.js';
 
 const LOG = '[Aggregaytor:A4A]';
 
+/**
+ * Forward an adapter event to the ISOLATED-world bridge (MAIN world).
+ *
+ * WHY: MAIN-world scripts cannot call `chrome.*`, so the only channel to the
+ * service worker is a `window` CustomEvent the bridge relays. The payload is
+ * deep-cloned via JSON so it survives the structured-clone boundary and can
+ * never smuggle a live DOM/function reference to the bridge. The catch is
+ * intentionally silent — a serialization failure on this fire-and-forget path
+ * must not throw and break the adapter's emit loop.
+ *
+ * @param message - Plain, JSON-serializable message object to relay.
+ */
 function sendToBridge(message: Record<string, unknown>): void {
   try {
     window.dispatchEvent(new CustomEvent('__aggregaytor_message', {
@@ -20,19 +32,24 @@ function sendToBridge(message: Record<string, unknown>): void {
 
 const adapter = new Adam4AdamAdapter({ platform: 'adam4adam', observeDOM: true });
 
+// Relay parsed messages from the adapter (trusted source) to the bridge.
 adapter.on('messages', (event) => {
   sendToBridge({ type: 'ADAPTER_MESSAGES', platform: 'adam4adam', payload: event.payload });
 });
 
+// Relay parsed contacts from the adapter (trusted source) to the bridge.
 adapter.on('contacts', (event) => {
   sendToBridge({ type: 'ADAPTER_CONTACTS', platform: 'adam4adam', payload: event.payload });
 });
 
+// Relay adapter errors to the bridge as a normalized message string; `payload`
+// may be an Error or an arbitrary throw value.
 adapter.on('error', (event) => {
   const err = event.payload as Error;
   sendToBridge({ type: 'ADAPTER_ERROR', platform: 'adam4adam', error: err?.message || String(err) });
 });
 
+// Boot the adapter's network/DOM interception; log the outcome either way.
 adapter.init().then(() => console.log(`${LOG} Adapter initialized`)).catch(err => console.error(`${LOG} Init failed:`, err));
 
 // Text expander — type shortcuts in chat to auto-expand
@@ -43,9 +60,12 @@ initTextExpander();
 // world. This handler is a hook point for anything that needs MAIN-world
 // access — e.g. intercepted auth headers for a future platform-side block
 // API call. Local-only mode is the default; no A4A API is called here.
+// `event.detail` is a plain window CustomEvent and forgeable by any page
+// script, so `username` is validated as a non-empty string before it is
+// interpolated into the toast.
 window.addEventListener('__aggregaytor_block_profile', ((event: CustomEvent) => {
   const { username } = event.detail || {};
-  if (!username) return;
+  if (!username || typeof username !== 'string') return;
   console.log(`${LOG} Block hook for ${username} (local-only — nothing more to do unless platform-block is enabled)`);
   // Toast for visual confirmation
   try {
@@ -61,10 +81,12 @@ window.addEventListener('__aggregaytor_block_profile', ((event: CustomEvent) => 
   } catch {}
 }) as EventListener);
 
-// Auto-send handler (for auto-respond and quick phrases)
+// Auto-send handler (for auto-respond and quick phrases). `event.detail` is
+// forgeable page-side, so `text` is validated as a non-empty string before it
+// reaches `.slice()`/the DOM composer.
 window.addEventListener('__aggregaytor_send_message', ((event: CustomEvent) => {
   const { text } = event.detail || {};
-  if (!text) return;
+  if (!text || typeof text !== 'string') return;
   console.log(`${LOG} Auto-sending:`, text.slice(0, 30));
 
   // Find the chat input — try multiple selectors for A4A's UI
@@ -108,14 +130,34 @@ window.addEventListener('__aggregaytor_send_message', ((event: CustomEvent) => {
 // `window`, but the user typically types into the MAIN-world prompt by
 // default, so these are the ones that "just work."
 const A4A_BLOCKED_KEY = 'aggregaytor_a4a_blocked';
+
+// NOTE: these three `window.__aggregaytor_a4a_*` names are pre-existing debug
+// helpers (not a new window exposure). They expose only DevTools recovery
+// affordances — no auth/privileged state — and shared work happens ISOLATED-
+// side via localStorage + the `__aggregaytor_a4a_console_*` CustomEvents.
+
+/**
+ * DevTools recovery: clear the local A4A blocklist and ask the ISOLATED bridge
+ * to un-hide every card. `localStorage.removeItem` is guarded (private mode).
+ */
 (window as any).__aggregaytor_a4a_reset = function (): void {
   try { localStorage.removeItem(A4A_BLOCKED_KEY); } catch {}
   window.dispatchEvent(new CustomEvent('__aggregaytor_a4a_console_reset'));
   console.log('[Aggregaytor:A4A] Reset dispatched — page will refresh hide state shortly.');
 };
+
+/** DevTools recovery: un-hide currently-hidden cards but keep the blocklist. */
 (window as any).__aggregaytor_a4a_unhide_all = function (): void {
   window.dispatchEvent(new CustomEvent('__aggregaytor_a4a_console_unhide_all'));
 };
+
+/**
+ * DevTools helper: print and return the stored A4A blocklist. Reads and
+ * JSON-parses localStorage (untrusted/corruptible), returning `[]` on any read
+ * or parse failure so a bad value never throws in the console.
+ *
+ * @returns The array of blocked usernames, or `[]` if none/unreadable.
+ */
 (window as any).__aggregaytor_a4a_list_blocked = function (): string[] {
   try {
     const raw = localStorage.getItem(A4A_BLOCKED_KEY);
