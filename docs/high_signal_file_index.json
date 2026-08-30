@@ -2497,6 +2497,94 @@
     "last_updated": "2026-08-30"
   },
   {
+    "path": "packages/sniffies-lib/src/api.js",
+    "purpose": "Sniffies HTTP client: /api/user/partials + /api/user/full with base/shape probing; computeLastActiveTs, extractAttitudeFromPartial",
+    "layer": "shared-lib",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/sniffies-lib/src/compose.js",
+    "purpose": "Composer resolution + sendInCurrentChat (Sniffies has no send API; writes over the DOM)",
+    "layer": "shared-lib",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/sniffies-lib/src/dom.js",
+    "purpose": "Pure DOM helpers: marker/global-chat/carousel resolution, profile-id extraction, attitude, distance, unread",
+    "layer": "shared-lib",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/sniffies-lib/src/errors.js",
+    "purpose": "SniffiesError/SniffiesAllBasesError/SniffiesTimeoutError (never carry a cookie/session)",
+    "layer": "shared-lib",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/sniffies-lib/src/index.d.ts",
+    "purpose": "Hand-written type surface for the vendored Sniffies client library",
+    "layer": "shared-lib",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/sniffies-lib/src/index.js",
+    "purpose": "Sniffies client barrel: createClient + re-exports (api, dom, compose, limiter, observer, decodeSocketFrame)",
+    "layer": "shared-lib",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/sniffies-lib/src/limiter.js",
+    "purpose": "createLimiter: 6/min + 10-min cooldown gate for profile fetches",
+    "layer": "shared-lib",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
+    "path": "packages/sniffies-lib/src/observe.js",
+    "purpose": "Opt-in fetch/XHR/WebSocket observer + decodeSocketFrame (Socket.IO/Engine.IO framing), isSniffiesApiUrl",
+    "layer": "shared-lib",
+    "exports": [],
+    "depends_on": [],
+    "patterns": [
+      "vendored"
+    ],
+    "last_updated": "2026-08-30"
+  },
+  {
     "path": "packages/store/__tests__/db.test.ts",
     "purpose": "Tests Dexie compat layer: allDocs, compound find, export/import, thread summaries (fake-indexeddb).",
     "layer": "test",

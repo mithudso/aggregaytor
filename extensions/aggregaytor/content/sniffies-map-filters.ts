@@ -22,6 +22,15 @@
  * loaded at startup. Changes are applied on the next scan cycle.
  */
 
+// Delegates partials fetch (createApi + createLimiter), attitude parse, and
+// last-active extraction to the vendored @aggregaytor/sniffies-lib.
+import {
+  createApi,
+  createLimiter,
+  computeLastActiveTs,
+  extractAttitudeFromPartial as libExtractAttitudeFromPartial,
+} from '@aggregaytor/sniffies-lib';
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 interface MapFilterSettings {
@@ -1631,12 +1640,7 @@ window.addEventListener('__aggregaytor_set_attitude', ((event: CustomEvent) => {
 //
 // Rate limiting: at most one POST per 4 seconds; exponential backoff on 429.
 
-const PARTIALS_ENDPOINTS = [
-  'https://usw.api.sniffies.com/api/user/partials',
-  'https://uswapi2.sniffies.com/api/user/partials',
-];
 const PARTIALS_BATCH = 50;
-const PARTIALS_MIN_INTERVAL_MS = 4000;
 const PARTIALS_FAIL_COOLDOWN_MS = 30_000;
 
 const partialsFetchInFlight = new Set<string>();
@@ -1644,10 +1648,20 @@ const partialsRetryAt = new Map<string, number>();
 const PARTIALS_RETRY_AT_MAX = 2000;
 const partialsNoAttitude = new Set<string>();
 const PARTIALS_NO_ATTITUDE_MAX = 5000;
-let partialsLastRequestTs = 0;
-let partialsRateLimitUntil = 0;
-let partialsPreferredEndpoint = PARTIALS_ENDPOINTS[0];
-let partialsEndpointFailCount = 0;
+
+// Partials fetch now delegates to @aggregaytor/sniffies-lib: a shared limiter
+// (createLimiter defaults = 6 requests/min + 10-min cooldown on a server 429/403)
+// gates every call, and createApi owns base + body-shape probing, base rotation,
+// and cooldown reporting. The bespoke endpoint list, 4s min-interval, manual 429
+// handling, and preferred-endpoint rotation were removed in favor of the library.
+// A tiny localStorage-backed remember/recall persists the learned base/shape
+// across reloads (page-origin storage; MAIN-world safe — no chrome.*, no window.*).
+const partialsLimiter = createLimiter();
+const partialsApi = createApi({
+  limiter: partialsLimiter,
+  remember: (k: string, v: string) => { try { localStorage.setItem(`aggregaytor_partials_${k}`, v); } catch {} },
+  recall: (k: string) => { try { return localStorage.getItem(`aggregaytor_partials_${k}`); } catch { return null; } },
+});
 
 /**
  * Extract the position/attitude string from an (untrusted) partials-API profile
@@ -1655,10 +1669,13 @@ let partialsEndpointFailCount = 0;
  * @returns the lowercased attitude, or null if the response lacks it.
  */
 function extractAttitudeFromPartial(p: any): string | null {
-  const sexuality = p?.data?.profile?.extended?.sexuality;
-  if (!sexuality) return null;
-  const att = sexuality.attitude;
-  return att ? String(att).toLowerCase() : null;
+  // Now delegates to @aggregaytor/sniffies-lib (same
+  // `data.profile.extended.sexuality.attitude` path). The lib returns the raw
+  // value (undefined when absent, explicit null, or a non-lowercased string);
+  // this shim reapplies this module's contract: lowercased string, or null for
+  // any absent/empty attitude — behavior-identical to the previous inline impl.
+  const raw = libExtractAttitudeFromPartial(p);
+  return raw ? String(raw).toLowerCase() : null;
 }
 
 /**
@@ -1681,34 +1698,19 @@ function extractTextFromPartial(p: any): string {
 }
 
 /**
- * Pull a last-active timestamp out of a partials response object. Tries
- * each path Sniffies has used historically, plus legacy snake/camelCase
- * spellings. Returns epoch ms, or 0 when no usable signal was found.
+ * Pull a last-active timestamp out of a partials response object.
  *
- * Number values below 1e12 are interpreted as seconds and upgraded to
- * milliseconds (matches parseTimestamp() in the adapter).
+ * Now delegates to @aggregaytor/sniffies-lib `computeLastActiveTs`, which reads
+ * `connectUpdateTime` / `disconnectTime` (on the row or its `data`) and returns
+ * `min(now, max(connectUpdateTime, disconnectTime))`, or 0 when neither parses.
+ *
+ * NOTE (intentional behavior adoption): the old implementation scanned a long
+ * list of legacy `lastActive*` / `lastSeen*` / `lastOnline*` spellings and
+ * upgraded bare seconds to ms. The library reads only the two canonical
+ * presence fields; profiles that expose only a legacy spelling now yield 0.
  */
 function extractLastActiveFromPartial(p: any): number {
-  const prof = p?.data?.profile || p?.data || p || {};
-  const candidates: unknown[] = [
-    prof.lastActiveAt, prof.lastActive, prof.lastSeenAt, prof.lastSeen,
-    prof.lastOnlineAt, prof.lastOnline, prof.onlineAt,
-    prof.activity?.lastSeenAt, prof.activity?.lastActiveAt,
-    prof.extended?.lastActiveAt, prof.extended?.lastActive,
-    p?.lastActiveAt, p?.lastActive,
-  ];
-  for (const v of candidates) {
-    if (v == null) continue;
-    if (typeof v === 'number') {
-      if (!isFinite(v) || v <= 0) continue;
-      return v < 1e12 ? v * 1000 : v;
-    }
-    if (typeof v === 'string') {
-      const parsed = Date.parse(v);
-      if (!isNaN(parsed)) return parsed;
-    }
-  }
-  return 0;
+  return computeLastActiveTs(p);
 }
 
 /**
@@ -1723,69 +1725,49 @@ function extractLastActiveFromPartial(p: any): number {
  */
 async function fetchPartialsForIds(ids: string[]): Promise<boolean> {
   if (!ids.length) return false;
-  const now = Date.now();
-  if (now < partialsRateLimitUntil) return false;
-  if (now - partialsLastRequestTs < PARTIALS_MIN_INTERVAL_MS) return false;
-  partialsLastRequestTs = now;
+  // The shared limiter (createLimiter) owns rate control. Skip while it is
+  // cooling down (server 429/403) or already has a request queued/in-flight, so
+  // the prefetch tick keeps its previous one-in-flight posture rather than
+  // stacking calls behind the limiter's queue.
+  if (partialsLimiter.cooldownRemainingMs() > 0) return false;
+  if (partialsLimiter.pending() > 0) return false;
 
-  // Try preferred endpoint first, fall back to others on failure.
-  const endpoints = [partialsPreferredEndpoint, ...PARTIALS_ENDPOINTS.filter(e => e !== partialsPreferredEndpoint)];
-  for (const endpoint of endpoints) {
-    try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ userIds: ids }),
-        credentials: 'include',
-      });
-      if (res.status === 429) {
-        partialsRateLimitUntil = Date.now() + PARTIALS_FAIL_COOLDOWN_MS;
-        console.warn('[Aggregaytor:MapFilters] partials 429 — cooling down');
-        return true;
-      }
-      if (!res.ok) continue;
-      const data = await res.json();
-      if (!Array.isArray(data)) continue;
-      partialsPreferredEndpoint = endpoint;
-      partialsEndpointFailCount = 0;
-      let attitudeCount = 0;
-      for (const p of data) {
-        const id = String(p?._id || p?.id || p?.data?._id || '').toLowerCase();
-        if (!id) continue;
-        const att = extractAttitudeFromPartial(p);
-        if (att) {
-          cappedMapSet(markerAttitudes, id, att, MARKER_ATTITUDES_MAX);
-          attitudeCount++;
-        } else {
-          partialsNoAttitude.add(id);
-          if (partialsNoAttitude.size > PARTIALS_NO_ATTITUDE_MAX) {
-            const oldest = partialsNoAttitude.values().next();
-            if (!oldest.done) partialsNoAttitude.delete(oldest.value);
-          }
-        }
-        const text = extractTextFromPartial(p);
-        if (text) cappedMapSet(markerProfileText, id, text, MARKER_PROFILE_TEXT_MAX);
-        const lastActive = extractLastActiveFromPartial(p);
-        if (lastActive > 0) cappedMapSet(markerLastActive, id, lastActive, MARKER_LAST_ACTIVE_MAX);
-      }
-      if (attitudeCount > 0) {
-        console.log(`[Aggregaytor:MapFilters] Partials: fetched ${attitudeCount} attitudes (of ${ids.length} requested)`);
-        requestAnimationFrame(applyFilters);
-      }
-      return true;
-    } catch {
-      // Try next endpoint
-    }
+  let rows: Array<Record<string, unknown>>;
+  try {
+    // Delegates to @aggregaytor/sniffies-lib createApi.getPartials — handles
+    // base + body-shape probing, base rotation, and (on 429/403) opening the
+    // limiter cooldown internally. It resolves to the row array or throws.
+    rows = await partialsApi.getPartials(ids);
+  } catch {
+    // The api/limiter already recorded any server rejection + cooldown; treat
+    // this as an attempted request so the caller applies its per-id backoff.
+    return true;
   }
-  partialsEndpointFailCount++;
-  if (partialsEndpointFailCount >= 3) {
-    const curIdx = PARTIALS_ENDPOINTS.indexOf(partialsPreferredEndpoint);
-    partialsPreferredEndpoint = PARTIALS_ENDPOINTS[(curIdx + 1) % PARTIALS_ENDPOINTS.length];
-    partialsEndpointFailCount = 0;
-    // Meaningful external-fetch state transition: every partials endpoint has
-    // failed 3× in a row, so the preferred endpoint rotates. Worth a warn so
-    // a persistently-failing backfill is visible in the console.
-    console.warn('[Aggregaytor:MapFilters] partials: all endpoints failing, rotating preferred to', partialsPreferredEndpoint);
+  if (!Array.isArray(rows)) return true;
+
+  let attitudeCount = 0;
+  for (const p of rows as any[]) {
+    const id = String(p?._id || p?.id || p?.data?._id || '').toLowerCase();
+    if (!id) continue;
+    const att = extractAttitudeFromPartial(p);
+    if (att) {
+      cappedMapSet(markerAttitudes, id, att, MARKER_ATTITUDES_MAX);
+      attitudeCount++;
+    } else {
+      partialsNoAttitude.add(id);
+      if (partialsNoAttitude.size > PARTIALS_NO_ATTITUDE_MAX) {
+        const oldest = partialsNoAttitude.values().next();
+        if (!oldest.done) partialsNoAttitude.delete(oldest.value);
+      }
+    }
+    const text = extractTextFromPartial(p);
+    if (text) cappedMapSet(markerProfileText, id, text, MARKER_PROFILE_TEXT_MAX);
+    const lastActive = extractLastActiveFromPartial(p);
+    if (lastActive > 0) cappedMapSet(markerLastActive, id, lastActive, MARKER_LAST_ACTIVE_MAX);
+  }
+  if (attitudeCount > 0) {
+    console.log(`[Aggregaytor:MapFilters] Partials: fetched ${attitudeCount} attitudes (of ${ids.length} requested)`);
+    requestAnimationFrame(applyFilters);
   }
   return true;
 }

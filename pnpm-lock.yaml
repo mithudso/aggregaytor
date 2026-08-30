@@ -98,6 +98,10 @@ importers:
         version: 3.2.4(@types/debug@4.1.13)
 
   adapters/sniffies:
+    dependencies:
+      '@aggregaytor/sniffies-lib':
+        specifier: workspace:*
+        version: link:../../packages/sniffies-lib
     devDependencies:
       '@aggregaytor/adapter-core':
         specifier: workspace:*
@@ -159,6 +163,9 @@ importers:
       '@aggregaytor/grindr-lib':
         specifier: workspace:*
         version: link:../../packages/grindr-lib
+      '@aggregaytor/sniffies-lib':
+        specifier: workspace:*
+        version: link:../../packages/sniffies-lib
       '@aggregaytor/store':
         specifier: workspace:*
         version: link:../../packages/store
@@ -213,6 +220,15 @@ importers:
         version: 3.2.4(@types/debug@4.1.13)
 
   packages/grindr-lib:
+    devDependencies:
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.1.0
+        version: 3.2.4(@types/debug@4.1.13)
+
+  packages/sniffies-lib:
     devDependencies:
       typescript:
         specifier: ^5.7.0

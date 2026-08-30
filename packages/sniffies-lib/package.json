@@ -1,0 +1,24 @@
+{
+  "name": "@aggregaytor/sniffies-lib",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Self-contained Sniffies Web client (HTTP api with base/shape probing, rate limiter, typed errors, traffic observer + Socket.IO frame decode, marker/global-chat/carousel DOM helpers, DOM composer). Vendored verbatim from the Sniffies userscript's lib/.",
+  "main": "./src/index.js",
+  "module": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "files": ["src"],
+  "scripts": {
+    "build": "true",
+    "test": "vitest run --passWithNoTests"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.1.0"
+  }
+}

@@ -1,23 +1,19 @@
 /**
  * @file ws-parser.ts -- WebSocket frame parsing for Sniffies.
  *
- * Sniffies WebSocket traffic arrives in one of two formats:
+ * Frame decoding now DELEGATES to `@aggregaytor/sniffies-lib` — the vendored
+ * canonical `decodeSocketFrame`. {@link parseSocketIOFrame} is a thin wrapper
+ * that returns the library's shape verbatim: `{ event, data }` (note the field
+ * is `event`, NOT the pre-adoption `eventName`).
  *
- * ## Format 1: Raw JSON (primary, observed April 2025+)
- * ```json
- * {"eventName":"userJoined", "data":{...}}
- * ```
- * The event name is a string property inside a plain JSON object.
- *
- * ## Format 2: Socket.IO `42`-prefix (legacy/fallback)
- * ```
- * 42["eventName", {data}]
- * ```
- * The `42` prefix is Socket.IO's "EVENT" packet type. The event name is
- * the first element of the JSON array that follows the prefix.
- *
- * Both formats may appear depending on server version or transport
- * negotiation. This module handles both transparently.
+ * The library's Socket.IO/Engine.IO decode differs from the old hand-rolled
+ * parser in three observable ways (this is an intentional behavior adoption):
+ *  1. It UNWRAPS double-encoded inner JSON strings (a `"{...}"` payload inside a
+ *     frame is parsed a second time).
+ *  2. A raw JSON object frame maps to `{ event: '', data: wholeObject }` — it
+ *     does NOT read an `eventName` field off the object.
+ *  3. A leading-digit-then-`[` frame (including a bare `[...]` array) is treated
+ *     as a Socket.IO event tuple: `[a, b]` → `{ event: String(a), data: b }`.
  *
  * ## Event Classification
  * After parsing the frame, the adapter needs to know whether the event
@@ -27,80 +23,31 @@
  * lowercase-includes fallback for forward compatibility with new event names.
  */
 
+import { decodeSocketFrame } from '@aggregaytor/sniffies-lib';
+
 // ── Frame Parsing ───────────────────────────────────────────────────────────
 
-/** Parsed result from a single WebSocket frame. */
+/**
+ * Parsed result from a single WebSocket frame — the shape of
+ * `@aggregaytor/sniffies-lib`'s `decodeSocketFrame`.
+ */
 export interface ParsedSocketFrame {
   /** The event name (e.g. "userJoined", "newGlobalMsg"), or "" if unknown. */
-  eventName: string;
-  /** The event payload (usually an object), or null if none. */
+  event: string;
+  /** The event payload (object, array, primitive), or null if none. */
   data: unknown;
 }
 
 /**
  * Parse a raw WebSocket text frame into a structured {@link ParsedSocketFrame}.
  *
- * Handles three wire formats:
- *  1. **Socket.IO `42`-prefix** -- `42["eventName", {data}]`
- *  2. **Raw JSON object** -- `{"eventName":"...", "data":{...}}`
- *  3. **Raw JSON array** -- `["eventName", {data}]` (Socket.IO-style without prefix)
- *
- * Returns `null` for heartbeat pings (bare digits like "2" or "3"),
- * binary frames, or unparseable text.
+ * Thin wrapper that now delegates to `@aggregaytor/sniffies-lib`'s
+ * `decodeSocketFrame`; the returned object is the library's `{ event, data }`
+ * shape. Returns `null` for heartbeat pings (bare digits), binary frames, or
+ * unparseable text.
  */
 export function parseSocketIOFrame(text: string): ParsedSocketFrame | null {
-  if (!text || typeof text !== 'string') return null;
-  const trimmed = text.trim();
-  // Heartbeat pings are 1-2 digit strings (e.g. "2", "3", "40")
-  if (!trimmed || /^\d{1,2}$/.test(trimmed)) return null;
-
-  try {
-    // Format 1: Socket.IO prefix "42[...]"
-    // The "42" means packet type 4 (MESSAGE) + sub-type 2 (EVENT).
-    // Everything after "42" is a JSON array: [eventName, ...args].
-    if (trimmed.startsWith('42')) {
-      const socketPayload = JSON.parse(trimmed.slice(2));
-      if (Array.isArray(socketPayload)) {
-        const eventName = typeof socketPayload[0] === 'string' ? socketPayload[0] : '';
-        const data = socketPayload.length > 1 ? socketPayload[1] : socketPayload[0];
-        return { eventName, data: (data && typeof data === 'object') ? data : null };
-      }
-      // Non-array after "42" -- treat as anonymous object payload
-      return socketPayload && typeof socketPayload === 'object'
-        ? { eventName: '', data: socketPayload }
-        : null;
-    }
-
-    // Format 2: Raw JSON object {"eventName":"...", "data":...}
-    // This is the format observed in production Sniffies WS traffic.
-    if (trimmed.startsWith('{')) {
-      const parsed = JSON.parse(trimmed);
-      if (parsed && typeof parsed === 'object') {
-        if (typeof parsed.eventName === 'string') {
-          // Use parsed.data if available; fall back to the whole object
-          return { eventName: parsed.eventName, data: parsed.data ?? parsed };
-        }
-        // Generic JSON object with no event name
-        return { eventName: '', data: parsed };
-      }
-    }
-
-    // Format 3: Raw JSON array (Socket.IO-style without "42" prefix)
-    if (trimmed.startsWith('[')) {
-      const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) {
-        // If first element is a string, treat it as the event name
-        if (parsed.length >= 2 && typeof parsed[0] === 'string') {
-          return { eventName: parsed[0], data: parsed[1] };
-        }
-        return { eventName: '', data: parsed };
-      }
-    }
-  } catch {
-    // Invalid JSON -- silently skip non-JSON frames
-  }
-
-  return null;
+  return decodeSocketFrame(text) as ParsedSocketFrame | null;
 }
 
 // ── Event Classification ────────────────────────────────────────────────────

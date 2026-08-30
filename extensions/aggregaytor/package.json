@@ -18,6 +18,7 @@
     "@aggregaytor/adapter-yahoo": "workspace:*",
     "@aggregaytor/context-engine": "workspace:*",
     "@aggregaytor/grindr-lib": "workspace:*",
+    "@aggregaytor/sniffies-lib": "workspace:*",
     "@aggregaytor/store": "workspace:*",
     "dexie": "^4.0.11",
     "events": "^3.3.0",
