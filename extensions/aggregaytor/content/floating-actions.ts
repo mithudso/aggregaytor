@@ -51,6 +51,11 @@ function safeSend(message: unknown): Promise<any> {
 
 // ── CSS ──────────────────────────────────────────────────────────────────────
 
+/**
+ * Inject the panel's stylesheet into <head> once per page.
+ * Idempotent — bails if a <style> with STYLE_ID already exists, so repeated
+ * showFloatingPanel calls don't stack duplicate stylesheets.
+ */
 function injectCSS(): void {
   if (document.getElementById(STYLE_ID)) return;
   const style = document.createElement('style');
@@ -147,6 +152,16 @@ function injectCSS(): void {
 
 // ── Panel Creation ───────────────────────────────────────────────────────────
 
+/**
+ * Build the floating-actions panel element (header, action buttons, star
+ * rating, quick-phrase row, notes editor) and wire its drag + action handlers.
+ *
+ * Restores the saved on-screen position and collapsed state from (page-origin,
+ * untrusted) localStorage, validating the parsed position and clamping it back
+ * into the viewport so a panel saved off-screen still appears. Parse failures
+ * fall back to the default position.
+ * @returns the fully-wired panel element, not yet attached to the DOM.
+ */
 function createPanel(): HTMLElement {
   const panel = document.createElement('div');
   panel.id = PANEL_ID;
@@ -210,6 +225,13 @@ function createPanel(): HTMLElement {
 
 // ── Drag ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Make the panel draggable by its header. Persists the final position to
+ * localStorage on drag end and records a cleanup fn in `_dragCleanup` so the
+ * document-level mousemove/mouseup listeners can be detached when the panel is
+ * replaced or hidden (otherwise they'd leak across profile switches).
+ * @param panel the panel root element whose `.fp-header` initiates the drag.
+ */
 function setupDrag(panel: HTMLElement): void {
   const header = panel.querySelector('.fp-header') as HTMLElement;
 
@@ -248,6 +270,15 @@ function setupDrag(panel: HTMLElement): void {
 
 // ── Actions ──────────────────────────────────────────────────────────────────
 
+/**
+ * Wire every interactive control in the panel: collapse/close, block/hide,
+ * notes toggle, debounced notes save, and star rating. Each action that mutates
+ * stored state relays it to the service worker via safeSend and/or dispatches a
+ * MAIN-world CustomEvent for the page adapter to act on. The notes save
+ * snapshots contactId/platform at INPUT time (not flush time) so a profile
+ * switch inside the debounce window can't save one profile's note onto another.
+ * @param panel the panel root element to attach handlers to.
+ */
 function setupActions(panel: HTMLElement): void {
   // Collapse
   panel.querySelector('.fp-collapse-btn')?.addEventListener('click', () => {
@@ -329,6 +360,20 @@ function setupActions(panel: HTMLElement): void {
 
 // ── Populate Panel ───────────────────────────────────────────────────────────
 
+/**
+ * Load and render this contact's persisted state into the panel — notes, rating
+ * stars, and the top-3 quick phrases. Both loads are best-effort and isolated:
+ * a failed thread-meta fetch or a malformed quick-phrases blob leaves the
+ * corresponding section empty rather than aborting the panel. Quick phrases are
+ * coerced to strings and HTML-escaped before injection (untrusted user data).
+ *
+ * The two catch branches are intentionally silent: safeSend rejects with
+ * "Extension context invalidated" on every send after a mid-session extension
+ * reload, so logging here would spam the console on every reload.
+ * @param panel the attached panel element to populate.
+ * @param contactId platform-scoped contact id (e.g. "sniffies:abc123").
+ * @param platform originating platform key, forwarded with phrase sends.
+ */
 async function populatePanel(panel: HTMLElement, contactId: string, platform: string): Promise<void> {
   // Load thread meta (notes, rating)
   try {
@@ -387,6 +432,14 @@ async function populatePanel(panel: HTMLElement, contactId: string, platform: st
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
+/**
+ * Show (or re-target) the floating quick-action panel for a contact.
+ * No-ops when already showing the same contact. Tears down any previous panel
+ * and its drag listeners first, then builds, attaches, and populates a fresh
+ * one. Snapshots contactId/platform into module scope for the action handlers.
+ * @param contactId platform-scoped contact id; a falsy value is ignored.
+ * @param platform originating platform key.
+ */
 export function showFloatingPanel(contactId: string, platform: string): void {
   if (!contactId) return;
 
@@ -408,6 +461,10 @@ export function showFloatingPanel(contactId: string, platform: string): void {
   populatePanel(panelEl, contactId, platform);
 }
 
+/**
+ * Remove the panel from the DOM and reset module state (current contact, drag
+ * listeners). Safe to call when no panel is present.
+ */
 export function hideFloatingPanel(): void {
   const el = document.getElementById(PANEL_ID);
   if (el) el.remove();

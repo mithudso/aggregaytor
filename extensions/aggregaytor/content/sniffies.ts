@@ -240,6 +240,12 @@ window.addEventListener('message', (event) => {
 //      submits on Enter).
 //   4. Use the native value setter for textarea/input (React overrides it);
 //      for contenteditable, set textContent.
+/**
+ * Whether an element is actually visible + interactable (not display:none,
+ * visibility:hidden, ~zero opacity, or zero-sized). Used to filter auto-send
+ * input/button candidates down to ones the user could really click. Pure DOM
+ * read; MAIN world. @param el - Candidate element. @returns true if visible.
+ */
 function isElementVisible(el: Element): boolean {
   if (!(el instanceof HTMLElement)) return false;
   const style = getComputedStyle(el);
@@ -250,6 +256,17 @@ function isElementVisible(el: Element): boolean {
 
 const OUR_PANEL_SELECTORS = '#aggregaytor-profile-actions, #aggregaytor-floating-actions, #aggregaytor-top-filter-bar, .aggregaytor-toast, .aggregaytor-map-filter-panel';
 
+/**
+ * Score-based search for the Sniffies chat composer input among all visible
+ * textareas/text-inputs/contenteditables, excluding our own injected panels.
+ *
+ * WHY score-based: Sniffies (Angular) hashes class names and re-mounts the
+ * composer, so no stable selector exists. We prefer elements whose
+ * placeholder/aria mentions "message"/"chat", that are textarea/contenteditable,
+ * and that sit in the lower half of the viewport. MAIN world.
+ *
+ * @returns The best-scoring input element, or null if none are visible.
+ */
 function findChatInput(): HTMLElement | null {
   const candidates = Array.from(document.querySelectorAll<HTMLElement>(
     'textarea, input[type="text"], [contenteditable="true"]'
@@ -270,6 +287,19 @@ function findChatInput(): HTMLElement | null {
   return best;
 }
 
+/**
+ * Set text into a chat input in a way React/Angular's value tracker will notice,
+ * then fire input/change events so the framework enables the send button.
+ *
+ * WHY the native setter dance: React overrides the element's `value` property,
+ * so a plain assignment doesn't register; we call the element prototype's own
+ * native setter. For contenteditable we set textContent + dispatch an InputEvent.
+ * Any DOM exception is swallowed and reported as a failed fill. MAIN world.
+ *
+ * @param el - Target input (textarea/input/contenteditable) from findChatInput.
+ * @param text - Message text to insert.
+ * @returns true if the value was set and events dispatched; false on failure.
+ */
 function fillChatInput(el: HTMLElement, text: string): boolean {
   try {
     if (el.isContentEditable) {
@@ -300,6 +330,15 @@ function fillChatInput(el: HTMLElement, text: string): boolean {
   return false;
 }
 
+/**
+ * Find and click the Send button for a chat composer, scoped to the input's
+ * own form/chat/message/composer container so we never click a send button in
+ * an unrelated widget. Matches on button text/aria-label/title === "send" and
+ * skips our own injected panels. MAIN world.
+ *
+ * @param inputEl - The composer input the button belongs to.
+ * @returns true if a matching send button was found and clicked; false otherwise.
+ */
 function clickSendButton(inputEl: HTMLElement): boolean {
   // Scope to the input's containing form/chat panel so we don't click some
   // unrelated send button in another widget.
@@ -319,6 +358,12 @@ function clickSendButton(inputEl: HTMLElement): boolean {
   return false;
 }
 
+/**
+ * Fallback send path: dispatch a full Enter keydown/keypress/keyup sequence on
+ * the composer input, used when no Send button matches (Sniffies' React form
+ * often submits on Enter). Exceptions are swallowed. MAIN world.
+ * @param el - The composer input to focus and press Enter on.
+ */
 function pressEnter(el: HTMLElement): void {
   try {
     el.focus();

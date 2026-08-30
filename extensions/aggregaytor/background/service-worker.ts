@@ -27,6 +27,7 @@ import type { ContactQueryRow } from './llm.js';
 import { seedIndex, indexMessages, removeFromIndex, clearIndex, searchMessages as fulltextSearch, isIndexReady, getIndexSize, getEvictedCount, getLastEvictionAt, getLifetimeStats, SEARCH_INDEX_MAX_DOCS } from './search-index.js';
 import { getDossier, upsertDossier, setAutoExtractedField } from '@aggregaytor/store';
 import { handleDebugCommand, authorizeDebugCommand } from './debug-bridge.js';
+import { runOperation, listOperations } from './operations-registry.js';
 import { logError, getErrorLog, clearErrorLog, exportErrorLog, installGlobalErrorCapture } from './error-logger.js';
 import {
   getFFState, saveFFState, updateFFFilters, addToIgnoreList, getRunState, setRunState,
@@ -71,11 +72,26 @@ const BROADCAST_SPA_SETTLE_MS = 1500;
 // non-ASCII or typed arrays, but order-of-magnitude correct for the JSON-
 // shaped caches we hold. A failed serialize (cycles, etc.) returns 0 rather
 // than throwing — we never want diagnostics to crash the SW.
+/**
+ * Estimate the in-memory byte footprint of a JS value via its JSON length.
+ * Exists so GET_MEMORY_BREAKDOWN can rank order-of-magnitude cache offenders
+ * without pulling in a heavyweight sizing library.
+ * @param v Any value; nullish and non-serializable values are treated as 0.
+ * @returns Approximate byte count (JSON string length × 2 for UTF-16); 0 on
+ *   a serialization failure (cycles, etc.) — never throws.
+ */
 function estimateJsonBytes(v: unknown): number {
   if (v == null) return 0;
   try { return ((JSON.stringify(v) || '').length) * 2; } catch { return 0; }
 }
 const swPerfStart = Date.now();
+/**
+ * Start a timing span for a named service-worker operation. Call the returned
+ * function when the operation completes to fold its duration into `swPerf`
+ * (call count, cumulative and max ms). Used to build the GET_SW_PERF report.
+ * @param name Stable key identifying the operation (e.g. 'getThreadSummaries').
+ * @returns A zero-arg "stop" callback that records the elapsed time when invoked.
+ */
 function swPerfTrack(name: string): () => void {
   const t0 = performance.now();
   return () => {
@@ -116,6 +132,11 @@ let maintenanceState: MaintenanceState = {
   lastDecisionAt: 0, lastReason: '(not yet run)',
 };
 let maintenanceLoaded = false;
+/**
+ * Lazily load persisted auto-maintenance bookkeeping from chrome.storage.local
+ * into `maintenanceState`. Idempotent — only the first call reads storage.
+ * @returns Resolves once state is loaded (or left at defaults on read failure).
+ */
 async function loadMaintenanceState(): Promise<void> {
   if (maintenanceLoaded) return;
   maintenanceLoaded = true;
@@ -125,6 +146,12 @@ async function loadMaintenanceState(): Promise<void> {
     if (s && typeof s === 'object') Object.assign(maintenanceState, s);
   } catch {}
 }
+/**
+ * Persist `maintenanceState` to chrome.storage.local. Fire-and-forget and
+ * deliberately silent on failure — a lost bookkeeping update is harmless
+ * (the next successful save overwrites it).
+ * @returns void (write happens asynchronously in the background).
+ */
 function saveMaintenanceState(): void {
   // Fire-and-forget — losing one update is fine.
   try { chrome.storage.local.set({ [MAINTENANCE_KEY]: maintenanceState }).catch(() => {}); } catch {}
@@ -141,6 +168,14 @@ type CompactStatus =
   | { state: 'running'; startedAt: number; heartbeats?: number; lastHeartbeatAt?: number }
   | { state: 'done'; startedAt: number; finishedAt: number; elapsedMs: number; trigger: string }
   | { state: 'error'; startedAt: number; finishedAt: number; error: string; trigger: string };
+/**
+ * Read the current compaction/rebuild status from chrome.storage.session,
+ * self-healing a stalled 'running' state. If a compaction claims to be running
+ * but its heartbeat is >90s old (or produced no heartbeat within 60s of start),
+ * the SW that started it was killed mid-await; this flips the status to
+ * 'error: stalled' and persists it so the panel poller stops spinning.
+ * @returns The current CompactStatus; `{ state: 'idle' }` on any read failure.
+ */
 async function getCompactStatus(): Promise<CompactStatus> {
   try {
     const got = await chrome.storage.session.get(COMPACT_STATUS_KEY);
@@ -168,6 +203,13 @@ async function getCompactStatus(): Promise<CompactStatus> {
     return s;
   } catch { return { state: 'idle' }; }
 }
+/**
+ * Persist a compaction/rebuild status into chrome.storage.session so the panel
+ * can poll GET_COMPACT_STATUS and render live progress across SW restarts.
+ * Silent on write failure — status is advisory UI state, not correctness-critical.
+ * @param status The CompactStatus to store.
+ * @returns Resolves once the write is attempted.
+ */
 async function setCompactStatus(status: CompactStatus): Promise<void> {
   try { await chrome.storage.session.set({ [COMPACT_STATUS_KEY]: status }); } catch {}
 }
@@ -177,6 +219,8 @@ async function setCompactStatus(status: CompactStatus): Promise<void> {
  * to the per-provider override map. If the suggestion is for the
  * currently-active provider, also update LLMConfig.model so the next
  * generateXxx call uses it immediately instead of after a config reload.
+ * @param suggestions Model-updater suggestions ({ provider, current, suggested }).
+ * @returns Resolves once every override (and any active-config update) is written.
  */
 async function applyModelSuggestions(suggestions: ModelSuggestion[]): Promise<void> {
   if (!suggestions.length) return;
@@ -434,10 +478,21 @@ export function recordMutation(): void {
 // store is per-browser-session (clears on browser restart) which matches
 // how often we want to fully recompute.
 const THREAD_CACHE_SESSION_KEY = 'aggregaytor_thread_summary_cache_v1';
+/**
+ * Mirror the in-memory thread-summary cache into chrome.storage.session so a
+ * SW restart can serve the inbox instantly instead of re-running the costly
+ * allDocs scan. No-op when the cache is empty; silent on write failure.
+ * @returns Resolves once the write is attempted.
+ */
 async function persistThreadSummaryCache(): Promise<void> {
   if (!threadSummaryCache) return;
   try { await chrome.storage.session.set({ [THREAD_CACHE_SESSION_KEY]: threadSummaryCache }); } catch {}
 }
+/**
+ * Restore the thread-summary cache from chrome.storage.session at SW startup.
+ * No-op if the cache is already populated or the stored value is malformed.
+ * @returns Resolves once rehydration is attempted (cache may remain null).
+ */
 async function rehydrateThreadSummaryCache(): Promise<void> {
   if (threadSummaryCache) return;
   try {
@@ -457,6 +512,15 @@ rehydrateThreadSummaryCache().catch(() => {});
 // the goal is zero-friction credential recovery after Grindr forces a
 // logout, same security model as the browser's own password manager.
 let _deviceCredentialKey: CryptoKey | null = null;
+/**
+ * Derive (and memoize) the device-local AES-GCM key used to encrypt platform
+ * credentials in chrome.storage.local. The key is PBKDF2-derived from a random
+ * per-install salt (persisted in storage), so it is stable across restarts but
+ * unique per install — a device-scoped secret, not user-scoped.
+ * @returns The cached-or-freshly-derived non-extractable AES-GCM CryptoKey.
+ * @throws Propagates WebCrypto (crypto.subtle) errors if key derivation fails;
+ *   falls back to the runtime id as salt only when storage access throws.
+ */
 async function getDeviceCredentialKey(): Promise<CryptoKey> {
   if (_deviceCredentialKey) return _deviceCredentialKey;
   let installId: string;
@@ -484,6 +548,13 @@ async function getDeviceCredentialKey(): Promise<CryptoKey> {
   return _deviceCredentialKey;
 }
 
+/**
+ * Drop the caches whose contents depend on thread ordering / unread counts —
+ * thread summaries, chat activity, and the natural-language query cache.
+ * Called on writes that change the thread list (new messages, imports, purge,
+ * destroyDB) but NOT on pure-metadata updates (avatar, dossier).
+ * @returns void.
+ */
 function invalidateThreadCache(): void {
   threadSummaryCache = null;
   chatActivityCache = null;
@@ -508,10 +579,21 @@ const CHAT_ACTIVITY_CACHE_TTL = 30_000;
 // session storage persists for the browser session but not across
 // restarts, which matches our cache semantics.
 const CHAT_ACTIVITY_SESSION_KEY = 'aggregaytor_chat_activity_cache_v1';
+/**
+ * Mirror the in-memory chat-activity cache into chrome.storage.session so a
+ * respawned SW can answer the bridge's seed call without re-running the
+ * 5000-doc allDocs scan. No-op when empty; silent on write failure.
+ * @returns Resolves once the write is attempted.
+ */
 async function persistChatActivityCache(): Promise<void> {
   if (!chatActivityCache) return;
   try { await chrome.storage.session.set({ [CHAT_ACTIVITY_SESSION_KEY]: chatActivityCache }); } catch {}
 }
+/**
+ * Restore the chat-activity cache from chrome.storage.session at SW startup.
+ * No-op if already populated or the stored value is malformed.
+ * @returns Resolves once rehydration is attempted (cache may remain null).
+ */
 async function rehydrateChatActivityCache(): Promise<void> {
   if (chatActivityCache) return;
   try {
@@ -526,6 +608,14 @@ async function rehydrateChatActivityCache(): Promise<void> {
 // first GET_CHAT_ACTIVITY arrives, the cache is usually already in memory.
 rehydrateChatActivityCache().catch(() => {});
 
+/**
+ * Create a chrome.notifications entry without ever letting a notification
+ * failure surface as an unhandled error. Wraps both the synchronous throw
+ * path and the async runtime.lastError path, logging either at warn level.
+ * @param id Notification id (also used to dedupe / replace an existing one).
+ * @param opts chrome.notifications options (type, iconUrl, title, message, …).
+ * @returns void (notification is created asynchronously).
+ */
 function safeNotify(id: string, opts: chrome.notifications.NotificationOptions): void {
   try {
     chrome.notifications.create(id, opts, () => {
@@ -572,6 +662,22 @@ chrome.runtime.onMessage.addListener((msg: any, sender, sendResponse) => {
 
 // `sender` is only consulted by the DEBUG_COMMAND case (sender-origin gate);
 // every other case ignores it, so callers in tests may omit it.
+/**
+ * Central message router for the service worker — one large `switch (msg.type)`
+ * dispatching every runtime message from bridges, the side panel, and the popup
+ * to its handler. Exists as the single ingress point so the onMessage listener
+ * can wrap it in one try/catch and convert any throw into a `{ ok:false, error }`
+ * response (see the addListener above). Handlers validate/clamp untrusted params
+ * per case; unknown types fall through to the default.
+ * @param msg The incoming message; `msg.type` selects the case, other fields are
+ *   case-specific and treated as untrusted input.
+ * @param sender Optional MessageSender; only the DEBUG_COMMAND origin gate reads
+ *   it, so test callers may omit it.
+ * @returns The case-specific response object (commonly `{ ok, ... }`), or the
+ *   default `{ ok:false, error:`Unknown: ${msg.type}` }` for an unrecognized type.
+ * @throws May throw synchronously or reject from a handler; the onMessage
+ *   wrapper catches both and returns `{ ok:false, error }` to the caller.
+ */
 async function handleMessage(msg: any, sender?: chrome.runtime.MessageSender): Promise<any> {
   switch (msg.type) {
     // ── Performance stats ──
@@ -1087,6 +1193,8 @@ async function handleMessage(msg: any, sender?: chrome.runtime.MessageSender): P
       // until then, return the neutral constant directly.
       const scorer = (_c: any) => 0.5;
 
+      // Compact one-line profile summary ("28, 5'10, 170lb, slim, vers") from
+      // whichever metadata fields are present; omits missing ones.
       const buildStats = (md: any) => {
         const parts: string[] = [];
         if (md.age) parts.push(`${md.age}`);
@@ -2383,6 +2491,8 @@ async function handleMessage(msg: any, sender?: chrome.runtime.MessageSender): P
                       if (!v.startsWith('[') && !v.startsWith('{')) continue;
                       try {
                         const parsed = JSON.parse(v);
+                        // Recursively collect every 24+ hex-char id string
+                        // (profile ids) found anywhere in the parsed value.
                         const walk = (x: any): void => {
                           if (!x) return;
                           if (Array.isArray(x)) { for (const it of x) walk(it); return; }
@@ -2729,6 +2839,8 @@ async function handleMessage(msg: any, sender?: chrome.runtime.MessageSender): P
             });
           }
         }
+        // Percent of a bucket's decided (liked+disliked) samples that came
+        // back as empty shells; 0 when the bucket has no decided samples.
         const emptyRatio = (b: any) => b.liked + b.disliked > 0
           ? Math.round((b.empty / (b.liked + b.disliked)) * 100)
           : 0;
@@ -3227,12 +3339,48 @@ async function handleMessage(msg: any, sender?: chrome.runtime.MessageSender): P
       return { ok: true, result: await handleDebugCommand(msg.command, msg.params) };
     }
 
+    // Reflective operations surface. `OPS_LIST` enumerates every invocable
+    // exported operation (name, module, read/write kind); `OPS_RUN` invokes one
+    // by name with positional `args`. This is the single uniform entry that lets
+    // the CLI (via the debug bridge), the extension, and API callers activate any
+    // registered method without a bespoke message case per method — the machine
+    // catalog is `docs/method-registry.json`. Gated by the SAME sender-origin
+    // check as DEBUG_COMMAND (extension pages only; content scripts refused).
+    // Write-classified operations additionally require `confirmWrite:true` OR a
+    // valid debug token.
+    case 'OPS_LIST': {
+      if (!(await authorizeDebugCommand(sender, msg.debugToken))) {
+        return { ok: false, error: 'ops list refused: not authorized' };
+      }
+      return { ok: true, operations: listOperations() };
+    }
+
+    case 'OPS_RUN': {
+      if (!(await authorizeDebugCommand(sender, msg.debugToken))) {
+        return { ok: false, error: 'ops run refused: not authorized' };
+      }
+      // A stored/valid debug token OR an explicit confirmWrite flag unlocks
+      // state-mutating operations; a plain trusted-origin caller gets read-only.
+      const allowWrite = msg.confirmWrite === true || (typeof msg.debugToken === 'string' && msg.debugToken.length >= 16);
+      return runOperation(String(msg.name || ''), Array.isArray(msg.args) ? msg.args : [], { allowWrite });
+    }
+
     default: return { ok: false, error: `Unknown: ${msg.type}` };
   }
 }
 
 // ── Core handlers ───────────────────────────────────────────────────────────
 
+/**
+ * Ingest a batch of newly-observed messages: persist them, refresh the badge,
+ * keep the full-text index in sync, and — for newly created inbound messages —
+ * fan out to auto-respond queuing, un-hide-on-reply, block rules, and debounced
+ * dossier extraction. The entry point for every ADAPTER_MESSAGES write.
+ * @param messages Unified messages from an adapter (mixed direction allowed).
+ * @param platform Source platform, echoed in the NEW_MESSAGES broadcast.
+ * @returns `{ ok:true, ...result }` where result is the upsertMessages summary
+ *   (e.g. `created`, `updated`). Search-index failures are logged, not thrown.
+ */
 async function handleIncomingMessages(messages: UnifiedMessage[], platform: Platform): Promise<any> {
   const result = await upsertMessages(messages);
   await updateBadgeCount();
@@ -3310,6 +3458,14 @@ let dossierProcessing = false;
 let dossierFirstQueuedAt = 0;
 const DOSSIER_MAX_DELAY_MS = 5 * 60_000;
 
+/**
+ * Drain the debounced dossier-extraction queue serially: for each queued
+ * contact, run local pattern extraction and (rate-permitting) LLM extraction
+ * over messages newer than the last extract, writing auto-extracted fields.
+ * Guarded by `dossierProcessing` so only one drain runs at a time; a per-contact
+ * try/catch keeps one failure from aborting the batch.
+ * @returns Resolves when the queue is empty (or another drain already owns it).
+ */
 async function processDossierExtractions(): Promise<void> {
   dossierExtractionTimer = null;
   // v0.57.15: clear the deadline tracker as soon as the run starts so the
@@ -3388,6 +3544,13 @@ async function processDossierExtractions(): Promise<void> {
 const recentContactUpserts = new Map<string, { hash: string; time: number }>();
 const RECENT_CONTACT_UPSERTS_CAP = 500;
 
+/**
+ * Cheap change-detection fingerprint of a contact's write-relevant fields
+ * (displayName, avatarUrl, truncated metadata). Used by handleIncomingContacts
+ * to skip PouchDB writes when nothing that would persist has actually changed.
+ * @param c The contact to fingerprint.
+ * @returns A stable string that differs iff a write-relevant field differs.
+ */
 function contactHash(c: UnifiedContact): string {
   // Quick hash of the fields that matter — if these haven't changed,
   // the PouchDB write would be a no-op anyway
@@ -3398,6 +3561,14 @@ function contactHash(c: UnifiedContact): string {
 let lastContactsNotify = 0;
 let contactsNotifyTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * Ingest observed contacts with two layers of write-avoidance: drop empty
+ * contacts, and skip any whose contactHash matches a write in the last 60s.
+ * Survivors go through a single batched upsertContacts (1 allDocs + 1 bulkDocs).
+ * Emits a CONTACTS_UPDATED broadcast, throttled to at most once per 10s.
+ * @param contacts Observed contacts from an adapter (may include empty/dupes).
+ * @returns Resolves once the batch write (if any) and dedup bookkeeping complete.
+ */
 async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void> {
   // Filter: skip empty contacts and recently-written identical data
   const toWrite: UnifiedContact[] = [];
@@ -3455,6 +3626,14 @@ async function handleIncomingContacts(contacts: UnifiedContact[]): Promise<void>
 
 // ── Auto-respond with tier-based processing ─────────────────────────────────
 
+/**
+ * Drive the auto-respond pipeline for one alarm tick: expire stale drafts
+ * (>15m), generate a response for each pending queue entry — auto-sending
+ * low-tier replies and parking higher tiers as drafts for approval (with a
+ * notification) — then send any drafts the user has approved. Each entry is
+ * wrapped in try/catch so one failure marks only that entry 'failed'.
+ * @returns Resolves when pending and approved entries for this tick are handled.
+ */
 async function processAutoResponds(): Promise<void> {
   // #8 Auto-close stale drafts older than 15 minutes (v0.57.28: increased from
   // 10m to account for time spent in the "generate" phase before draft state)
@@ -3535,6 +3714,15 @@ async function processAutoResponds(): Promise<void> {
   }
 }
 
+/**
+ * Resolve a saved picture by tag and record that it was "sent" (increments its
+ * sentCount stat). Actual delivery over the platform API/DOM is not yet wired —
+ * this currently only tracks the stat (see the TODO in the body).
+ * @param tag The picture tag to look up.
+ * @param contactId Recipient thread id (reserved for the future send path).
+ * @param platform Recipient platform (reserved for the future send path).
+ * @returns Resolves after the stat is bumped, or immediately if no picture matches.
+ */
 async function handlePictureSend(tag: string, contactId: string, platform: string): Promise<void> {
   const pic = await getPictureByTag(tag);
   if (!pic) { console.log(`${LOG} No picture found for tag: ${tag}`); return; }
@@ -3545,6 +3733,14 @@ async function handlePictureSend(tag: string, contactId: string, platform: strin
 
 // ── Block rules ─────────────────────────────────────────────────────────────
 
+/**
+ * Evaluate all block rules against the threads touched by a batch of new
+ * inbound messages, executing any triggered action per (contact, rule). Each
+ * contact is evaluated on its OWN platform so a mixed-platform batch routes
+ * actions correctly. No-op when no rules are configured.
+ * @param newMessages The just-ingested messages whose inbound contacts to check.
+ * @returns Resolves once every triggered action has been executed.
+ */
 async function runBlockRules(newMessages: UnifiedMessage[]): Promise<void> {
   const rules = await getAllBlockRules();
   if (!rules.length) return;
@@ -3572,6 +3768,15 @@ async function runBlockRules(newMessages: UnifiedMessage[]): Promise<void> {
 
 // ── Navigation + messaging ──────────────────────────────────────────────────
 
+/**
+ * Bring the given conversation to the foreground. Reuses an existing tab on the
+ * platform's host — preferring in-page SPA navigation (SPA_NAVIGATE) over a full
+ * reload, falling back to chrome.tabs.update on failure — and focuses it; opens
+ * a new tab only when none exists. No-op on empty contactId or unknown platform.
+ * @param platform Platform key (indexes PLATFORM_URLS for the target URL).
+ * @param contactId Thread/contact id to open.
+ * @returns Resolves once navigation/focus (or tab creation) is issued.
+ */
 async function navigateToConversation(platform: string, contactId: string): Promise<void> {
   if (!contactId) return; // v0.57.28: guard against empty contactId
   const urlFn = PLATFORM_URLS[platform]; if (!urlFn) return;
@@ -3597,6 +3802,17 @@ async function navigateToConversation(platform: string, contactId: string): Prom
   }
 }
 
+/**
+ * Type and send a message into the recipient's thread on the platform tab.
+ * Finds or opens the platform tab, navigates to the thread only when it isn't
+ * already there (avoiding a state-wiping reload), then — after a settle delay
+ * scaled to whether/how it navigated — asks the content script to send the text.
+ * Used by auto-respond, greetings, and Friend Finder.
+ * @param platform Platform key (indexes PLATFORM_URLS).
+ * @param contactId Recipient thread/contact id.
+ * @param text Message body; empty/whitespace text is skipped with a warning.
+ * @returns Resolves once the delayed SEND_AUTO_RESPONSE dispatch is scheduled.
+ */
 async function sendMessageToTab(platform: string, contactId: string, text: string): Promise<void> {
   // v0.57.28: short-circuit on empty text to avoid unnecessary tab navigation
   if (!text?.trim()) { console.warn(`${LOG} sendMessageToTab: empty text, skipping`); return; }
@@ -3918,6 +4134,13 @@ async function runPeriodicBlockRules(): Promise<void> {
   }
 }
 
+/**
+ * Fire due/approaching reminder notifications. For each upcoming reminder, emit
+ * an "approaching" notice once when it enters the 20-minute window and a "due"
+ * notice once when its time passes, marking each so it isn't re-notified.
+ * Driven by the reminder-check alarm.
+ * @returns Resolves once all upcoming reminders have been evaluated.
+ */
 async function processReminders(): Promise<void> {
   const reminders = await getReminders({ upcoming: true });
   const now = Date.now();
@@ -3934,6 +4157,14 @@ async function processReminders(): Promise<void> {
   }
 }
 
+/**
+ * Recompute the unread count and reflect it on the toolbar action badge
+ * (text + background color; empty text when zero). Driven by the badge-refresh
+ * alarm and called after any read-state change. Awaits the badge writes so a
+ * failure lands in the catch (logged at warn) rather than escaping as an
+ * unhandled rejection; the next alarm retries.
+ * @returns Resolves once the badge is updated or the failure has been logged.
+ */
 async function updateBadgeCount(): Promise<void> {
   try {
     const count = await getUnreadCount();
@@ -3988,6 +4219,14 @@ chrome.alarms.create('mem-gc', { periodInMinutes: 5 });
 // Guarded on update_url being absent so this is a no-op for any store-
 // installed build. The poll is cheap: a single fetch against an in-package
 // resource every 1.5s.
+/**
+ * In unpacked/dev builds only, watch dist/.build-hash and reload the extension
+ * when it changes so `pnpm run dev` self-reloads on rebuild. No-op for any
+ * store-installed build (guarded on manifest.update_url) or when the marker
+ * file is absent. Uses a 1.5s setInterval poll plus a keepalive alarm to wake
+ * a sleeping SW — the SOLE sanctioned setInterval in this service worker.
+ * @returns Resolves once the watcher is armed (or immediately if not a dev build).
+ */
 async function startDevAutoReload(): Promise<void> {
   try {
     const m = chrome.runtime.getManifest() as any;
@@ -4180,6 +4419,11 @@ const ENRICH_BATCH_SIZE = 40;
 const ENRICH_CALL_DELAY_MS = 1200; // ± 200ms jitter in the fetcher
 const ENRICH_CALL_JITTER_MS = 200;
 
+/**
+ * Load the persisted blocked-profile enrichment state machine from
+ * chrome.storage.local, merged over defaults so newly-added fields are present.
+ * @returns The stored EnrichState (or a fresh default on absence/read failure).
+ */
 async function getEnrichState(): Promise<EnrichState> {
   try {
     const data = await chrome.storage.local.get(ENRICH_STORAGE_KEY);
@@ -4187,6 +4431,14 @@ async function getEnrichState(): Promise<EnrichState> {
     return stored ? { ...DEFAULT_ENRICH_STATE, ...stored } : { ...DEFAULT_ENRICH_STATE };
   } catch { return { ...DEFAULT_ENRICH_STATE }; }
 }
+/**
+ * Persist the enrichment state machine and broadcast it to any open side panel
+ * (ENRICH_BLOCKED_PROGRESS). Both the write and the broadcast are best-effort
+ * and silent on failure — progress UI is advisory, and the state is re-read on
+ * the next tick regardless.
+ * @param state The EnrichState to store and broadcast.
+ * @returns Resolves once the write is attempted.
+ */
 async function setEnrichState(state: EnrichState): Promise<void> {
   try { await chrome.storage.local.set({ [ENRICH_STORAGE_KEY]: state }); } catch {}
   // Broadcast to any open side panel. Best-effort; silently swallow errors.
@@ -4330,6 +4582,17 @@ function extractSniffiesMetadata(data: any): any {
 }
 
 let enrichTickInFlight = false;
+/**
+ * Run one tick of the resumable blocked-profile enrichment state machine.
+ * Selects a small batch of "thin" contacts for the active platform, fetches
+ * their profiles via the MAIN-world fetcher (Sniffies) or the content-script
+ * bridge (Grindr), extracts training-relevant metadata, and flushes every
+ * result through ONE batched upsertContacts. Persists progress and transitions
+ * to paused (no-tab / no-auth / session-dead / error) or idle (backlog drained).
+ * Re-entrancy is guarded by `enrichTickInFlight`. Driven by the
+ * enrich-blocked-tick alarm.
+ * @returns Resolves when the tick's batch is processed and state is persisted.
+ */
 async function runEnrichTick(): Promise<void> {
   if (enrichTickInFlight) return;
   enrichTickInFlight = true;
@@ -4623,6 +4886,16 @@ function markAutoTrained(contactId: string): void {
 // single SW lifetime — the signal index is the *cross-lifetime* dedupe.
 const LAST_TRAIN_TS_KEY = 'aggregaytor_last_auto_train_ts';
 
+/**
+ * Feed the ML preference model with implicit like/dislike signals harvested
+ * from contact metadata and thread meta (pins, favorites, bookmarks, ratings,
+ * blocks). Incremental: only contacts whose signals changed since the last run
+ * (high-water mark in storage) or that carry a platform-level signal are
+ * considered, and `autoTrainedSet` dedupes within the SW lifetime. Advances the
+ * high-water mark even on an empty run. Driven by the preference-auto-train alarm.
+ * @returns Counters `{ trained, scanned, skipped }`; errors are caught, logged,
+ *   and reflected as whatever counts were reached before the failure.
+ */
 async function autoTrainFromSignals(): Promise<{ trained: number; scanned: number; skipped: number }> {
   const enabledData = await chrome.storage.local.get(['aggregaytor_auto_train_preferences', LAST_TRAIN_TS_KEY]);
   if (enabledData.aggregaytor_auto_train_preferences === false) return { trained: 0, scanned: 0, skipped: 0 };
@@ -4741,6 +5014,12 @@ const ALL_SITES = [
   'https://mail.google.com',
 ];
 
+/**
+ * Open every supported platform site in a background tab, reusing a tab that is
+ * already on the host instead of duplicating it. Backs the "Open all sites"
+ * context-menu action.
+ * @returns Resolves once each site has an open (background) tab.
+ */
 async function openAllSites(): Promise<void> {
   const tabs = await chrome.tabs.query({});
   for (const siteUrl of ALL_SITES) {

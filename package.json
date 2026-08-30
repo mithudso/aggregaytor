@@ -10,7 +10,9 @@
     "clean": "pnpm -r exec rm -rf dist",
     "index:check": "node scripts/check-doc-indexes.mjs",
     "index:semantic": "python3 scripts/semantic_indexer.py",
-    "index:watch": "./scripts/watch_and_index.sh"
+    "index:watch": "./scripts/watch_and_index.sh",
+    "registry": "node scripts/gen-method-registry.mjs",
+    "registry:check": "node scripts/gen-method-registry.mjs --check"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

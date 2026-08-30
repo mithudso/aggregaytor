@@ -42,6 +42,7 @@ interface DriveAuthCacheEntry { token: string; expiresAt: number; }
 let _driveAuthCache: DriveAuthCacheEntry | null = null;
 const DRIVE_AUTH_CACHE_TTL_MS = 50 * 60_000;
 
+/** Drop the cached Drive OAuth token — called on 401 so the next call re-auths. */
 function invalidateDriveAuthCache(): void {
   _driveAuthCache = null;
 }

@@ -26,6 +26,16 @@ export function invalidateBlockRulesCache(): void {
   _rulesCache = null;
 }
 
+/**
+ * Create an enabled block rule and invalidate the rules cache.
+ *
+ * The `_id` is `blockrule:{timestamp}-{random}`. When a test passes its own
+ * `db`, the module cache is left untouched (test DBs are isolated).
+ *
+ * @param input  Rule name, trigger condition, and action.
+ * @param db     Optional store override.
+ * @returns The newly written BlockRuleDoc.
+ */
 export async function createBlockRule(
   input: { name: string; condition: BlockRuleCondition; action: 'block' | 'archive' | 'hide' },
   db?: StoreDatabase,
@@ -47,6 +57,16 @@ export async function createBlockRule(
   return doc;
 }
 
+/**
+ * Return every block rule, served from the module cache on the hot path.
+ *
+ * A test-injected `db` bypasses the cache entirely. The cached list is copied
+ * before it is handed out so an in-place sort/splice by a caller can't corrupt
+ * the shared array. Populates the cache on the first non-test read.
+ *
+ * @param db  Optional store override (bypasses the cache).
+ * @returns A fresh array of all block rules.
+ */
 export async function getAllBlockRules(
   db?: StoreDatabase,
 ): Promise<BlockRuleDoc[]> {
@@ -64,6 +84,18 @@ export async function getAllBlockRules(
   return [..._rulesCache];
 }
 
+/**
+ * Apply a partial update to a block rule and invalidate the cache.
+ *
+ * Identity fields (`_id`, `_rev`, `docType`) are stripped from `updates` so a
+ * caller-supplied patch can't fork the rule into a second doc or break the
+ * docType index.
+ *
+ * @param id       Rule _id to update.
+ * @param updates  Fields to merge (identity fields ignored).
+ * @param db       Optional store override.
+ * @throws If the rule does not exist (propagates the store's 404).
+ */
 export async function updateBlockRule(
   id: string,
   updates: Partial<BlockRuleDoc>,
@@ -79,6 +111,13 @@ export async function updateBlockRule(
   if (!db) invalidateBlockRulesCache();
 }
 
+/**
+ * Delete a block rule by _id and invalidate the cache.
+ *
+ * @param id  Rule _id to remove.
+ * @param db  Optional store override.
+ * @throws If the rule does not exist (the `get` propagates the store's 404).
+ */
 export async function deleteBlockRule(
   id: string,
   db?: StoreDatabase,
@@ -109,6 +148,17 @@ export function evaluateRules(
   return results;
 }
 
+/**
+ * Test a single rule condition against a thread's messages/metadata.
+ *
+ * Pure predicate (no I/O). Each condition type reads a different subset of
+ * fields — see {@link BlockRuleCondition}. Unknown types return false.
+ *
+ * @param condition  The trigger condition to evaluate.
+ * @param messages   The thread's messages.
+ * @param meta       The thread's metadata (or null).
+ * @returns True if the condition is met.
+ */
 function matchesCondition(
   condition: BlockRuleCondition,
   messages: MessageDoc[],
@@ -150,6 +200,20 @@ function matchesCondition(
   }
 }
 
+/**
+ * Carry out a rule's action on a thread (via thread-meta flags) and bump the
+ * rule's `executedCount`.
+ *
+ * 'block' sets both archived + hidden; 'archive' sets archived; 'hide' sets
+ * hidden. The counter increment is best-effort: a failure there is logged but
+ * does NOT undo the action, which has already been applied.
+ *
+ * @param contactId  Contact to act on.
+ * @param platform   Contact's platform.
+ * @param action     What to do: block | archive | hide.
+ * @param ruleId     Rule whose executedCount to bump.
+ * @param db         Optional store override.
+ */
 export async function executeAction(
   contactId: string,
   platform: Platform,

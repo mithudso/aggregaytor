@@ -269,6 +269,11 @@ export class YahooAdapter extends BaseAdapter {
           if (node.nodeType !== Node.ELEMENT_NODE) continue;
           const el = node as Element;
 
+          // The added subtree is untrusted host DOM. Isolate any throw to this
+          // node so one malformed element can't kill the observer callback and
+          // stop all further extraction.
+          try {
+
           // Yahoo Mail message body containers:
           //  - `.msg-body` is the primary message content wrapper
           //  - `[data-test-id="message-view-body"]` on newer Yahoo Mail builds
@@ -286,6 +291,9 @@ export class YahooAdapter extends BaseAdapter {
             el.getAttribute('data-test-id')?.includes('message')
           ) {
             this.extractFromDOMNode(el);
+          }
+          } catch (err) {
+            log.debug('Skipped unparseable Yahoo DOM node:', err);
           }
         }
       }

@@ -88,6 +88,11 @@ const markerLastActive = new Map<string, number>();
 const MARKER_LAST_ACTIVE_MAX = 5000;
 const INACTIVE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
 
+/**
+ * Set a key on a Map, then evict the insertion-order-oldest entry if the Map
+ * has grown past `cap`. Keeps the module's per-profile caches bounded on
+ * long-lived map sessions without the cost of a full LRU.
+ */
 function cappedMapSet<V>(map: Map<string, V>, key: string, value: V, cap: number): void {
   map.set(key, value);
   if (map.size > cap) {
@@ -111,6 +116,11 @@ interface ChatActivity { myLastTs: number; theirLastTs: number; }
 const chatActivity = new Map<string, ChatActivity>();
 const CHAT_ACTIVITY_MAX = 5000;
 
+/**
+ * Get (or lazily create) the mutable ChatActivity record for a profile id,
+ * enforcing the CHAT_ACTIVITY_MAX cap on creation. Callers mutate the returned
+ * object in place to record new my/their message timestamps.
+ */
 function getActivity(id: string): ChatActivity {
   let a = chatActivity.get(id);
   if (!a) {
@@ -123,11 +133,19 @@ function getActivity(id: string): ChatActivity {
   }
   return a;
 }
+/**
+ * @returns the most recent chat timestamp for a profile in either direction
+ * (max of my/their last), or 0 if there's no recorded activity.
+ */
 function anyLastTs(id: string): number {
   const a = chatActivity.get(id);
   if (!a) return 0;
   return Math.max(a.myLastTs, a.theirLastTs);
 }
+/**
+ * @returns true when the user has sent a message more recently than the contact
+ * replied (we're waiting on their response); false if we've never messaged them.
+ */
 function waitingOnResponse(id: string): boolean {
   const a = chatActivity.get(id);
   if (!a || !a.myLastTs) return false;
@@ -168,6 +186,12 @@ let _lastSettingsSig = '';
 // element on each install.
 const FILTER_CSS_ID = 'aggregaytor-map-filter-css-v58';
 
+/**
+ * Inject the map-filter stylesheet (hide/highlight/badge/preview rules) into the
+ * page, removing any stale prior CSS revision first. Idempotent for the current
+ * revision id. See the FILTER_CSS_ID note above for why the id is versioned per
+ * CSS revision (stale hot-reload rules once left every marker hidden).
+ */
 function injectStyles(): void {
   // Strip any prior CSS revisions (including the stale v0.57.55
   // default-hide rule). The id prefix scopes the cleanup so we don't
@@ -266,6 +290,11 @@ function injectStyles(): void {
 
 // ── Marker Scanning ────────────────────────────────────────────────────────
 
+/**
+ * Walk up from an event target to the nearest map-marker root element, trying
+ * each of Sniffies' known marker container class/attribute selectors.
+ * @returns the marker root element, or null if the target isn't inside one.
+ */
 function resolveMarkerRoot(el: HTMLElement): HTMLElement | null {
   return (el.closest('.maplibregl-marker') ||
     el.closest('.marker-avatar') ||
@@ -273,6 +302,14 @@ function resolveMarkerRoot(el: HTMLElement): HTMLElement | null {
     el.closest('.marker-container')) as HTMLElement || null;
 }
 
+/**
+ * Best-effort extraction of a profile hex id from a marker element, reading
+ * untrusted page DOM. Tries, in order: CDN avatar background-image URLs (inline
+ * and computed), ancestor background images, <img> src, profile links, data-*
+ * attributes, the marker-container id, aria-label, and finally any hex-id-shaped
+ * attribute value. Each getComputedStyle read is wrapped defensively.
+ * @returns the lowercased profile id, or '' if none could be resolved.
+ */
 function extractIdFromElement(el: HTMLElement): string {
   // 1. Background-image URL on this element or its children — cover both
   //    inline style and computed style (Sniffies may set it via CSS class).
@@ -348,6 +385,15 @@ let cachedMapCanvas: HTMLCanvasElement | null = null;
 let lastFullScanTs = 0;
 const FULL_SCAN_COOLDOWN_MS = 10_000;
 
+/**
+ * Locate the page's MapLibre map instance so markers can be resolved via feature
+ * queries. Returns a cached instance while its canvas is still live; otherwise
+ * probes known globals (window.map, window.SNIFFIES.*) and, at most once per
+ * FULL_SCAN_COOLDOWN_MS, does a full window-key scan for any object exposing
+ * getCanvas + queryRenderedFeatures bound to the on-page canvas. All probes are
+ * wrapped since touching arbitrary page globals can throw.
+ * @returns the map instance, or null if none is discoverable yet.
+ */
 function findMap(): typeof cachedMap {
   if (cachedMap && typeof cachedMap.getCanvas === 'function') {
     try {
@@ -388,6 +434,13 @@ function findMap(): typeof cachedMap {
   return null;
 }
 
+/**
+ * Pull a profile hex id out of an (untrusted) MapLibre rendered-feature object,
+ * checking the feature id and common id property keys, then falling back to
+ * scanning every property value. Prefers the longest hex match (full ids over
+ * partial). All values are String()-coerced before matching.
+ * @returns the lowercased id, or '' if none found.
+ */
 function extractIdFromFeature(feature: any): string {
   if (!feature) return '';
   const candidates: unknown[] = [];
@@ -432,6 +485,12 @@ function tryIdFromMapForMarker(marker: HTMLElement): string {
   return getIdFromMapAtPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
 }
 
+/**
+ * Refresh the idToMarker index from the live DOM: register every current
+ * .maplibregl-marker by extracted id, drop entries for removed markers (and
+ * their badges), enforce the ID_TO_MARKER_MAX cap by evicting oldest, and prune
+ * orphaned badges whose markers no longer exist.
+ */
 function scanMarkers(): void {
   const markers = document.querySelectorAll('.maplibregl-marker');
   const currentIds = new Set<string>();
@@ -484,10 +543,19 @@ function scanMarkers(): void {
 // The Vers Top and Vers Bottom checkboxes catch those specific combos.
 // This means: hiding "Top" hides ALL top-leaning positions.
 
+/** @returns true if the (case-insensitive) attitude string contains `keyword`. */
 function attitudeContains(att: string, keyword: string): boolean {
   return att.toLowerCase().includes(keyword);
 }
 
+/**
+ * Decide whether a profile with the given attitude should be hidden, applying
+ * the fuzzy position-matching precedence (vers-bottom / vers-top checked before
+ * generic vers / bottom / top). Unspecified/unknown/unrecognised attitudes
+ * follow the hideUnspecified setting. Pure predicate — runs on every marker on
+ * every filter tick, so it never logs.
+ * @returns true if the marker should be hidden by attitude settings.
+ */
 function shouldHideAttitude(att: string): boolean {
   const lower = (att || '').toLowerCase().trim();
   if (!lower || lower === 'unspecified' || lower === 'unknown' || lower === '') {
@@ -509,6 +577,12 @@ function shouldHideAttitude(att: string): boolean {
   return settings.hideUnspecified;
 }
 
+/**
+ * Position-highlight counterpart to shouldHideAttitude: decide whether a
+ * profile's attitude matches an enabled highlight setting, with the same
+ * vers-first precedence. Pure predicate.
+ * @returns true if the marker should get the attitude-highlight (blue) outline.
+ */
 function shouldHighlightAttitude(att: string): boolean {
   const lower = (att || '').toLowerCase().trim();
   if (!lower) return false;
@@ -522,6 +596,13 @@ function shouldHighlightAttitude(att: string): boolean {
 
 // ── Text Term Filtering ────────────────────────────────────────────────────
 
+/**
+ * Case-insensitive substring match of `text` against a list of filter terms.
+ * Pure hot-path predicate — runs per marker on every filter tick, so it never
+ * logs.
+ * @returns true if `text` contains any of the (untrusted, defensively typed)
+ * terms; false for empty text or a non-array/empty term list.
+ */
 function matchesTerms(text: string, terms: string[]): boolean {
   // `terms` reaches us via settings that originate from page-origin
   // localStorage / a forgeable postMessage, so never assume it is an array of
@@ -533,6 +614,7 @@ function matchesTerms(text: string, terms: string[]): boolean {
 
 // ── Chat Age Badges ────────────────────────────────────────────────────────
 
+/** Format an elapsed-milliseconds duration as a compact age string (now/Nm/Nh/Nd). */
 function formatAge(ms: number): string {
   const mins = Math.floor(ms / 60000);
   if (mins < 1) return 'now';
@@ -543,6 +625,13 @@ function formatAge(ms: number): string {
   return `${days}d`;
 }
 
+/**
+ * Create, update, or hide the chat-age badge on a marker. Shows a directional
+ * arrow (→ waiting on them, ← they replied) plus the formatted age of the most
+ * recent message. Hidden when badges are disabled or there's no chat activity.
+ * @param id profile id.
+ * @param marker the marker element to host the badge.
+ */
 function updateBadge(id: string, marker: HTMLElement): void {
   const chatTs = anyLastTs(id);
   if (!chatTs || !settings.showChatAgeBadges) {
@@ -570,6 +659,14 @@ function updateBadge(id: string, marker: HTMLElement): void {
 
 let previewEl: HTMLElement | null = null;
 
+/**
+ * Show a hover popup listing this profile's most recent messages (up to 8,
+ * newest first), positioned beside the marker and clamped to the viewport.
+ * Message text is HTML-escaped before insertion (untrusted page/adapter data).
+ * No-op when there's no cached preview for the id.
+ * @param id profile id.
+ * @param marker the marker the popup anchors to.
+ */
 function showChatPreview(id: string, marker: HTMLElement): void {
   hideChatPreview();
   const messages = chatPreviews.get(id);
@@ -593,14 +690,24 @@ function showChatPreview(id: string, marker: HTMLElement): void {
   document.body.appendChild(previewEl);
 }
 
+/** Remove the chat-preview hover popup if one is currently shown. */
 function hideChatPreview(): void {
   if (previewEl) { previewEl.remove(); previewEl = null; }
 }
 
+/**
+ * Escape &, <, > for safe insertion of untrusted message text into innerHTML.
+ * Used only in text position (between tags), so quote escaping isn't required.
+ */
 function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+/**
+ * Attach mouseenter/mouseleave chat-preview handlers to a marker exactly once
+ * (tracked via the hoverBound WeakSet) so repeated filter passes don't stack
+ * duplicate listeners.
+ */
 function ensureHoverBindings(id: string, marker: HTMLElement): void {
   if (hoverBound.has(marker)) return;
   hoverBound.add(marker);
@@ -610,6 +717,10 @@ function ensureHoverBindings(id: string, marker: HTMLElement): void {
 
 // ── Attitude Override ──────────────────────────────────────────────────────
 
+/**
+ * @returns the attitude to use for a profile — a manual override if set,
+ * otherwise the adapter/partials-detected attitude, otherwise 'unspecified'.
+ */
 function getEffectiveAttitude(id: string): string {
   // Manual override takes priority over adapter-detected attitude
   return manualAttitudes.get(id) || markerAttitudes.get(id) || 'unspecified';
@@ -617,6 +728,11 @@ function getEffectiveAttitude(id: string): string {
 
 // ── Undo Last Hide ─────────────────────────────────────────────────────────
 
+/**
+ * Un-hide the most recently hidden profile (pop the hide-history stack),
+ * removing it from blockedIds, unhiding its marker, and persisting.
+ * @returns true if a hide was undone, false if the history stack was empty.
+ */
 function undoLastHide(): boolean {
   const lastId = hideHistory.pop();
   if (!lastId) return false;
@@ -674,6 +790,11 @@ const UNDO_TOAST_HOST_ID = 'aggregaytor-undo-hide-host';
 const UNDO_TOAST_DURATION_MS = 30_000;
 const UNDO_TOAST_MAX = 3;
 
+/**
+ * Get (or lazily create) the fixed lower-left container that stacks undo-hide
+ * toasts. Newest toast renders at the top (flex column-reverse).
+ * @returns the host element, or null if document.body isn't ready yet.
+ */
 function ensureUndoToastHost(): HTMLElement | null {
   if (!document.body) return null;
   let host = document.getElementById(UNDO_TOAST_HOST_ID);
@@ -695,6 +816,12 @@ function ensureUndoToastHost(): HTMLElement | null {
   return host;
 }
 
+/**
+ * Extract the avatar image URL from a marker's (or a child's) background-image
+ * style, for showing the profile picture in the undo-hide toast. Only http(s)
+ * URLs are matched.
+ * @returns the avatar URL, or null if none found.
+ */
 function getProfileAvatarFromMarker(marker: HTMLElement | null): string | null {
   if (!marker) return null;
   // Marker has background-image: url(...) on itself or a child
@@ -710,6 +837,14 @@ function getProfileAvatarFromMarker(marker: HTMLElement | null): string | null {
   return null;
 }
 
+/**
+ * Spawn a 30-second undo toast in the lower-left after a manual hide, showing
+ * the hidden profile's avatar, a live countdown, and Undo/dismiss buttons.
+ * Coalesces rapid hides into a capped stack (UNDO_TOAST_MAX), each with its own
+ * interval timer; the Undo button calls undoHideById to restore the profile.
+ * @param profileId the just-hidden profile id.
+ * @param marker its marker element (source of the avatar image), or null.
+ */
 function showUndoHidePopup(profileId: string, marker: HTMLElement | null): void {
   const host = ensureUndoToastHost();
   if (!host) return;
@@ -786,6 +921,7 @@ function showUndoHidePopup(profileId: string, marker: HTMLElement | null): void 
     }
     countdownEl.textContent = `${Math.ceil(remaining / 1000)}s`;
   }, 500);
+  /** Dismiss this toast: stop its countdown interval, fade/slide it out, then remove it from the DOM. Idempotent via the null-guarded interval. */
   function cleanup(): void {
     if (tickInterval) { clearInterval(tickInterval); tickInterval = null; }
     toast.style.opacity = '0';
@@ -827,6 +963,16 @@ window.addEventListener('__aggregaytor_block_by_map_filter', ((event: CustomEven
 
 // ── Main Filter Pass ───────────────────────────────────────────────────────
 
+/**
+ * The main filter pass. Rescans markers, then for each known marker applies the
+ * hide/highlight rules in priority order (manual block → exclude terms →
+ * chat-history chips → inactivity → attitude → include-term/attitude highlight →
+ * badge + hover binding), tracking per-reason counts. Emits a throttled
+ * diagnostic log (only when a relevant chip is on and the stats signature
+ * changed) and broadcasts hidden-count stats to the ISOLATED bridge via
+ * postMessage. No-op while disabled; when no filter is active it strips every
+ * owned class so markers return to fully native rendering.
+ */
 function applyFilters(): void {
   if (!filterEnabled) return;
   scanMarkers();
@@ -1116,6 +1262,15 @@ function resolveProfileIdAtEvent(e: MouseEvent): { id: string; markerEl: HTMLEle
   return id ? { id, markerEl, source } : null;
 }
 
+/**
+ * Install the map's mouse gestures (all capture-phase): middle-click to
+ * quick-hide a marker (or quick-send the first quick phrase when inside a chat
+ * area), shift+right-click as a trackpad-friendly quick-hide (with native
+ * context-menu suppression), and shift+click to toggle a block. Anonymous /
+ * pictureless markers are resolved via the MapLibre feature query when DOM
+ * extraction fails. The quick-phrase read parses (untrusted) localStorage inside
+ * a try/catch so a malformed value can't break middle-click.
+ */
 function setupClickHandlers(): void {
   // Middle-click behavior:
   // - In/near chat input → quick-send first available phrase
@@ -1174,6 +1329,14 @@ function setupClickHandlers(): void {
   // Memoise the resolution result across the two handlers in a single
   // shift+right-click gesture using an event-stamp lookup.
   let _lastShiftRightClickResult: { timestamp: number; resolved: ReturnType<typeof resolveProfileIdAtEvent> } | null = null;
+  /**
+   * Resolve the profile at a shift+right-click, memoised for 200ms so the paired
+   * mousedown and contextmenu handlers of one gesture don't both run the
+   * expensive DOM→canvas→centre resolver. Stale results (>2s) are cleared to
+   * release the held marker-element references.
+   * @param e the mouse event to resolve.
+   * @returns the resolved id/marker/source, or null.
+   */
   function resolveShiftRightClick(e: MouseEvent): ReturnType<typeof resolveProfileIdAtEvent> {
     const now = performance.now();
     if (_lastShiftRightClickResult && now - _lastShiftRightClickResult.timestamp < 200) {
@@ -1246,12 +1409,24 @@ function setupClickHandlers(): void {
 
 // ── Settings Persistence ───────────────────────────────────────────────────
 
+/**
+ * Persist the blocked-id set to localStorage (BLOCKED_KEY — the canonical source
+ * for blocked profiles). Best-effort: a storage failure is swallowed.
+ */
 function saveBlockedIds(): void {
   try {
     localStorage.setItem(BLOCKED_KEY, JSON.stringify([...settings.blockedIds]));
   } catch {}
 }
 
+/**
+ * Load filter settings and the blocked-id set from (untrusted, page-origin)
+ * localStorage. Strips any legacy blockedIds pollution out of the settings blob
+ * (BLOCKED_KEY is canonical), re-asserts the array/Set field shapes so a
+ * hand-edited or page-written value can't crash applyFilters, and rewrites the
+ * cleaned settings back if pollution was found. Whole body is wrapped so a
+ * malformed value leaves the defaults intact.
+ */
 function loadSettings(): void {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -1474,6 +1649,11 @@ let partialsRateLimitUntil = 0;
 let partialsPreferredEndpoint = PARTIALS_ENDPOINTS[0];
 let partialsEndpointFailCount = 0;
 
+/**
+ * Extract the position/attitude string from an (untrusted) partials-API profile
+ * object, reading `data.profile.extended.sexuality.attitude` via optional chains.
+ * @returns the lowercased attitude, or null if the response lacks it.
+ */
 function extractAttitudeFromPartial(p: any): string | null {
   const sexuality = p?.data?.profile?.extended?.sexuality;
   if (!sexuality) return null;
@@ -1481,6 +1661,12 @@ function extractAttitudeFromPartial(p: any): string | null {
   return att ? String(att).toLowerCase() : null;
 }
 
+/**
+ * Concatenate an (untrusted) partials-API profile's bio / aboutMe / lookingFor
+ * free-text fields (both nested `extended.*` and top-level spellings) into one
+ * lowercased string for include/exclude term matching.
+ * @returns the joined profile text, or '' if none present.
+ */
 function extractTextFromPartial(p: any): string {
   const prof = p?.data?.profile;
   if (!prof) return '';
@@ -1596,6 +1782,10 @@ async function fetchPartialsForIds(ids: string[]): Promise<boolean> {
     const curIdx = PARTIALS_ENDPOINTS.indexOf(partialsPreferredEndpoint);
     partialsPreferredEndpoint = PARTIALS_ENDPOINTS[(curIdx + 1) % PARTIALS_ENDPOINTS.length];
     partialsEndpointFailCount = 0;
+    // Meaningful external-fetch state transition: every partials endpoint has
+    // failed 3× in a row, so the preferred endpoint rotates. Worth a warn so
+    // a persistently-failing backfill is visible in the console.
+    console.warn('[Aggregaytor:MapFilters] partials: all endpoints failing, rotating preferred to', partialsPreferredEndpoint);
   }
   return true;
 }
@@ -1667,6 +1857,18 @@ function tickPartialsPrefetch(): void {
 
 // ── Initialization ─────────────────────────────────────────────────────────
 
+/**
+ * Initialize the map-filter subsystem in the MAIN world: inject CSS, load
+ * settings / blocks / manual-attitudes / chat-activity from (untrusted,
+ * page-origin) localStorage with validation and legacy-format handling, install
+ * the click gestures, and start the recurring work — the 5s filter scan, the
+ * new-marker MutationObserver (per-marker anti-FOUC), the partials attitude
+ * prefetcher, and the memory-hygiene timers (detached-node prune, hidden-tab
+ * cache trim, deep teardown on pagehide / long-hidden). Also runs the one-shot
+ * stale-class recovery sweep and registers the memory-report responder for the
+ * side panel's Memory tab. Every localStorage/JSON.parse block is individually
+ * wrapped so one malformed key can't abort the rest of init.
+ */
 export function initMapFilters(): void {
   injectStyles();
   loadSettings();
@@ -1740,6 +1942,7 @@ export function initMapFilters(): void {
   // Skipped entirely when no filter is active so the map looks 100%
   // native in that state.
   let _moDebounce: ReturnType<typeof setTimeout> | null = null;
+  /** @returns true if any hide filter or block is active — gates the anti-FOUC observer so the map stays fully native when nothing is filtering. */
   function anyFilterCurrentlyOn(): boolean {
     return settings.blockedIds.size > 0 ||
       (settings.excludeEnabled && settings.excludeTerms.length > 0) ||
@@ -1748,6 +1951,7 @@ export function initMapFilters(): void {
       settings.hideVersTop || settings.hideTop || settings.hideSide || settings.hideUnspecified ||
       settings.hideInactiveOver2h;
   }
+  /** Tag a brand-new marker with FRESH_CLASS (opacity:0) unless it's already hidden or already fresh, so it's invisible before the next paint until applyFilters decides hide-vs-fade-in. */
   function tagFresh(el: Element): void {
     if (!el.classList.contains(HIDE_CLASS) && !el.classList.contains(FRESH_CLASS)) {
       el.classList.add(FRESH_CLASS);
@@ -1859,6 +2063,7 @@ export function initMapFilters(): void {
     if (!hiddenSinceMs) return;
     if (Date.now() - hiddenSinceMs < 5 * 60_000) return;
     // Trim each cache to half its current size, dropping insertion-order-oldest.
+    /** Halve a cache Map (drop oldest entries) once it exceeds 100 entries, logging the new size; caches re-populate from adapter scrapes on visibility return. */
     const trim = <V,>(m: Map<string, V>, name: string) => {
       if (m.size < 100) return; // tiny — not worth the work
       const target = Math.floor(m.size / 2);
@@ -1884,6 +2089,14 @@ export function initMapFilters(): void {
   // user opened and abandoned days ago no longer hoards 100s of MB of
   // marker refs and partial profile data.
   let deepTeardownDone = false;
+  /**
+   * Release every module-scope cache / Map / Set / array (marker refs,
+   * attitudes, profile text, last-active, chat activity, previews, badges, hide
+   * history) to reclaim memory when the tab is going away or has been hidden a
+   * long time. Runs at most once; a later applyFilters rebuilds state from the
+   * live DOM and adapter scrapes.
+   * @param reason label included in the teardown log line.
+   */
   function deepTeardown(reason: string): void {
     if (deepTeardownDone) return;
     deepTeardownDone = true;
@@ -1920,6 +2133,7 @@ export function initMapFilters(): void {
   // side panel's Memory tab can show per-cache sizes for the MAIN-world map
   // filter state. Synchronous reply via postMessage; the bridge forwards to
   // chrome.storage.session for the SW to read on demand.
+  /** @returns a snapshot of each module cache's current size, for the side panel's Memory tab. */
   function buildMemoryReport(): Record<string, number> {
     return {
       idToMarker: idToMarker.size,

@@ -462,6 +462,14 @@ export class SniffiesAdapter extends BaseAdapter {
     log.info('Adapter initialized. Self IDs:', [...this.selfIds.ids]);
   }
 
+  /**
+   * Tear the adapter down: cancel every background timer this subclass owns
+   * (recurring avatar scrape, one-shot initial scrape, userJoined-flush),
+   * discard the pending contact buffer, then delegate to {@link BaseAdapter} for
+   * the shared cleanup (network un-patching, listener removal). Overridden
+   * rather than using `addCleanup` because these timers are re-created across
+   * the adapter's lifetime and must be nulled out.
+   */
   async destroy(): Promise<void> {
     if (this.avatarScrapeTimer) {
       clearInterval(this.avatarScrapeTimer);
@@ -588,6 +596,12 @@ export class SniffiesAdapter extends BaseAdapter {
 
     walkPayload(payload, contextId, {
       onObject: (obj, ctx, _depth) => {
+        // Payload objects are untrusted. The known abort risk (a numeric
+        // timestamp outside the Date range) is already neutralised at the value
+        // level by clampEpochMs/parseTimestamp, but this outer guard isolates
+        // ANY unexpected throw to a single node so it can't abort the walk and
+        // silently drop every message/contact later in the same response.
+        try {
         // Opportunistically detect self-IDs from every object we see
         this.selfIds.detectFromPayload(obj);
         this.detectSelfIdsFromObj(obj);
@@ -779,6 +793,9 @@ export class SniffiesAdapter extends BaseAdapter {
           read: direction === 'out',
           metadata: senderAttrs,
         });
+        } catch (err) {
+          log.debug('Skipped unparseable payload object:', err);
+        }
       },
     });
 

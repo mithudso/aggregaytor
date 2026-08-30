@@ -90,6 +90,17 @@ function setHash(map: Map<string, string>, hash: string, profileId: string): voi
   }
 }
 
+/**
+ * Pull the message-body string out of an untrusted payload object.
+ *
+ * Grindr spreads the body across several key names depending on endpoint
+ * (`body`, `text`, `snippet`, `lastMessage`, …), so we probe {@link BODY_KEYS}
+ * in priority order and take the first non-empty string. Hot-path helper run
+ * once per walked object — kept allocation-free and silent (no logging).
+ *
+ * @param obj - One object node from a walked API/WS payload.
+ * @returns The trimmed body text, or `''` when no body-like field is present.
+ */
 function extractBody(obj: Record<string, unknown>): string {
   for (const key of BODY_KEYS) {
     const value = obj[key];
@@ -102,6 +113,13 @@ export class GrindrAdapter extends BaseAdapter {
   readonly platform: Platform = 'grindr';
   private captureCount = 0;
 
+  /**
+   * Bring the adapter online: seed self-IDs from page globals, then monkey-patch
+   * fetch/XHR/WebSocket so Grindr Web's own traffic flows through
+   * {@link parseApiResponse} / {@link parseWebSocketFrame}. Called once by the
+   * content-script bootstrap. Logs start and completion (with the resolved self
+   * IDs) so a future session can confirm interception actually installed.
+   */
   async init(): Promise<void> {
     log.info('Initializing adapter...');
     this.selfIds.seedFromWindow(window as Window & typeof globalThis);
@@ -109,6 +127,16 @@ export class GrindrAdapter extends BaseAdapter {
     log.info('Adapter initialized. Self IDs:', [...this.selfIds.ids]);
   }
 
+  /**
+   * Gate which intercepted requests are parsed as Grindr data.
+   *
+   * Two-step: a cheap substring pre-check, then a real host check via
+   * {@link isGrindrHost} so a look-alike third-party URL that merely mentions
+   * `grindr.com` cannot feed forged JSON into the store.
+   *
+   * @param url - The request URL seen by the network interceptor.
+   * @returns `true` only for genuinely Grindr-owned hosts.
+   */
   protected shouldInterceptUrl(url: string): boolean {
     const s = String(url).toLowerCase();
     // Coarse gate first (cheap), then a real host check so look-alike
@@ -117,12 +145,31 @@ export class GrindrAdapter extends BaseAdapter {
     return isGrindrHost(url);
   }
 
+  /**
+   * Extract Grindr messages and contacts from an intercepted JSON payload.
+   *
+   * Recursively walks the (untrusted) response with {@link walkPayload}. Each
+   * object node is inspected for message text, direction (`isFromMe`), profile
+   * metadata, and photo-hash → profileId mappings. Messages are returned;
+   * contacts are emitted directly as a `'contacts'` event. The parse contract:
+   * missing/oddly-typed fields yield no output rather than throwing, and any
+   * unexpected throw in a single node is caught so it cannot abort the walk.
+   *
+   * @param url     - Source URL (or `'[ws]'` for a WebSocket frame), recorded in
+   *                  message metadata and used for block/favorite URL tagging.
+   * @param payload - The parsed JSON body; may be any shape.
+   * @returns The messages extracted from this payload (possibly empty).
+   */
   protected parseApiResponse(url: string, payload: unknown): UnifiedMessage[] {
     const messages: UnifiedMessage[] = [];
     const contacts: UnifiedContact[] = [];
 
     walkPayload(payload, null, {
       onObject: (obj, _ctx, _depth) => {
+        // Payload objects are untrusted. Isolate any throw to this one node so
+        // a single malformed object cannot abort the walk and silently drop
+        // every message/contact later in the same response.
+        try {
         this.selfIds.detectFromPayload(obj);
 
         // Index profileId ↔ photoMediaHashes for middle-click block lookup.
@@ -258,6 +305,9 @@ export class GrindrAdapter extends BaseAdapter {
             metadata: md,
           });
         }
+        } catch (err) {
+          log.debug('Skipped unparseable payload object:', err);
+        }
       },
     });
 
@@ -273,6 +323,20 @@ export class GrindrAdapter extends BaseAdapter {
     return messages;
   }
 
+  /**
+   * Parse a Grindr WebSocket frame (`/v1/ws`) into messages.
+   *
+   * Grindr pushes the same message/profile object shapes over the socket as it
+   * returns from REST, so text frames are JSON-parsed and handed to
+   * {@link parseApiResponse} with the synthetic URL `'[ws]'`. Binary frames and
+   * non-JSON text (keep-alives, control frames) yield `[]`.
+   *
+   * The JSON.parse is intentionally guarded and silent: non-JSON frames are a
+   * normal, high-frequency part of the stream, so logging each would be noise.
+   *
+   * @param data - The raw frame (string or ArrayBuffer) from the interceptor.
+   * @returns Extracted messages, or `[]` for binary/unparseable frames.
+   */
   protected parseWebSocketFrame(data: string | ArrayBuffer): UnifiedMessage[] {
     if (typeof data !== 'string') return [];
     try {
@@ -281,7 +345,7 @@ export class GrindrAdapter extends BaseAdapter {
         return this.parseApiResponse('[ws]', parsed);
       }
     } catch {
-      // not JSON
+      // Non-JSON frame (keep-alive / control) — expected, deliberately silent.
     }
     return [];
   }

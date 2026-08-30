@@ -26,6 +26,21 @@ export function normalizeSearchText(text: string): string {
     .replace(/[^a-z0-9@._:/-]+/g, ' ');
 }
 
+/**
+ * Tokenizes `text` into a deduplicated, stopword-filtered, order-preserving
+ * list of index tokens, capped at `maxTokens`.
+ *
+ * Tokens shorter than 2 chars, stopwords, and repeats are dropped. This is the
+ * shared front end for search fields, shingling, and body-token Jaccard, so its
+ * output feeds both the fielded index and (via MinHash) persisted signatures —
+ * deterministic for a given input and options.
+ *
+ * @param text - Raw text to tokenize (normalized internally).
+ * @param opts - Either a number (shorthand for `maxTokens`, default 128) or a
+ *   `TokenizeOptions` with `maxTokens` and/or a custom `stopwords` set
+ *   (defaults to `DEFAULT_STOPWORDS`).
+ * @returns Ordered unique tokens, at most `maxTokens` long.
+ */
 export function tokenizeIndexText(text: string, opts?: number | TokenizeOptions): string[] {
   const maxTokens = typeof opts === 'number' ? opts : (opts?.maxTokens ?? 128);
   const stopwords = typeof opts === 'object' ? (opts?.stopwords ?? DEFAULT_STOPWORDS) : DEFAULT_STOPWORDS;

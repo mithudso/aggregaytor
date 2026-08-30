@@ -8,6 +8,10 @@ import { DEFAULT_AUTO_RESPOND_SETTINGS } from './types.js';
 import { getDB } from './db.js';
 import type { StoreDatabase } from './db.js';
 
+/**
+ * Build the ThreadMetaDoc _id for a contact. The `meta:` prefix is what the
+ * `startkey: 'meta:'` range scans in `getAllThreadMeta` / export-import rely on.
+ */
 function metaId(contactId: string): string {
   return `meta:${contactId}`;
 }
@@ -44,6 +48,14 @@ function threadMetaDefaults(): ThreadMetaDefaults {
   };
 }
 
+/**
+ * Fetch a contact's thread metadata, or null if none has been created yet.
+ *
+ * @param contactId  Contact whose metadata to load.
+ * @param db         Optional store override.
+ * @returns The ThreadMetaDoc, or null on a 404.
+ * @throws Re-throws any non-404 store error.
+ */
 export async function getThreadMeta(
   contactId: string,
   db?: StoreDatabase,
@@ -70,6 +82,22 @@ const SIGNAL_FIELDS = new Set<keyof ThreadMetaDoc>([
   'blockedByThem', 'archived', 'hidden',
 ]);
 
+/**
+ * Create or update a contact's thread metadata, merging `updates` over the
+ * stored doc (or over fresh defaults on first write).
+ *
+ * Bumps `signalsUpdatedAt` whenever a write changes any preference-model
+ * signal field (see {@link SIGNAL_FIELDS}) so the incremental auto-trainer can
+ * scan only changed threads. `_rev` from the existing doc is carried forward
+ * for a conflict-free write.
+ *
+ * @param contactId  Contact this metadata belongs to.
+ * @param platform   Platform of the thread (used only when creating).
+ * @param updates    Partial fields to apply.
+ * @param db         Optional store override.
+ * @returns The written ThreadMetaDoc.
+ * @throws Re-throws any non-404 error from the existing-doc read.
+ */
 export async function upsertThreadMeta(
   contactId: string,
   platform: Platform,

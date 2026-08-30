@@ -38,6 +38,7 @@ interface AuthCacheEntry { token: string; expiresAt: number; }
 let _authCache: AuthCacheEntry | null = null;
 const AUTH_CACHE_TTL_MS = 50 * 60_000; // 50 min — under the 60-min token lifetime
 
+/** Drop the cached Google OAuth token — called on 401 so the next call re-auths. */
 function invalidateGoogleAuthCache(): void {
   _authCache = null;
 }
@@ -158,10 +159,6 @@ async function getOrCreateTaskList(): Promise<string> {
 // ── CRUD Operations ──────────────────────────────────────────────────────────
 
 /**
- * Create a task in Google Tasks.
- * @returns The created Google Task object with `id`, `title`, etc.
- */
-/**
  * Convert a local due date to the RFC 3339 timestamp the API expects.
  * (Google stores only the date portion and discards the time.)
  * Returns null for anything unparseable, so a corrupt local `dueAt` drops the
@@ -176,6 +173,16 @@ function toGoogleDue(dueAt: string): string | null {
   return new Date(ms).toISOString();
 }
 
+/**
+ * Create a task in the "Aggregaytor" Google Tasks list.
+ *
+ * An unparseable `dueAt` is dropped (see {@link toGoogleDue}) rather than
+ * failing the request.
+ *
+ * @param opts  title (required), optional notes, optional ISO due date.
+ * @returns The created Google Task object (`id`, `title`, …).
+ * @throws Propagates auth/API errors from tasksApiFetch (never containing the token).
+ */
 export async function createGoogleTask(opts: {
   title: string;
   notes?: string;

@@ -48,6 +48,13 @@ function isGmailHost(url: string): boolean {
 export class GmailAdapter extends BaseAdapter {
   readonly platform: Platform = 'gmail';
 
+  /**
+   * Bring the adapter online: install network interception for Gmail's internal
+   * API, then start the DOM MutationObserver for rendered email content. Called
+   * once by the content-script bootstrap. Both mechanisms feed the same
+   * message/contact store, covering API responses and cached/pre-rendered
+   * threads respectively.
+   */
   async init(): Promise<void> {
     log.info('Initializing...');
 
@@ -60,6 +67,17 @@ export class GmailAdapter extends BaseAdapter {
     log.info('Initialized');
   }
 
+  /**
+   * Gate which intercepted requests are parsed as Gmail data.
+   *
+   * Host-anchored FIRST: two of {@link GMAIL_API_PATTERNS} (`/sync/`, `/bv?`)
+   * are bare path fragments that match on any host, so {@link isGmailHost} must
+   * reject non-Gmail origins before the pattern test — otherwise a third-party
+   * request from the Gmail tab could be parsed into the store.
+   *
+   * @param url - The request URL seen by the network interceptor.
+   * @returns `true` only for Gmail-owned hosts hitting a known API pattern.
+   */
   protected shouldInterceptUrl(url: string): boolean {
     const s = String(url).toLowerCase();
     // Host first: the path-fragment patterns below match on any host.
@@ -67,6 +85,20 @@ export class GmailAdapter extends BaseAdapter {
     return GMAIL_API_PATTERNS.some(p => s.includes(p));
   }
 
+  /**
+   * Extract Gmail messages from an intercepted API payload.
+   *
+   * Gmail's internal API uses a protobuf-like JSON shape with no stable schema,
+   * so we {@link walkPayload}-traverse it and pull messages from whatever object
+   * nodes carry recognisable fields (body text, from/to, subject, ids). The
+   * parse contract: non-object payloads and nodes without usable fields yield
+   * nothing, and a throw in any single node is isolated so it cannot abort the
+   * remainder of the walk.
+   *
+   * @param url     - Source URL, recorded in message metadata.
+   * @param payload - The parsed JSON body; may be any shape.
+   * @returns The messages extracted from this payload (possibly empty).
+   */
   protected parseApiResponse(url: string, payload: unknown): UnifiedMessage[] {
     // Gmail's internal API uses a complex protobuf-like format
     // For now, we extract what we can from JSON responses
@@ -137,10 +169,32 @@ export class GmailAdapter extends BaseAdapter {
     });
   }
 
+  /**
+   * Parse a WebSocket frame — always returns `[]`.
+   *
+   * Gmail delivers mail data over its REST/long-poll API, not WebSockets, so
+   * there is nothing to parse here. Present only to satisfy the
+   * {@link BaseAdapter} contract.
+   *
+   * @returns An empty array (always).
+   */
   protected parseWebSocketFrame(): UnifiedMessage[] {
     return [];
   }
 
+  /**
+   * Watch the Gmail DOM for opened email threads and extract their content.
+   *
+   * Gmail is an SPA that renders message bodies into the DOM after XHR fetches;
+   * a {@link MutationObserver} catches those nodes and emits `messages` and
+   * `contacts` events, covering threads that never appear as a cleanly parseable
+   * API response. Each added-node batch is processed defensively so one
+   * malformed subtree cannot tear down the observer callback.
+   *
+   * Guards against a null document root (content script may run at
+   * `document_start` before `<body>` exists) and registers observer disconnect
+   * as adapter cleanup.
+   */
   private observeEmailContent(): void {
     // Watch for email thread views opening
     const observer = new MutationObserver((mutations) => {
@@ -148,6 +202,11 @@ export class GmailAdapter extends BaseAdapter {
         for (const node of mutation.addedNodes) {
           if (node.nodeType !== Node.ELEMENT_NODE) continue;
           const el = node as Element;
+
+          // The added subtree is untrusted host DOM. Isolate any throw to this
+          // node so one malformed element can't kill the observer callback and
+          // stop all further extraction.
+          try {
 
           // Gmail message body containers
           const bodies = el.querySelectorAll('.a3s.aiL, [data-message-id], .ii.gt');
@@ -193,6 +252,9 @@ export class GmailAdapter extends BaseAdapter {
                 }],
               });
             }
+          }
+          } catch (err) {
+            log.debug('Skipped unparseable Gmail DOM node:', err);
           }
         }
       }

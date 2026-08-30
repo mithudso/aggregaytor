@@ -32,6 +32,7 @@ const LOG = '[Aggregaytor:Bridge:Sniffies]';
 // can't fill the disk. Wrapped in a top-level try/catch — if the
 // extension is reloaded mid-session, `chrome.runtime` throws and we
 // just lose the report.
+/** Forward one uncaught error / rejection to the SW's error-log buffer (see block comment above). */
 function _forwardError(level: 'unhandled' | 'rejection' | 'error', message: string, stack?: string): void {
   try {
     chrome.runtime.sendMessage({
@@ -164,6 +165,15 @@ function checkContext(): boolean {
 // these fire when the SW is asleep AND has no other tab keeping it warm,
 // or when the extension was reloaded but the SW handler hasn't bound yet.
 // They're transient by definition; treat them as cache-miss equivalents.
+/**
+ * Send a message to the service worker without ever throwing on a transient
+ * failure. `chrome.runtime.sendMessage` throws *synchronously* on an invalidated
+ * extension context and rejects with "Receiving end does not exist" when the SW
+ * is asleep — both are expected during reloads/idle, so this normalizes them to
+ * a resolved sentinel and only surfaces genuine errors to the caller.
+ * @param message the message payload to deliver to the SW
+ * @returns the SW response, or a benign fallback when the context is unavailable
+ */
 function safeSendMessage(message: any): Promise<any> {
   if (!contextValid) {
     return Promise.reject(new Error('Context invalidated'));
@@ -186,9 +196,11 @@ function safeSendMessage(message: any): Promise<any> {
 // CPU, and any sendMessage they retry will throw again. Track them in a
 // registry so checkContext() / safeSendMessage() can clear them once.
 const _backgroundTimers: ReturnType<typeof setInterval>[] = [];
+/** Record a setInterval id so shutdownBackgroundTimers() can clear it on context loss. */
 function registerBackgroundTimer(id: ReturnType<typeof setInterval>): void {
   _backgroundTimers.push(id);
 }
+/** Clear every registered background interval (called once when the extension context dies). */
 function shutdownBackgroundTimers(): void {
   while (_backgroundTimers.length) {
     const id = _backgroundTimers.pop();
@@ -659,6 +671,7 @@ let fpPlatform = '';
 let _fpDragCleanup: (() => void) | null = null;
 let _fpEscapeCleanup: (() => void) | null = null;
 
+/** Inject the floating quick-action / map-filter panel stylesheet once per page. */
 function injectFloatingCSS(): void {
   if (document.getElementById('aggregaytor-fp-css')) return;
   const s = document.createElement('style');
@@ -687,6 +700,18 @@ function injectFloatingCSS(): void {
   (document.head || document.documentElement).appendChild(s);
 }
 
+/**
+ * Build and show the draggable floating quick-action panel for a contact
+ * (block, notes, rating, reminder, quick phrases). Idempotent for the same
+ * contact. Reads persisted position/collapsed state and quick phrases from
+ * (untrusted) localStorage + chrome.storage with try/catch and shape coercion;
+ * button actions route through safeSendMessage so a mid-session extension reload
+ * can't throw uncaught. Still used by other platforms (Grindr SHOW_FLOATING_PANEL);
+ * Sniffies now uses the inline injectProfileActions bar instead.
+ *
+ * @param contactId - Namespaced contact id, e.g. "sniffies:abc123".
+ * @param platform - Platform key for SW messages (defaults handled by caller).
+ */
 function showFloatingPanel(contactId: string, platform: string): void {
   if (!contactId || !contextValid) return;
   const existing = document.getElementById(FP_ID);
@@ -921,6 +946,8 @@ function showFloatingPanel(contactId: string, platform: string): void {
   });
 }
 
+/** Remove the floating panel (or map-filter panel, which reuses FP_ID) and tear
+ * down its drag/escape/message listeners so none leak against a detached node. */
 function hideFloatingPanel(): void {
   document.getElementById(FP_ID)?.remove();
   fpContactId = '';
@@ -979,6 +1006,7 @@ function readLocalJson<T>(key: string, fallback: T, isValid: (v: unknown) => boo
     return fallback;
   }
 }
+/** Shape guard for readLocalJson: true for a non-null, non-array object. */
 const isPlainObject = (v: unknown): boolean =>
   !!v && typeof v === 'object' && !Array.isArray(v);
 
@@ -1002,38 +1030,47 @@ interface LocalReminder {
   };
 }
 
+/** Read the {profileId: noteText} map from page localStorage (untrusted); {} on parse failure. */
 function loadLocalNotes(): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(SNIFFIES_NOTES_KEY) || '{}') || {}; } catch { return {}; }
 }
+/** Persist the notes map to localStorage; swallows quota/private-mode errors. */
 function saveLocalNotes(notes: Record<string, string>): void {
   try { localStorage.setItem(SNIFFIES_NOTES_KEY, JSON.stringify(notes)); } catch {}
 }
+/** Set (or clear, when blank) the local note for one profile. */
 function setLocalNote(profileId: string, note: string): void {
   const all = loadLocalNotes();
   if (note.trim()) all[profileId] = note;
   else delete all[profileId];
   saveLocalNotes(all);
 }
+/** Get the locally-stored note for a profile, or '' if none. */
 function getLocalNote(profileId: string): string {
   return loadLocalNotes()[profileId] || '';
 }
+/** Read the reminders array from page localStorage (untrusted); [] on parse failure or non-array. */
 function loadLocalReminders(): LocalReminder[] {
   try {
     const arr = JSON.parse(localStorage.getItem(SNIFFIES_REMINDERS_KEY) || '[]');
     return Array.isArray(arr) ? arr : [];
   } catch { return []; }
 }
+/** Persist reminders (capped to the newest 200) to localStorage; swallows storage errors. */
 function saveLocalReminders(arr: LocalReminder[]): void {
   try { localStorage.setItem(SNIFFIES_REMINDERS_KEY, JSON.stringify(arr.slice(-200))); } catch {}
 }
+/** Append one reminder to the local store. */
 function addLocalReminder(r: LocalReminder): void {
   const arr = loadLocalReminders();
   arr.push(r);
   saveLocalReminders(arr);
 }
+/** Remove the reminder with the given id from the local store. */
 function removeLocalReminder(id: string): void {
   saveLocalReminders(loadLocalReminders().filter((r) => r.id !== id));
 }
+/** All local reminders for one profile, sorted by due time ascending. */
 function getLocalRemindersForProfile(profileId: string): LocalReminder[] {
   return loadLocalReminders()
     .filter((r) => r.profileId === profileId)
@@ -1049,9 +1086,17 @@ function getNextReminderForProfile(profileId: string): LocalReminder | null {
   });
   return list[0] || null;
 }
+/**
+ * HTML-escape a string for safe interpolation into innerHTML.
+ * WHY: notes, phrases, reminder text and filter terms all originate from
+ * untrusted user/page input and are rendered via innerHTML; without escaping,
+ * a value containing markup (or "</textarea>") would break out and inject DOM.
+ * @param s - Arbitrary (possibly untrusted) string. @returns Escaped string.
+ */
 function escHtml(s: string): string {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
+/** Format a reminder's ISO due time as a short relative label ("in 2h", "3d ago"). */
 function fmtRelativeReminder(iso: string): string {
   const ms = new Date(iso).getTime() - Date.now();
   const past = ms < 0;
@@ -1064,6 +1109,7 @@ function fmtRelativeReminder(iso: string): string {
   return past ? `${days}d ago` : `in ${days}d`;
 }
 
+/** Inject the inline profile-action bar stylesheet once per page. */
 function injectProfileActionsCSS(): void {
   if (document.getElementById(PROFILE_ACTIONS_CSS_ID)) return;
   const s = document.createElement('style');
@@ -1565,6 +1611,12 @@ function injectProfileActions(contactId: string, platform: string): void {
 
   let noteTimer: ReturnType<typeof setTimeout> | null = null;
   let lastSavedValue = '';
+  /**
+   * Commit the notes textarea: write to localStorage synchronously (bulletproof
+   * fast path; a quota throw is logged), then best-effort mirror to PouchDB via
+   * the SW. No-op when the value is unchanged. Exposed as el._flushNotes so the
+   * URL-change handler can flush before the panel is torn down.
+   */
   function flushNotes(): void {
     if (noteTimer) { clearTimeout(noteTimer); noteTimer = null; }
     const value = notesInput.value;
@@ -1854,6 +1906,7 @@ function injectProfileActions(contactId: string, platform: string): void {
 const FILTER_BAR_ID = 'aggregaytor-top-filter-bar';
 const FILTER_BAR_CSS_ID = 'aggregaytor-top-filter-bar-css';
 
+/** Inject the top filter-bar stylesheet once per page. */
 function injectFilterBarCSS(): void {
   if (document.getElementById(FILTER_BAR_CSS_ID)) return;
   const s = document.createElement('style');
@@ -1909,6 +1962,17 @@ let _originalBodyPaddingTop: string | null = null;
 // a detached tree for the life of the page.
 let _filterBarCleanup: (() => void) | null = null;
 
+/**
+ * Build and show the compact top filter bar (position toggles, chat-activity
+ * toggles, text-filter toggles, undo, reminders chip, hide-count). Idempotent.
+ *
+ * Reads filter settings + blocklist from untrusted page localStorage via
+ * readLocalJson (shape-checked, never throws). Registers three window 'message'
+ * listeners (topbar sync, reminders-changed, filter stats) — all guarded on
+ * event.source === window so a third-party iframe can't drive the UI — and
+ * tracks them in _filterBarCleanup so re-creating the bar never leaks handlers
+ * onto a detached node.
+ */
 function showTopFilterBar(): void {
   if (document.getElementById(FILTER_BAR_ID)) return;
   // Drop any listeners left over from a previous bar before wiring new ones.
@@ -2139,6 +2203,8 @@ function showTopFilterBar(): void {
   _filterBarCleanup = removeBarListeners;
 }
 
+/** Remove the top filter bar, restore the body's original padding-top, and
+ * detach its window message listeners. */
 function removeTopFilterBar(): void {
   const bar = document.getElementById(FILTER_BAR_ID);
   if (bar) {
@@ -2177,6 +2243,13 @@ function showBlockToast(profileId: string): void {
 
 const REMINDERS_PANEL_ID = 'aggregaytor-reminders-panel';
 
+/**
+ * Toggle the in-page reminders viewer: a card per upcoming / recently-overdue
+ * reminder, rendered from (untrusted) localStorage — every interpolated field
+ * goes through escHtml. Cards navigate to the profile via SPA pushState; the ✕
+ * deletes locally and, unless the id is a local-only "local:" id, fires
+ * DELETE_REMINDER to the SW via safeSendMessage. Closes on outside click.
+ */
 function showRemindersPanel(): void {
   // Toggle: if already open, close.
   const existing = document.getElementById(REMINDERS_PANEL_ID);
@@ -2312,6 +2385,16 @@ function showRemindersPanel(): void {
 /** Detaches showMapFilterPanel's window message listener. See fp-close-btn. */
 let _mapFilterPanelCleanup: (() => void) | null = null;
 
+/**
+ * Build and show the full floating Map Filters panel (position/chat/text
+ * filters with live auto-save). Reuses FP_ID, so it's mutually exclusive with
+ * the floating quick-action panel. Settings come from untrusted page
+ * localStorage (shape-checked via readLocalJson; term lists escHtml'd before
+ * innerHTML). Applies changes to the MAIN world via postMessage (CustomEvents
+ * don't cross worlds) tagged with _source to avoid echo loops, and registers a
+ * window 'message' sync listener (guarded on event.source === window) tracked
+ * in _mapFilterPanelCleanup so it can't leak.
+ */
 function showMapFilterPanel(): void {
   if (document.getElementById(FP_ID)) return; // already showing something
   if (_mapFilterPanelCleanup) { _mapFilterPanelCleanup(); _mapFilterPanelCleanup = null; }
@@ -2624,12 +2707,16 @@ let lastUrl = location.href;
 // could leave behind 10 pending retries that all fight over the DOM.
 const _profileActionTimers: ReturnType<typeof setTimeout>[] = [];
 const _PROFILE_ACTION_TIMERS_MAX = 10;
+/** Cancel every pending profile-action retry timer (called on SPA navigation so
+ * stale retries don't paint actions for a profile the user already left). */
 function clearProfileActionTimers(): void {
   while (_profileActionTimers.length) {
     const t = _profileActionTimers.pop();
     if (t) clearTimeout(t);
   }
 }
+/** Track a profile-action retry timer, evicting the oldest past a hard cap of
+ * _PROFILE_ACTION_TIMERS_MAX so rapid navigation can't accumulate closures. */
 function addProfileActionTimer(t: ReturnType<typeof setTimeout>): void {
   if (_profileActionTimers.length >= _PROFILE_ACTION_TIMERS_MAX) {
     const old = _profileActionTimers.shift();
@@ -2638,6 +2725,11 @@ function addProfileActionTimer(t: ReturnType<typeof setTimeout>): void {
   _profileActionTimers.push(t);
 }
 
+/**
+ * Detect an SPA URL change since the last tick and, when it changed, refresh
+ * the profile-action UI for the new route. Cheap to call on an interval.
+ * @returns nothing
+ */
 function checkUrlChange() {
   if (!contextValid) return;
   const url = location.href;
@@ -2736,6 +2828,12 @@ function checkUrlChange() {
 //      text that's not the timestamp
 //   4. Always logs result counts so we can see in the console whether the
 //      scrape is finding rows even when 0 messages are emitted
+/**
+ * Scrape the currently-open chat panel's messages from the DOM as a fallback
+ * when the WebSocket feed missed them, returning normalized rows for upsert.
+ * Guarded so a malformed DOM node can't abort the scan.
+ * @returns an array of scraped message rows (possibly empty)
+ */
 function scrapeChatPanel() {
   if (!contextValid || !checkContext()) return;
 
@@ -2984,6 +3082,12 @@ window.addEventListener('popstate', checkUrlChange);
 // AND the bar isn't already painted, inject. If the container goes
 // away, remove the bar. Independent of the URL path entirely — works
 // on every overlay variant.
+/**
+ * Resolve the profile the user is currently viewing from the DOM/route, with
+ * its container element for anchoring the action bar. Serializes DOM on a
+ * throttled path; returns null when no profile is confidently identified.
+ * @returns `{ contactId, container }` or null
+ */
 function activeProfileFromDom(): { contactId: string; container: HTMLElement | null } | null {
   // v0.57.43: composer-first detection. The previous URL+container path
   // missed the case the user keeps hitting — Sniffies' /chat route renders
@@ -3029,6 +3133,12 @@ function activeProfileFromDom(): { contactId: string; container: HTMLElement | n
 }
 
 let _lastDomInjectId = '';
+/**
+ * DOM-driven poll (every 1.5s) that injects/removes the inline profile-action
+ * bar based on whether a Sniffies profile/chat container is currently open —
+ * independent of the URL path, so it catches overlay variants the URL matcher
+ * in checkUrlChange misses. Re-injects only when the active contact changes.
+ */
 function tickDomDrivenProfileActions(): void {
   if (!contextValid) return;
   const found = activeProfileFromDom();
@@ -3110,6 +3220,11 @@ setTimeout(tickDomDrivenProfileActions, 1200);
 let seedInFlight = false;
 let _lastSeedProfileCount = -1;  // skip log when count unchanged
 
+/**
+ * Seed synthetic timestamps for chat rows lacking them so ordering stays
+ * stable before the WebSocket supplies real times. Best-effort; never throws.
+ * @returns nothing
+ */
 function seedChatTimestamps(): void {
   if (!contextValid) return;
   if (seedInFlight) {
@@ -3194,6 +3309,12 @@ registerBackgroundTimer(setInterval(seedChatTimestamps, 60_000));    // refresh 
 // Outside that region the events fall through and any existing handlers
 // (Alt+Shift+right-click for phrase capture, native context menu) keep
 // working. This is the trackpad-friendly equivalent of middle-click.
+/**
+ * Whether an event target sits inside the Sniffies chat composer, so a
+ * middle-click / Shift+right-click gesture there should trigger a random intro.
+ * Matches the "Say something…" placeholder, composer wrapper classes, or an
+ * ancestor placeholder. @param target - Event target. @returns true if in-composer.
+ */
 function isChatComposerTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   // Direct match: Sniffies' chat input has placeholder "Say something…"
@@ -3216,6 +3337,12 @@ function isChatComposerTarget(target: EventTarget | null): boolean {
   return false;
 }
 
+/**
+ * Fire a SEND_GREETING for the profile in the current /profile/{hex} URL and
+ * show a confirmation toast with the queued delay. No-op (returns false) when
+ * not on a profile URL. The sendMessage is wrapped so a context-invalidated
+ * throw can't escape. @returns true if a greeting was dispatched.
+ */
 function dispatchRandomIntroFromGesture(): boolean {
   const match = location.pathname.match(/\/profile\/([0-9a-f]{6,})/i);
   if (!match) return false;

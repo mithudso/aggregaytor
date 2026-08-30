@@ -46,6 +46,18 @@ function failAllPending(reason: Error): void {
   }
 }
 
+/**
+ * Handles one inbound frame from the debug bridge, correlating it to a pending
+ * request by numeric `id` and settling that request.
+ *
+ * The frame is untrusted input from the bridge, so `JSON.parse` is wrapped:
+ * unparseable frames are logged to stderr and dropped rather than crashing the
+ * server. Frames without a numeric `id`, or whose `id` has no waiter, are
+ * silently ignored. A frame carrying `error` rejects; otherwise `result`
+ * resolves.
+ *
+ * @param raw - Raw WebSocket frame data.
+ */
 function handleBridgeMessage(raw: WebSocket.RawData): void {
   let msg: { id?: unknown; error?: unknown; result?: unknown };
   try {
@@ -62,6 +74,19 @@ function handleBridgeMessage(raw: WebSocket.RawData): void {
   else pending.resolve(msg.result);
 }
 
+/**
+ * Returns an open WebSocket to the debug bridge, reusing the live one or the
+ * in-flight handshake and only otherwise opening a new socket.
+ *
+ * Single-flight by design: concurrent callers during a handshake share one
+ * `connecting` promise so a second socket is never opened (which would orphan
+ * the first) and nothing is sent on a still-CONNECTING socket. On error/close
+ * every pending request is failed immediately instead of waiting out the
+ * per-request timeout. Connect, disconnect, and errors are logged to stderr.
+ *
+ * @returns The open socket.
+ * @throws If the socket errors or the bridge closes before it opens.
+ */
 async function connectWS(): Promise<WebSocket> {
   if (ws?.readyState === WebSocket.OPEN) return ws;
   // Callers arriving during a handshake must await it. Opening a second socket
@@ -72,16 +97,19 @@ async function connectWS(): Promise<WebSocket> {
     const socket = new WebSocket(`ws://localhost:${PORT}`);
     socket.on('open', () => {
       ws = socket;
+      console.error(`[aggregaytor-debug] bridge connected on port ${PORT}`);
       resolve(socket);
     });
     socket.on('message', handleBridgeMessage);
     socket.on('error', (err) => {
       const failure = new Error(`WebSocket error: ${err.message}`);
+      console.error('[aggregaytor-debug] bridge error:', err.message);
       if (ws === socket) ws = null;
       failAllPending(failure);
       reject(failure);
     });
     socket.on('close', () => {
+      console.error('[aggregaytor-debug] bridge disconnected');
       if (ws === socket) ws = null;
       // Without this, requests in flight when the extension goes away hang
       // for the full timeout instead of failing immediately.
@@ -95,6 +123,22 @@ async function connectWS(): Promise<WebSocket> {
   return connecting;
 }
 
+/**
+ * Sends a typed command to the bridge and resolves with the extension's
+ * response, or rejects on timeout/send failure.
+ *
+ * Connects (or reuses the connection) first, assigns a monotonic request id,
+ * and registers a `REQUEST_TIMEOUT_MS` timer whose handle is `unref`'d so a
+ * pending request never keeps the process alive at shutdown. `id`/`type` are
+ * serialized last so a like-named param cannot clobber the response
+ * correlation. A synchronous `socket.send` throw settles the request rather
+ * than leaking it.
+ *
+ * @param type - Command/tool name the bridge dispatches on.
+ * @param params - Command arguments (must not collide with `id`/`type`).
+ * @returns The `result` payload from the extension.
+ * @throws On request timeout, send failure, or a bridge-reported error.
+ */
 async function sendCommand(type: string, params: Record<string, unknown> = {}): Promise<unknown> {
   const socket = await connectWS();
   const id = ++requestId;
@@ -130,6 +174,8 @@ const server = new Server(
   { capabilities: { tools: {} } },
 );
 
+// Advertises the debug tools to the MCP client. Static list; each tool maps
+// 1:1 to a `type` the extension bridge dispatches on in `sendCommand`.
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
@@ -227,9 +273,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['selector'],
       },
     },
+    {
+      name: 'ops_list',
+      description: 'List every invocable operation (name, module, read/write kind) exposed through the reflective OPS_RUN surface. Use this to discover what ops_run can call without reading the source; full contracts are in docs/method-registry.json.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'ops_run',
+      description: 'Invoke one registered operation by name with positional args (e.g. name="store.getAllContacts", args=[]). Read operations run freely; state-mutating (write) operations require confirmWrite=true. Discover names with ops_list.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Namespaced operation name, e.g. "store.getThreadSummaries"' },
+          args: { type: 'array', description: 'Positional arguments applied to the operation (default [])' },
+          confirmWrite: { type: 'boolean', description: 'Required true to run a write-classified (state-mutating) operation' },
+        },
+        required: ['name'],
+      },
+    },
   ],
 }));
 
+// Forwards a tool call to the extension over the bridge and returns its result
+// as MCP text content. Any failure (bridge down, timeout, extension error) is
+// caught and returned as an `isError` result with a remediation hint, so a tool
+// call never throws out of the handler.
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
@@ -248,6 +316,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 // ── Start ───────────────────────────────────────────────────────────────────
 
+/**
+ * Boots the MCP server on stdio. The bridge WebSocket connects lazily on the
+ * first tool call, not here.
+ */
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);

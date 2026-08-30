@@ -56,6 +56,12 @@ const DEFAULT_STATE: ModelUpdaterState = {
   lastError: '',
 };
 
+/**
+ * Read the persisted model-updater state, merged over defaults so a partial or
+ * missing record still yields a complete object.
+ * @returns the effective {@link ModelUpdaterState}; a storage read failure is
+ *          deliberately swallowed (best-effort persistence) and returns defaults.
+ */
 export async function getUpdaterState(): Promise<ModelUpdaterState> {
   try {
     const got = await chrome.storage.local.get(STATE_KEY);
@@ -67,6 +73,13 @@ export async function getUpdaterState(): Promise<ModelUpdaterState> {
   return { ...DEFAULT_STATE };
 }
 
+/**
+ * Persist the model-updater state.
+ * @param state the full state to write.
+ * @returns nothing; a write failure is deliberately swallowed — this is a
+ *          background daily-sweep record, non-critical to lose, and the next
+ *          run rewrites it.
+ */
 export async function saveUpdaterState(state: ModelUpdaterState): Promise<void> {
   try { await chrome.storage.local.set({ [STATE_KEY]: state }); } catch {}
 }
