@@ -85,6 +85,13 @@ const DEFAULT_FILTERS: FFFilters = {
   autoApprove: false, // off by default — review-first is the safer default
 };
 
+/**
+ * Read the persisted Friend Finder config (filters, ignore list, enabled),
+ * normalized against defaults so a partial/missing/legacy record still yields
+ * a complete, type-safe object.
+ * @returns the effective {@link FFState}; a storage read failure is deliberately
+ *          swallowed (best-effort persistence) and returns defaults.
+ */
 export async function getFFState(): Promise<FFState> {
   try {
     const got = await chrome.storage.local.get(FF_STATE_KEY);
@@ -101,10 +108,21 @@ export async function getFFState(): Promise<FFState> {
   return { filters: { ...DEFAULT_FILTERS }, ignoreList: [], enabled: false, lastRunAt: 0 };
 }
 
+/**
+ * Persist the Friend Finder config.
+ * @param state the full {@link FFState} to write.
+ * @returns nothing; a write failure is deliberately swallowed (best-effort
+ *          persistence — the config re-derives from defaults if lost).
+ */
 export async function saveFFState(state: FFState): Promise<void> {
   try { await chrome.storage.local.set({ [FF_STATE_KEY]: state }); } catch {}
 }
 
+/**
+ * Merge a partial filter patch into the stored config and persist it.
+ * @param patch partial {@link FFFilters} to apply.
+ * @returns the updated {@link FFState}.
+ */
 export async function updateFFFilters(patch: Partial<FFFilters>): Promise<FFState> {
   const s = await getFFState();
   s.filters = { ...s.filters, ...patch };
@@ -112,6 +130,12 @@ export async function updateFFFilters(patch: Partial<FFFilters>): Promise<FFStat
   return s;
 }
 
+/**
+ * Add contact ids to the permanent ignore list (deduped) and persist, so
+ * dismissed profiles never resurface in a future build.
+ * @param ids contact ids to permanently ignore.
+ * @returns the updated {@link FFState}.
+ */
 export async function addToIgnoreList(ids: string[]): Promise<FFState> {
   const s = await getFFState();
   const set = new Set(s.ignoreList);
@@ -126,6 +150,13 @@ const DEFAULT_RUN_STATE: FFRunState = {
   startedAt: 0, lastSendAt: 0, nextSendAt: 0,
 };
 
+/**
+ * Read the live run state from `chrome.storage.session` (survives SW death
+ * within a session), normalized against defaults so a partial or legacy record
+ * can't hand the alarm tick a non-array `queue` and strand the run.
+ * @returns the effective {@link FFRunState}; a read failure is deliberately
+ *          swallowed and returns the idle default.
+ */
 export async function getRunState(): Promise<FFRunState> {
   try {
     const got = await chrome.storage.session.get(FF_RUN_KEY);
@@ -148,13 +179,31 @@ export async function getRunState(): Promise<FFRunState> {
   return { ...DEFAULT_RUN_STATE };
 }
 
+/**
+ * Persist the live run state to `chrome.storage.session`.
+ * @param runState the full {@link FFRunState} to write.
+ * @returns nothing; a write failure is deliberately swallowed (best-effort —
+ *          the next tick re-reads and re-normalizes).
+ */
 export async function setRunState(runState: FFRunState): Promise<void> {
   try { await chrome.storage.session.set({ [FF_RUN_KEY]: runState }); } catch {}
 }
 
 /**
- * Apply filters to a list of contact docs and return ranked candidates.
- * Caller passes everything we need so this module stays pure-data.
+ * Filter a contact set to intro-eligible candidates and rank them (distance
+ * ascending, then most-recently-active). The caller injects every dependency
+ * (metas, message presence, ignore list, map filters, preference scorer, stats
+ * renderer) so this module stays pure-data and unit-testable. Pure — no logging;
+ * a throwing `preferenceScore` is caught per-contact and treated as neutral (0.5).
+ * @param contacts candidate contact docs.
+ * @param metaByContactId per-contact thread-meta lookup (archived/blocked/deletes).
+ * @param hasMessagesByContactId set of contact ids we've already chatted with.
+ * @param ignoreList permanently-ignored contact ids to exclude.
+ * @param filters active {@link FFFilters}.
+ * @param mapFilterSettings opaque map-filter settings for inheritance.
+ * @param preferenceScore ML preference scorer, 0..1 (higher = better).
+ * @param buildStatsLine renders the pre-formatted stats line for a candidate.
+ * @returns ranked {@link FFCandidate}[], capped at `filters.maxCandidates`.
  */
 export function rankCandidates(
   contacts: Array<{ id: string; platform: string; displayName: string; avatarUrl: string; metadata: any; lastSeen?: string }>,
@@ -225,9 +274,13 @@ export function rankCandidates(
 }
 
 /**
- * Apply the user's existing map-filter settings (position/text rules) to a contact.
- * Mirrors the logic in sniffies-map-filters.ts shouldHideAttitude / matchesTerms,
- * inverted (we INCLUDE iff the marker would NOT be hidden by current filters).
+ * Whether a contact would survive the user's existing map-filter rules
+ * (position/text excludes). Mirrors sniffies-map-filters.ts
+ * shouldHideAttitude / matchesTerms, inverted: we INCLUDE iff the marker would
+ * NOT be hidden by current filters. Pure — no logging.
+ * @param c contact doc (reads `metadata.attitude/position/profileText`).
+ * @param settings opaque map-filter settings (hide flags + exclude terms).
+ * @returns true if the contact passes (is not hidden by) the filters.
  */
 function passesMapFilters(c: any, settings: any): boolean {
   const md = c.metadata || {};
@@ -253,14 +306,25 @@ function passesMapFilters(c: any, settings: any): boolean {
   return true;
 }
 
-/** Compute a jittered next-send delay in ms. */
+/**
+ * Compute a jittered next-send delay so the paced greeting loop doesn't fire on
+ * a robotic fixed cadence. Floored at 15s regardless of settings. Pure — no logging.
+ * @param filters run filters supplying `paceSeconds` and `paceJitterPercent`.
+ * @returns the delay in milliseconds (>= 15000).
+ */
 export function nextDelayMs(filters: FFFilters): number {
   const baseMs = filters.paceSeconds * 1000;
   const jitter = baseMs * (filters.paceJitterPercent / 100);
   return Math.max(15_000, Math.round(baseMs + (Math.random() * 2 - 1) * jitter));
 }
 
-/** Estimate ms remaining for a queue. */
+/**
+ * Estimate the wall-clock time to drain a send queue at the configured pace,
+ * for the UI's "time remaining" readout. Pure — no logging.
+ * @param queueLen number of sends still queued.
+ * @param filters run filters supplying `paceSeconds`.
+ * @returns estimated milliseconds remaining (0 for an empty queue).
+ */
 export function estimateRemainingMs(queueLen: number, filters: FFFilters): number {
   if (queueLen <= 0) return 0;
   return queueLen * filters.paceSeconds * 1000;

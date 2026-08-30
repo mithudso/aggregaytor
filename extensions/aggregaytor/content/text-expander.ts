@@ -85,6 +85,12 @@ const DEFAULT_SUBSTITUTIONS: Substitution[] = [
 // Build a fast lookup map from shortcut → phrase
 let shortcutMap = new Map<string, string>();
 
+/**
+ * Rebuild the fast shortcut→phrase lookup map from the current `substitutions`
+ * array. Treats every row as untrusted (page-origin localStorage or a forgeable
+ * CustomEvent), skipping any entry that isn't a non-empty {shortcut, phrase}
+ * string pair so one bad row can't throw out of module init.
+ */
 function rebuildMap(): void {
   shortcutMap.clear();
   // `substitutions` can come from page-origin localStorage or from a
@@ -99,8 +105,17 @@ function rebuildMap(): void {
 }
 
 /**
- * Check if the text before the cursor ends with a shortcut, and if so,
- * replace it with the expanded phrase.
+ * Check whether the text immediately before the cursor in an <input>/<textarea>
+ * ends with a known shortcut and, if so, replace it with the expanded phrase.
+ *
+ * WHY the prototype dance: uses the element's OWN prototype `value` setter so
+ * React/Angular-controlled inputs register the change (calling the textarea
+ * setter on an <input> throws "Illegal invocation"), then re-fires input/change
+ * events. Cursor repositioning is best-effort — setSelectionRange throws on
+ * input types that don't support selection, so it must not abort an expansion
+ * that already succeeded.
+ * @param input the focused text field whose value may be expanded.
+ * @returns true if an expansion was applied, false otherwise.
  */
 function tryExpand(input: HTMLTextAreaElement | HTMLInputElement): boolean {
   if (!expanderEnabled || !shortcutMap.size) return false;
@@ -144,7 +159,11 @@ function tryExpand(input: HTMLTextAreaElement | HTMLInputElement): boolean {
 }
 
 /**
- * Also handle contenteditable elements (some platforms use these instead of textarea).
+ * Shortcut-expansion path for contenteditable composers (some platforms use
+ * these instead of <textarea>). Operates on the caret's current text node,
+ * rewriting its textContent and repositioning the selection.
+ * @param el the contenteditable host element receiving input.
+ * @returns true if an expansion was applied, false otherwise.
  */
 function tryExpandContentEditable(el: HTMLElement): boolean {
   if (!expanderEnabled || !shortcutMap.size) return false;
@@ -182,6 +201,12 @@ function tryExpandContentEditable(el: HTMLElement): boolean {
 
 // ── Event Listener ─────────────────────────────────────────────────────────
 
+/**
+ * Document-level capture-phase input handler. Only proceeds when the last
+ * keystroke was the trigger (a space or a line break), then dispatches to the
+ * textarea/input or contenteditable expansion path based on the event target.
+ * @param e the input event (checked for InputEvent trigger data).
+ */
 function handleInput(e: Event): void {
   const target = e.target as HTMLElement;
   if (!target) return;
@@ -200,6 +225,12 @@ function handleInput(e: Event): void {
 
 // ── Settings Update ────────────────────────────────────────────────────────
 
+// Relayed by the ISOLATED bridge when the user edits substitutions or toggles
+// the expander in Settings. event.detail is untrusted (a page script could
+// forge this CustomEvent), so each field is shape-checked before use: the
+// substitutions array is only accepted when it's actually an array (rebuildMap
+// then filters bad rows), and `enabled` is coerced to a boolean. The localStorage
+// write is wrapped so a storage failure can't abort the settings update.
 window.addEventListener('__aggregaytor_text_expander_settings', ((event: CustomEvent) => {
   const update = event.detail;
   if (Array.isArray(update?.substitutions)) {
@@ -214,6 +245,15 @@ window.addEventListener('__aggregaytor_text_expander_settings', ((event: CustomE
 
 // ── Initialization ─────────────────────────────────────────────────────────
 
+/**
+ * Initialize the text expander in the MAIN world: load substitutions and the
+ * enabled preference from (untrusted, page-origin) localStorage with validation
+ * and defaults, build the lookup map, and attach the document-level input
+ * listener. On macOS the expander auto-disables (native Text Substitutions
+ * already covers it) unless the user has an explicit stored preference. Every
+ * localStorage/JSON.parse path is wrapped so a malformed stored value falls back
+ * to DEFAULT_SUBSTITUTIONS instead of aborting the rest of MAIN-world init.
+ */
 export function initTextExpander(): void {
   // Load from localStorage (synced from chrome.storage via bridge).
   // localStorage is page-origin storage — the host page can write anything to

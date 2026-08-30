@@ -6,6 +6,17 @@ import type { PictureDoc } from './types.js';
 import { getDB } from './db.js';
 import type { StoreDatabase } from './db.js';
 
+/**
+ * Add an image to the picture library.
+ *
+ * Engagement counters (sent/response/like) start at zero. The `_id` is
+ * `pic:{timestamp}-{random}`. `thumbnail` falls back to `dataUrl` when the
+ * caller supplies no separate thumbnail.
+ *
+ * @param input  Picture fields; `tag` defaults to 'other' when empty.
+ * @param db     Optional store override.
+ * @returns The newly written PictureDoc.
+ */
 export async function addPicture(
   input: { tag: string; label: string; dataUrl?: string; filePath?: string; thumbnail?: string },
   db?: StoreDatabase,
@@ -32,6 +43,13 @@ export async function addPicture(
   return doc;
 }
 
+/**
+ * List all pictures, optionally filtered to a single tag.
+ *
+ * @param tag  Restrict to this category tag; omit for the whole library.
+ * @param db   Optional store override.
+ * @returns Matching PictureDocs (unsorted).
+ */
 export async function getAllPictures(
   tag?: string,
   db?: StoreDatabase,
@@ -43,6 +61,14 @@ export async function getAllPictures(
   return result.docs as PictureDoc[];
 }
 
+/**
+ * Fetch one picture by _id, or null if it doesn't exist.
+ *
+ * @param id  Picture _id.
+ * @param db  Optional store override.
+ * @returns The PictureDoc, or null on a 404.
+ * @throws Re-throws any non-404 store error.
+ */
 export async function getPicture(
   id: string,
   db?: StoreDatabase,
@@ -56,6 +82,18 @@ export async function getPicture(
   }
 }
 
+/**
+ * Increment one engagement counter on a picture (and stamp `lastSentAt` when
+ * the counter is `sentCount`).
+ *
+ * Feeds the "which pictures perform best" ranking used by getPictureByTag and
+ * the auto-responder.
+ *
+ * @param id    Picture _id.
+ * @param stat  Which counter to bump.
+ * @param db    Optional store override.
+ * @throws If the picture does not exist (propagates the store's 404).
+ */
 export async function incrementPictureStat(
   id: string,
   stat: 'sentCount' | 'responseCount' | 'likeCount',
@@ -68,6 +106,13 @@ export async function incrementPictureStat(
   await store.put(doc);
 }
 
+/**
+ * Delete a picture by _id.
+ *
+ * @param id  Picture _id to remove.
+ * @param db  Optional store override.
+ * @throws If the picture does not exist (the `get` propagates the store's 404).
+ */
 export async function deletePicture(
   id: string,
   db?: StoreDatabase,
@@ -77,6 +122,14 @@ export async function deletePicture(
   await store.remove(doc);
 }
 
+/**
+ * Pick one picture from a tag, rotating usage by returning the
+ * least-recently-sent match (so the auto-responder doesn't spam the same image).
+ *
+ * @param tag  Category tag to choose from.
+ * @param db   Optional store override.
+ * @returns The least-recently-sent picture with this tag, or null if none exist.
+ */
 export async function getPictureByTag(
   tag: string,
   db?: StoreDatabase,

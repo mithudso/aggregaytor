@@ -32,6 +32,21 @@ export function buildLshBuckets(signature: number[], opts: LshOptions = {}): str
   return output;
 }
 
+/**
+ * Estimates Jaccard similarity between two MinHash signatures as the fraction
+ * of positions that match.
+ *
+ * This is the MinHash estimator: over enough hash functions, the share of
+ * equal signature entries approximates the sets' Jaccard index. Compares over
+ * the shorter of the two lengths so mismatched-length signatures still yield a
+ * value rather than throwing.
+ *
+ * Deterministic and pure. Empty/invalid inputs are guarded and return 0.
+ *
+ * @param a - First MinHash signature.
+ * @param b - Second MinHash signature.
+ * @returns Similarity in [0, 1]; 0 when either input is empty or not an array.
+ */
 export function estimateSignatureSimilarity(a: number[], b: number[]): number {
   if (!Array.isArray(a) || !Array.isArray(b) || !a.length || !b.length) return 0;
   const len = Math.min(a.length, b.length);
@@ -42,6 +57,20 @@ export function estimateSignatureSimilarity(a: number[], b: number[]): number {
   return matches / len;
 }
 
+/**
+ * Computes the exact Jaccard index of two token multisets treated as sets:
+ * |A ∩ B| / |A ∪ B|.
+ *
+ * Used alongside the MinHash estimate as a second, exact near-duplicate signal
+ * in `dedupeContextRecords` (a candidate matches if either score clears its
+ * threshold). Exact rather than estimated, so no signature length dependence.
+ *
+ * Deterministic and pure. Empty/invalid inputs return 0.
+ *
+ * @param aTokens - First token list (deduped internally via Set).
+ * @param bTokens - Second token list (deduped internally via Set).
+ * @returns Jaccard index in [0, 1]; 0 when either input is empty or not an array.
+ */
 export function estimateTokenJaccard(aTokens: string[], bTokens: string[]): number {
   if (!Array.isArray(aTokens) || !Array.isArray(bTokens)) return 0;
   if (!aTokens.length || !bTokens.length) return 0;

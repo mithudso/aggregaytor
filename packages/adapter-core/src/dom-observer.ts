@@ -30,6 +30,13 @@ export function createDOMExtractor(
   // Hoisted both `cleanup` and `attachObserver` above the early return.
   let cleanup: (() => void) | null = null;
 
+  /**
+   * Attach the real message-watching MutationObserver to `element` and store
+   * its disconnect in `cleanup`. Disconnects any previously-attached observer
+   * first so a late second attach never orphans the first.
+   *
+   * @param element - The resolved root container to observe for message nodes.
+   */
   function attachObserver(element: Element) {
     // Defensive: never orphan a previously-attached observer by overwriting
     // `cleanup` with a second one.

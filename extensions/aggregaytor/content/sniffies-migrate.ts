@@ -33,6 +33,18 @@ interface BookmarkEntry {
   updatedAt?: number | string;
 }
 
+/**
+ * Coerce an untrusted timestamp value (legacy sniffiesplus localStorage) into
+ * an ISO 8601 string, or null when it can't be parsed.
+ *
+ * WHY: the legacy store recorded timestamps inconsistently — some as epoch
+ * seconds, some as epoch milliseconds, some as date strings. Values <1e12 are
+ * treated as seconds and scaled up. Input is untrusted page data, so anything
+ * non-numeric/non-parseable yields null rather than a bogus Date.
+ *
+ * @param val - Raw value from parsed localStorage JSON (number, string, or other).
+ * @returns ISO 8601 timestamp, or null if val is falsy/unparseable.
+ */
 function parseTs(val: unknown): string | null {
   if (!val) return null;
   if (typeof val === 'number') {
@@ -46,6 +58,11 @@ function parseTs(val: unknown): string | null {
   return null;
 }
 
+/**
+ * Build a canonical Sniffies profile URL from a hex profile id.
+ * @param id - Lowercased hex profile id.
+ * @returns Absolute https://sniffies.com/profile/{id} URL.
+ */
 function profileUrl(id: string): string {
   return `https://sniffies.com/profile/${id}`;
 }
@@ -67,6 +84,21 @@ function requestLocalStorageKey(key: string): Promise<string | null> {
   }
 }
 
+/**
+ * One-shot migration of legacy sniffiesplus localStorage into the Aggregaytor
+ * PouchDB store (via the service worker).
+ *
+ * Runs in ISOLATED world at document_start. Reads three legacy keys directly
+ * from page-origin localStorage (untrusted — every JSON.parse is wrapped and a
+ * failure of one section is logged and skipped without aborting the others),
+ * synthesises placeholder contacts + timestamp-only messages, and hands them to
+ * the SW. The MIGRATION_DONE_KEY marker is only written when EVERY hand-off
+ * succeeded, so a transient SW-not-ready failure retries on the next page load
+ * rather than silently dropping the user's bookmarks/notes/timestamps.
+ *
+ * @returns Resolves when migration completes or is deliberately deferred to a
+ *          later load; never rejects (all failure paths are logged internally).
+ */
 async function runMigration(): Promise<void> {
   // Check if already migrated
   const done = await chrome.storage.local.get(MIGRATION_DONE_KEY);

@@ -35,3 +35,6 @@ jobs:
 
       - name: Doc index drift check
         run: pnpm run index:check
+
+      - name: Method registry drift + doc-coverage check
+        run: pnpm run registry:check

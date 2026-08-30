@@ -37,10 +37,19 @@ export const DOSSIER_CATEGORIES = {
 
 export type DossierCategory = keyof typeof DOSSIER_CATEGORIES;
 
+/** Build the ContactDossierDoc _id for a contact: `dossier:{contactId}`. */
 function dossierId(contactId: string): string {
   return `dossier:${contactId}`;
 }
 
+/**
+ * Fetch a contact's full dossier, or null if none exists yet.
+ *
+ * @param contactId  Contact whose dossier to load.
+ * @param db         Optional store override.
+ * @returns The ContactDossierDoc, or null on a 404.
+ * @throws Re-throws any non-404 store error.
+ */
 export async function getDossier(
   contactId: string,
   db?: StoreDatabase,
@@ -54,6 +63,22 @@ export async function getDossier(
   }
 }
 
+/**
+ * Create or update a contact's dossier, merging `updates` over the stored doc
+ * (or over DEFAULT_DOSSIER on first write).
+ *
+ * Array fields (kinks, otherProfileLinks, partnerNames, meetingDates) and the
+ * `autoExtracted` map are UNION-merged rather than replaced, so an update never
+ * drops previously-known facts. `_rev` is carried forward for a conflict-free
+ * write.
+ *
+ * @param contactId  Contact the dossier is about.
+ * @param platform   Platform (used only when creating).
+ * @param updates    Partial dossier fields to apply.
+ * @param db         Optional store override.
+ * @returns The written ContactDossierDoc.
+ * @throws Re-throws any non-404 error from the existing-doc read.
+ */
 export async function upsertDossier(
   contactId: string,
   platform: Platform,

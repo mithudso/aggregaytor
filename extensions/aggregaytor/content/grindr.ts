@@ -31,7 +31,14 @@ const { dom, compose } = grindr;
 const photoHashToProfileId = new Map<string, string>();
 const PHOTO_HASH_MAP_MAX = 10_000;
 
-// Getter that checks both the adapter's global map and our local one
+/**
+ * Resolve a Grindr photo hash to a profileId, preferring the adapter's global
+ * `window.__grindr_hash_map` (fed by pre-page-load fetch patching, so it has
+ * cascade data we might miss) and falling back to our local supplement map.
+ *
+ * @param hash - Photo/media hash extracted from a CDN image URL.
+ * @returns The profileId, or `''` if unknown in either map.
+ */
 function lookupProfileId(hash: string): string {
   // Check adapter's map first (has cascade API data we might miss)
   const w = window as any;
@@ -42,6 +49,11 @@ function lookupProfileId(hash: string): string {
   return photoHashToProfileId.get(hash) || '';
 }
 
+/**
+ * Insert a hash→profileId pair into the local map with a simple FIFO cap
+ * ({@link PHOTO_HASH_MAP_MAX}) to bound memory on long cascade-scrolling
+ * sessions. Hot path (called per profile per API response) — no logging.
+ */
 function cappedHashSet(hash: string, pid: string): void {
   photoHashToProfileId.set(hash, pid);
   if (photoHashToProfileId.size > PHOTO_HASH_MAP_MAX) {
@@ -50,6 +62,14 @@ function cappedHashSet(hash: string, pid: string): void {
   }
 }
 
+/**
+ * Extract every (photoHash → profileId) pairing from one profile-shaped API
+ * object and index it via {@link cappedHashSet}, so a later middle-click on a
+ * cascade image can be resolved to a profileId. Tolerant of Grindr's several
+ * hash field names/shapes. Hot path (runs over every fetch response) — no logging.
+ *
+ * @param obj - A single object from a walked grindr.com JSON response.
+ */
 function indexProfileFromPayload(obj: Record<string, unknown>): void {
   const pid = String(obj.profileId || obj.profileID || '');
   if (!pid || !/^\d+$/.test(pid)) return;
@@ -85,6 +105,17 @@ function indexProfileFromPayload(obj: Record<string, unknown>): void {
 // lookups are serviced in-process by the `__aggregaytor_block_by_hash`
 // handler below.
 
+/**
+ * Forward an adapter event to the ISOLATED-world bridge (MAIN world).
+ *
+ * WHY: MAIN-world scripts cannot call `chrome.*`; the bridge relays this
+ * `window` CustomEvent to the service worker. The payload is JSON deep-cloned so
+ * it crosses the structured-clone boundary and carries no live references. The
+ * catch is intentionally silent — a serialization failure on this fire-and-
+ * forget path must not throw and break the adapter's emit loop.
+ *
+ * @param message - Plain, JSON-serializable message object to relay.
+ */
 function sendToBridge(message: Record<string, unknown>): void {
   try {
     window.dispatchEvent(
@@ -99,6 +130,15 @@ function sendToBridge(message: Record<string, unknown>): void {
 
 const GRINDR_BRIDGE_RESPONSE_EVENT = '__aggregaytor_grindr_bridge_response';
 
+/**
+ * Reply to a bridge-originated request (see grindr-bridge's
+ * `relayMainWorldRequest`) by echoing its `requestId` alongside the result.
+ * JSON-cloned for the same cross-world safety as {@link sendToBridge}; the catch
+ * is intentionally silent (a dropped response is handled by the bridge timeout).
+ *
+ * @param requestId - Correlation id minted by the bridge for this request.
+ * @param payload - Result object to hand back to the bridge.
+ */
 function sendBridgeResponse(requestId: string, payload: Record<string, unknown>): void {
   try {
     window.dispatchEvent(new CustomEvent(GRINDR_BRIDGE_RESPONSE_EVENT, {
@@ -107,6 +147,14 @@ function sendBridgeResponse(requestId: string, payload: Record<string, unknown>)
   } catch {}
 }
 
+/**
+ * Best-effort scan of `localStorage` for a Grindr auth token — used only as a
+ * fallback when the adapter's fetch observer hasn't captured a `Grindr3` header
+ * yet. Tries a list of well-known keys, then any JWT-shaped value, then any
+ * JSON blob with a token field. Each JSON parse is guarded.
+ *
+ * @returns The raw token string, or `''` if none found.
+ */
 function findTokenFromStorage(): string {
   const keys = ['authToken', 'auth-token', 'grindrAuthToken', 'session', 'grindrSession', 'access_token', 'accessToken', 'token'];
   for (const key of keys) {
@@ -127,6 +175,14 @@ function findTokenFromStorage(): string {
   return '';
 }
 
+/**
+ * Assemble the auth headers to attach to direct Grindr API calls, preferring
+ * the adapter's captured `Grindr3` header and falling back to a token dug out of
+ * localStorage ({@link findTokenFromStorage}). Never exposes the token on
+ * `window`.
+ *
+ * @returns `{ authHeaders, authSource }` where authSource is `'adapter' | 'localStorage' | 'none'`.
+ */
 function resolveGrindrAuthHeaders(): { authHeaders: Record<string, string>; authSource: string } {
   const authHeaders: Record<string, string> = {};
   const captured = getCapturedAuth('grindr.com');
@@ -146,6 +202,15 @@ function resolveGrindrAuthHeaders(): { authHeaders: Record<string, string>; auth
   return { authHeaders, authSource: 'none' };
 }
 
+/**
+ * Recursively walk an arbitrary API response and collect every plausible
+ * profileId (5+ digit numeric strings, either bare or under a known id key).
+ * Deliberately permissive because block/hide/favorite endpoints vary in shape
+ * across API versions. Pure — no side effects, no logging.
+ *
+ * @param data - Any JSON value from a Grindr endpoint.
+ * @returns Deduped list of profileId strings.
+ */
 function extractProfileIds(data: unknown): string[] {
   if (!data) return [];
   const ids: string[] = [];
@@ -178,6 +243,16 @@ function extractProfileIds(data: unknown): string[] {
   return [...new Set(ids)];
 }
 
+/**
+ * Import the user's Grindr block / hide / favorite lists as ML training signal
+ * (blocks & hides = negative, favorites = positive). Paginates each candidate
+ * endpoint until a page yields no new ids. Per-request failures are captured
+ * into the returned `debug` array (and the loop breaks) rather than thrown, so a
+ * single dead endpoint can't abort the whole import.
+ *
+ * @returns `{ results, debug, authSource }` — labelled ids, per-URL debug rows, and how auth was resolved.
+ * @throws Never; network/HTTP failures are recorded in `debug`.
+ */
 async function fetchGrindrTrainingImport(): Promise<{
   results: Array<{ profileId: string; liked: boolean; source: string }>;
   debug: Array<{ url: string; status: number; keys: string[]; count: number; sample: unknown }>;
@@ -255,6 +330,18 @@ async function fetchGrindrTrainingImport(): Promise<{
   return { results, debug, authSource };
 }
 
+/**
+ * Fetch full profile records for a batch of profileIds, one at a time with a
+ * jittered delay between calls to stay under Grindr's rate limits. Bails the
+ * whole batch on the first 401/403 (dead session) so we don't hammer a logged-
+ * out endpoint; other per-id errors are recorded and the loop continues.
+ *
+ * @param batch - profileIds to fetch.
+ * @param delayMs - Base delay between requests.
+ * @param jitterMs - +/- random jitter added to each delay.
+ * @returns `{ noAuth, results }`; `noAuth` is true when no auth header was available (nothing fetched).
+ * @throws Never; per-request failures are captured in `results`.
+ */
 async function fetchGrindrProfiles(
   batch: string[],
   delayMs: number,
@@ -297,6 +384,9 @@ async function fetchGrindrProfiles(
   return { noAuth: false, results };
 }
 
+// Bridge→MAIN request: run the training-data import and reply on the same
+// requestId. `requestId` is validated present; a rejected import still replies
+// with `ok: false` so the bridge's pending promise never hangs to timeout.
 window.addEventListener('__aggregaytor_grindr_import_request', ((event: CustomEvent) => {
   const { requestId } = event.detail || {};
   if (!requestId) return;
@@ -313,6 +403,9 @@ window.addEventListener('__aggregaytor_grindr_import_request', ((event: CustomEv
     });
 }) as EventListener);
 
+// Bridge→MAIN request: fetch a batch of profiles and reply on the same
+// requestId. `requestId` is validated present; a rejected fetch still replies
+// with `ok: false` so the bridge's pending promise never hangs to timeout.
 window.addEventListener('__aggregaytor_grindr_profile_fetch_request', ((event: CustomEvent) => {
   const { requestId, batch = [], delayMs = 0, jitterMs = 0 } = event.detail || {};
   if (!requestId) return;
@@ -330,6 +423,8 @@ window.addEventListener('__aggregaytor_grindr_profile_fetch_request', ((event: C
 
 const adapter = new GrindrAdapter({ platform: 'grindr' });
 
+// Relay parsed messages to the bridge and opportunistically index
+// conversationId→profileId from message metadata for middle-click block lookup.
 adapter.on('messages', (event) => {
   console.log(`${LOG} Messages captured:`, (event.payload as any[]).length);
   // Index profileIds from message metadata for middle-click block lookup
@@ -345,6 +440,8 @@ adapter.on('messages', (event) => {
   });
 });
 
+// Relay parsed contacts to the bridge and index avatar photo-hash→profileId
+// pairs for middle-click block lookup.
 adapter.on('contacts', (event) => {
   console.log(`${LOG} Contacts captured:`, (event.payload as any[]).length);
   // Index photo hashes for middle-click profile ID lookup
@@ -476,6 +573,11 @@ window.addEventListener('__aggregaytor_block_by_fiber', ((event: CustomEvent) =>
   // React attaches fiber references as __reactFiber$<hash> and props as
   // __reactProps$<hash>. We walk up the fiber's .return chain, inspecting
   // memoizedProps / stateNode on each ancestor until we find a numeric id.
+  /**
+   * Walk the React fiber tree upward from `startEl` and pull the first 7+ digit
+   * numeric profileId out of common Grindr prop shapes. Bounded to 30 ancestors.
+   * @returns The profileId, or `''` if the element has no fiber or none is found.
+   */
   const findProfileIdInFiber = (startEl: HTMLElement): string => {
     const anyEl: any = startEl;
     const keys = Object.keys(anyEl).filter(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
@@ -570,6 +672,11 @@ const MIN_INTERVAL_CEIL_MS = 600_000;
 const MAX_PER_HOUR_FLOOR = 1;
 const MAX_PER_HOUR_CEIL = 2000;
 
+/**
+ * Coerce an untrusted value to a finite number clamped to `[lo, hi]`, or return
+ * `fallback` if it isn't a finite number. Pure — used to sanitize forgeable /
+ * corrupt rate-limit settings before they reach `setTimeout`.
+ */
 function clampNumber(value: unknown, fallback: number, lo: number, hi: number): number {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -608,6 +715,15 @@ let blockLimiter = grindr.limiterFactory({
   maxPerHour: blockSettings.maxPerHour,
 });
 
+/**
+ * Show a transient status toast bottom-right (block-queue feedback: rate limits,
+ * forced re-login, auth capture). `text` is set via `textContent` (not innerHTML)
+ * so it is not an injection sink. The whole body is wrapped so a DOM failure
+ * (e.g. no `document.body` yet) can never break the caller's queue logic.
+ *
+ * @param text - Message to display.
+ * @param kind - Visual severity: `'ok' | 'warn' | 'err'` (default `'warn'`).
+ */
 function showGrindrToast(text: string, kind: 'ok' | 'warn' | 'err' = 'warn'): void {
   try {
     const ID = 'aggregaytor-grindr-toast';
@@ -635,6 +751,15 @@ function showGrindrToast(text: string, kind: 'ok' | 'warn' | 'err' = 'warn'): vo
 // which are not guaranteed to be hex — filter to a selector-safe charset.
 const SELECTOR_SAFE_HASH = /^[A-Za-z0-9._~-]+$/;
 
+/**
+ * After a successful block/hide, fade out and hide the corresponding cascade
+ * card(s) for `profileId`. Resolves cards via the reverse of the hash map,
+ * filtering hashes to a selector-safe charset ({@link SELECTOR_SAFE_HASH}) so a
+ * non-hex conversationId key can't throw a DOMException in the attribute
+ * selector. Purely cosmetic — never calls the network.
+ *
+ * @param profileId - The blocked profileId whose visible cards should disappear.
+ */
 function removeBlockedCardFromDom(profileId: string): void {
   setTimeout(() => {
     const targetHashes: string[] = [];
@@ -663,6 +788,17 @@ function removeBlockedCardFromDom(profileId: string): void {
   }, 300);
 }
 
+/**
+ * Drain the block/hide queue one profileId at a time through the
+ * @aggregaytor/grindr-lib limiter (pacing + hourly cap), honoring the backoff
+ * window and the session-dead flag. Handles the outcome of each hide call as a
+ * state transition: 401/403 → mark session dead, re-enqueue, watch for the login
+ * form, and stop; 429 → 30s backoff and retry; other errors → drop the id. A
+ * successful call after a dead flag clears it (canary recovery). Re-entrant-safe
+ * via `queueProcessing`. All branches log via {@link LOG}.
+ *
+ * @throws Never; hide failures are classified and handled inline.
+ */
 async function processBlockQueue(): Promise<void> {
   if (queueProcessing) return;
   queueProcessing = true;
@@ -751,6 +887,10 @@ async function processBlockQueue(): Promise<void> {
   }
 }
 
+/**
+ * Add a profileId to the block/hide queue (deduped via `blockQueueSet`) and kick
+ * the drain loop. No-ops if already queued.
+ */
 function enqueueBlock(profileId: string): void {
   if (blockQueueSet.has(profileId)) return;
   blockQueueSet.add(profileId);
@@ -817,6 +957,13 @@ window.addEventListener('__aggregaytor_grindr_block_settings', ((event: CustomEv
 let loginWatchObserver: MutationObserver | null = null;
 let loginFillInFlight = false;
 
+/**
+ * Heuristically decide whether the page is currently Grindr's login screen,
+ * used to gate auto-fill and to detect successful re-login. Checks the URL path
+ * and the presence of a rendered email/username + password field pair.
+ *
+ * @returns `true` if a login form appears to be present.
+ */
 function isLoginScreen(): boolean {
   // Grindr's login page varies. Check several markers.
   if (/\/login|\/signin|\/auth/i.test(location.pathname)) return true;
@@ -829,6 +976,16 @@ function isLoginScreen(): boolean {
   return !!(emailEl && pwEl && document.body?.contains(emailEl) && document.body?.contains(pwEl));
 }
 
+/**
+ * If the user opted into auto-login, ask the service worker to decrypt the
+ * stored Grindr credentials and fill+submit the login form, then optimistically
+ * resume the paused block queue once login appears to succeed.
+ *
+ * WHY: Grindr force-logs-out on inactivity or block bursts; this saves the user
+ * re-typing. Raw credentials only ever live in this closure for the brief fill.
+ * Re-entrancy is guarded by `loginFillInFlight`; the whole body is try/finally
+ * so the flag is always cleared and a decrypt/DOM error is logged, not thrown.
+ */
 async function attemptAutoFill(): Promise<void> {
   if (loginFillInFlight) return;
   loginFillInFlight = true;
@@ -904,6 +1061,15 @@ async function attemptAutoFill(): Promise<void> {
 
 let loginWatchTimeout: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * Watch the DOM for Grindr's login form appearing and trigger {@link attemptAutoFill}.
+ *
+ * WHY: injected at `document_start`, so `document.body` may be null on first
+ * call — observing a null root throws and (running at module top level) would
+ * abort the rest of the module, so we defer to `DOMContentLoaded` instead. The
+ * observer self-disconnects after 30s and re-arms 60s after a detected login to
+ * bound its lifetime. Idempotent while an observer is already active.
+ */
 function watchForLoginForm(): void {
   if (loginWatchObserver) return;
   if (isLoginScreen()) { attemptAutoFill(); return; }

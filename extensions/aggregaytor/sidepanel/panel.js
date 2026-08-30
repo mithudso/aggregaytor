@@ -19,10 +19,33 @@ const _PANEL_NOISE_PATTERNS = [
   /no 'access-control-allow-origin'/i,
   /^(?:typeerror: )?failed to fetch$/i,
 ];
+/**
+ * Test whether an error message matches a known browser-emitted noise pattern
+ * (CORS/preflight/"Failed to fetch") that we already handle gracefully.
+ *
+ * WHY: the browser logs these synchronously before our try/catch can see the
+ * rejection, so without this filter the SW error log fills with false alarms.
+ *
+ * @param {*} message - Any value; coerced to string before matching.
+ * @returns {boolean} True if the message should be suppressed from the log.
+ */
 function _isPanelNoise(message) {
   const s = String(message || '');
   return _PANEL_NOISE_PATTERNS.some(re => re.test(s));
 }
+/**
+ * Forward a panel-side error to the service worker's rolling error log via
+ * chrome.runtime.sendMessage, unless it matches a known-noise pattern.
+ *
+ * WHY: lets us diagnose panel bugs from the exported JSON log instead of
+ * asking the user to copy DevTools output. Fully defensive — a failed or
+ * rejected send must never itself throw (it would re-enter the error path).
+ *
+ * @param {string} level - Log severity tag ('unhandled' | 'rejection' | 'error').
+ * @param {string} message - Human-readable error message.
+ * @param {string} [stack] - Optional stack trace.
+ * @returns {void}
+ */
 function _panelForwardError(level, message, stack) {
   if (_isPanelNoise(message)) return;
   try {
@@ -72,6 +95,16 @@ let currentMessages = [];
 // is hidden (collapsed sidebar, different tab), the 5s sweep is skipped so
 // we don't burn CPU repeatedly walking a stable DOM that the user can't
 // see. The panel is hidden roughly half the time for most users.
+/**
+ * Convert every element's native `title` attribute into a `data-tip` attribute
+ * so our CSS tooltips render instantly instead of after Chrome's ~2s delay.
+ * Also mirrors the title into `aria-label` for unlabeled buttons.
+ *
+ * WHY: hot-path DOM sweep — short-circuits when the panel is hidden to avoid
+ * burning CPU walking a stable DOM the user can't see.
+ *
+ * @returns {void}
+ */
 function convertTitlesToTips() {
   if (document.visibilityState === 'hidden') return;
   document.querySelectorAll('[title]').forEach(el => {
@@ -103,6 +136,17 @@ document.addEventListener('visibilitychange', () => {
 // v0.57.61: Lightweight toast for action feedback. Used by block-rule and
 // other settings actions that previously failed silently inside
 // `try {} catch {}` blocks, leaving the user thinking buttons were dead.
+/**
+ * Show a transient toast at the bottom-center of the panel for action feedback.
+ *
+ * WHY: block-rule and other settings actions previously failed silently inside
+ * `try {} catch {}`, leaving the user thinking buttons were dead.
+ *
+ * @param {string} message - Text to display.
+ * @param {'info'|'success'|'error'|'warn'} [kind='info'] - Color scheme.
+ * @param {number} [durationMs=2200] - How long the toast stays before fading.
+ * @returns {void} Fully defensive — never throws even if the DOM is unavailable.
+ */
 function showSpToast(message, kind = 'info', durationMs = 2200) {
   try {
     let host = document.getElementById('sp-toast-host');
@@ -130,6 +174,20 @@ function showSpToast(message, kind = 'info', durationMs = 2200) {
 // shape ({ ok, error? } at minimum) and any sync throw or rejection becomes
 // a structured error rather than crashing the click handler. Surfaces a
 // toast on failure so users see what broke instead of a dead button.
+/**
+ * Safe wrapper around chrome.runtime.sendMessage: always resolves to a defined
+ * `{ ok, error? }` shape, races against a timeout, and surfaces failures via a
+ * toast + forwarded console.error instead of crashing the click handler.
+ *
+ * WHY: a wedged/suspended SW handler must never leave the panel UI blank
+ * forever, and users should see what broke rather than a dead button.
+ *
+ * @param {object} msg - The message object (must carry a `type`).
+ * @param {object} [opts]
+ * @param {boolean} [opts.silent=false] - Suppress the failure toast when true.
+ * @param {number} [opts.timeoutMs=15000] - Max wait before returning a timeout error.
+ * @returns {Promise<{ok: boolean, error?: string, [k: string]: any}>} Never rejects.
+ */
 async function spSend(msg, { silent = false, timeoutMs = 15000 } = {}) {
   try {
     // v0.57.64: race chrome.runtime.sendMessage against a timeout so a wedged
@@ -226,20 +284,37 @@ let savedScrollTop = 0; // #13 scroll position memory
 
 // Debounce helpers — prevent rapid-fire reloads
 let _newMsgTimer = null;
+/**
+ * Debounced trigger for a full inbox reload (2s window).
+ * WHY: coalesces bursts of NEW_MESSAGES broadcasts into a single reload.
+ * @returns {void}
+ */
 function debouncedLoadThreads() {
   clearTimeout(_newMsgTimer);
   _newMsgTimer = setTimeout(() => loadThreads(), 2000); // 2s debounce (was 500ms)
 }
 let _threadReloadTimer = null;
+/**
+ * Debounced reload of the currently-open thread's messages (3s window).
+ * WHY: re-fetches messages for the active contact after a burst of updates.
+ * No-op when no thread is open. The SW round-trip is `.catch`-guarded so a
+ * failed fetch leaves the current render intact rather than throwing.
+ * @returns {void}
+ */
 function debouncedReloadThread() {
   clearTimeout(_threadReloadTimer);
   _threadReloadTimer = setTimeout(() => {
     if (!currentThread) return;
     chrome.runtime.sendMessage({ type: 'GET_MESSAGES_BY_CONTACT', contactId: currentThread.contactId, limit: 500 })
-      .then(res => { if (res?.ok) { currentMessages = res.messages || []; renderMessages(currentMessages); } }).catch(() => {});
+      .then(res => { if (res?.ok) { currentMessages = res.messages || []; renderMessages(currentMessages); } })
+      .catch((err) => { console.error('[Panel] debouncedReloadThread failed:', err); });
   }, 3000); // 3 second debounce — no need to reload faster
 }
 let _draftsTimer = null;
+/**
+ * Debounced trigger for reloading the drafts list (2s window).
+ * @returns {void}
+ */
 function debouncedLoadDrafts() {
   clearTimeout(_draftsTimer);
   _draftsTimer = setTimeout(() => loadDrafts(), 2000);
@@ -307,6 +382,18 @@ function renderInboxDisabledPlaceholder() {
 // superseded before it gets to mutate shared state.
 let _loadThreadsSeq = 0;
 
+/**
+ * Load, filter, sort, and render the unified inbox thread list; also update
+ * per-platform unread/total chip badges.
+ *
+ * WHY: this is the heaviest read path in the panel (GET_THREAD_SUMMARIES +
+ * GET_ALL_THREAD_META). Uses a monotonic sequence guard so an older, slower
+ * scan can't overwrite a newer render, a 60s timeout per request, and routes
+ * every failure mode (no response / SW error / sync throw) to an actionable
+ * error card via renderInboxLoadError.
+ *
+ * @returns {Promise<void>} Resolves once rendering (or the error card) is done.
+ */
 async function loadThreads() {
   // v0.57.74: respect the "disable unified inbox" preference. Skips the
   // GET_THREAD_SUMMARIES + GET_ALL_THREAD_META queries entirely (the two
@@ -432,11 +519,24 @@ const AUTO_ESCALATION_STEPS = [
   { label: 'Reloading extension',                action: 'reload',  run: () => chrome.runtime.reload() },
 ];
 
+/**
+ * Kick off a database maintenance job (COMPACT_DB or REBUILD_DB) via the SW,
+ * then poll GET_COMPACT_STATUS until it finishes and re-run loadThreads().
+ *
+ * WHY: used by the inbox auto-escalation ladder — a compaction/rebuild can
+ * outlive an SW suspension, so we poll rather than await a single response.
+ * The poll loop is bounded (600 ticks) and every send is try/caught so a
+ * dropped message channel just ends the poll instead of throwing.
+ *
+ * @param {'COMPACT_DB'|'REBUILD_DB'} type - The maintenance message type.
+ * @returns {Promise<void>} Resolves when done, errored, or the poll bails.
+ */
 async function kickOffAndPollCompact(type) {
   try {
     const start = await chrome.runtime.sendMessage({ type, trigger: 'auto-escalation' });
     if (!start?.ok) throw new Error(start?.error || 'SW refused');
-  } catch {
+  } catch (err) {
+    console.error('[Panel] kickOffAndPollCompact start failed:', type, err);
     return;
   }
   // Poll status until done, then trigger loadThreads
@@ -468,6 +568,17 @@ async function kickOffAndPollCompact(type) {
 // button manually. Each consecutive failure climbs one step up the
 // ladder: Retry → Free Mem → Compact → Rebuild → Reload. The status
 // banner names the action and the countdown so the user can intervene.
+/**
+ * Render the actionable inbox-load-failure card and start the auto-escalation
+ * countdown that fires the next recovery step if the user doesn't act.
+ *
+ * WHY: replaces frozen skeletons with an explanation + recovery buttons
+ * (Retry → Free Mem → Compact → Rebuild → Reload, plus Disable Inbox). Each
+ * consecutive failure (tracked in `_inboxFailureCount`) climbs one rung.
+ *
+ * @param {string} reason - Human-readable failure reason shown in the card.
+ * @returns {void}
+ */
 function renderInboxLoadError(reason) {
   _inboxFailureCount++;
   const container = document.getElementById('thread-list');
@@ -636,6 +747,17 @@ function renderInboxLoadError(reason) {
   });
 }
 
+/**
+ * Filter thread summaries against the current `filters` state and the archive
+ * view mode (search text, body type, position, distance, unread, favorites…).
+ *
+ * WHY: the inbox always fetches ALL summaries (so badge counts stay correct)
+ * and narrows client-side here. Archive view shows only archived; all other
+ * views hide archived and hidden-until-response threads.
+ *
+ * @param {Array<object>} summaries - Thread summary objects to filter.
+ * @returns {Array<object>} The subset matching all active filters.
+ */
 function applyFilters(summaries) {
   const showingArchive = currentPlatform === 'archived';
   return summaries.filter(t => {
@@ -688,6 +810,16 @@ function applyFilters(summaries) {
   });
 }
 
+/**
+ * Return a new array of thread summaries sorted by the current `currentSort`
+ * mode (recent, distance, interest, commitment, unread, name).
+ *
+ * WHY: favorites always float to the top regardless of sort mode; the rest
+ * order by the selected key. Non-mutating (copies before sort).
+ *
+ * @param {Array<object>} summaries - Thread summaries to sort.
+ * @returns {Array<object>} A new, sorted array.
+ */
 function sortThreads(summaries) {
   return [...summaries].sort((a, b) => {
     const metaA = allThreadMeta.get(a.contactId) || {};
@@ -727,6 +859,17 @@ function sortThreads(summaries) {
   });
 }
 
+/**
+ * Render the thread-list DOM from pre-filtered/pre-sorted summaries, including
+ * avatars, badges, action icons, empty states, and all click/hover handlers.
+ *
+ * WHY: single source of truth for inbox row markup. Handles the empty case
+ * (with a blocked-and-archived recovery hint) and wires per-row click, action-
+ * icon, favorite-star, and debounced hover-preview listeners.
+ *
+ * @param {Array<object>} summaries - Thread summaries to render.
+ * @returns {void}
+ */
 function renderThreads(summaries) {
   const container = document.getElementById('thread-list');
   const showingArchive = currentPlatform === 'archived';
@@ -942,6 +1085,17 @@ const HOVER_CACHE_TTL = 30_000; // 30 seconds
 // any entry past the cap on every get), the cache stays well-bounded.
 const HOVER_CACHE_MAX_ENTRIES = 30;
 
+/**
+ * Insert a rendered hover-preview entry into the bounded FIFO cache, evicting
+ * the oldest entry first when at capacity.
+ *
+ * WHY: pre-fix the Map grew unbounded, accumulating hundreds of ~1-5KB HTML
+ * strings (with inline avatar URLs) over a long browsing session.
+ *
+ * @param {string} contactId - Cache key.
+ * @param {{html: string, ts: number}} entry - Rendered HTML plus insert time.
+ * @returns {void}
+ */
 function setHoverPreviewCache(contactId, entry) {
   if (hoverPreviewCache.size >= HOVER_CACHE_MAX_ENTRIES) {
     const next = hoverPreviewCache.keys().next();
@@ -954,6 +1108,13 @@ function setHoverPreviewCache(contactId, entry) {
 // reading; drops every entry whose ts is past HOVER_CACHE_TTL so we don't
 // hold stale HTML strings (with their inline avatar URLs) for hours after
 // the last hover. Cheap — Map iteration of ≤30 entries.
+/**
+ * Drop every hover-preview cache entry older than HOVER_CACHE_TTL.
+ * WHY: opportunistic TTL prune (called before each read) so we don't hold
+ * stale HTML with inline avatar URLs for hours after the last hover. Cheap —
+ * iterates ≤30 entries.
+ * @returns {void}
+ */
 function pruneExpiredHoverCache() {
   const now = Date.now();
   for (const [k, v] of hoverPreviewCache) {
@@ -961,6 +1122,20 @@ function pruneExpiredHoverCache() {
   }
 }
 
+/**
+ * Populate a thread row's hover-preview panel with the contact's profile,
+ * recent photos, notes, and last few messages; serve from cache when fresh.
+ *
+ * WHY: uses GET_CONTACT (single PouchDB.get) + a small GET_MESSAGES_BY_CONTACT
+ * instead of re-running the full summaries scan — ~200ms cheaper per hover.
+ * On any SW/render failure it shows an inline "Preview unavailable" fallback.
+ *
+ * @param {string} contactId - Contact whose preview to render.
+ * @param {string} platform - Platform id (for the platform icon).
+ * @param {HTMLElement} previewEl - The `.hover-preview` element to fill.
+ * @param {HTMLElement} threadEl - The owning thread row (currently unused).
+ * @returns {Promise<void>}
+ */
 async function loadHoverPreview(contactId, platform, previewEl, threadEl) {
   pruneExpiredHoverCache();
   // Check cache first
@@ -1033,11 +1208,27 @@ async function loadHoverPreview(contactId, platform, previewEl, threadEl) {
     // Cache the rendered preview (v0.57.15: bounded by HOVER_CACHE_MAX_ENTRIES)
     setHoverPreviewCache(contactId, { html: previewEl.innerHTML, ts: Date.now() });
   } catch (err) {
+    console.error('[Panel] loadHoverPreview failed:', contactId, err);
     previewEl.innerHTML = '<div class="hp-loading">Preview unavailable</div>';
   }
 }
 
+/**
+ * Handle an inbox row action-icon click (favorite, like, dislike, bookmark,
+ * archive/unarchive, hide, greet, autorespond, notes) by dispatching the
+ * corresponding SW message and reloading the inbox where the row changes.
+ *
+ * WHY: single dispatcher for every per-thread quick action. Wrapped so a
+ * failed SW round-trip is logged with context instead of becoming a silent
+ * unhandled rejection.
+ *
+ * @param {string} action - The `data-action` value from the clicked icon.
+ * @param {string} contactId - Target contact.
+ * @param {string} platform - Target platform.
+ * @returns {Promise<void>}
+ */
 async function handleAction(action, contactId, platform) {
+  try {
   switch (action) {
     case 'favorite': {
       const meta = allThreadMeta.get(contactId) || {};
@@ -1112,10 +1303,31 @@ async function handleAction(action, contactId, platform) {
       }, 100);
       break;
   }
+  } catch (err) {
+    console.error('[Panel] handleAction failed:', action, contactId, err);
+    showSpToast(`Action "${action}" failed`, 'error');
+  }
 }
 
 // ── Thread detail ───────────────────────────────────────────────────────────
 
+/**
+ * Open the thread-detail view for a contact: switch views, load meta/notes/
+ * reminders/profile/dossier, fetch and render messages, and (optionally)
+ * navigate the platform tab to the conversation.
+ *
+ * WHY: central entry point from inbox clicks and the ACTIVE_PROFILE_CHANGED
+ * listener. `opts.suppressNavigate` prevents a redundant navigate→popstate→
+ * ACTIVE_PROFILE_CHANGED loop when the platform tab is already the source.
+ * Lazily triggers LLM nickname generation only after 10+ inbound messages.
+ *
+ * @param {string} contactId - Contact whose thread to open.
+ * @param {string} platform - Platform id.
+ * @param {string} displayName - Header title / fallback name.
+ * @param {object} [opts]
+ * @param {boolean} [opts.suppressNavigate] - Skip NAVIGATE_TO_CONVERSATION.
+ * @returns {Promise<void>}
+ */
 async function openThread(contactId, platform, displayName, opts = {}) {
   // v0.57.34: opts.suppressNavigate skips the NAVIGATE_TO_CONVERSATION
   // message back to the SW. Used by the ACTIVE_PROFILE_CHANGED listener
@@ -1212,11 +1424,22 @@ async function openThread(contactId, platform, displayName, opts = {}) {
             renderMessages(currentMessages);
           }
         }
-      } catch {}
+      } catch (err) { console.error('[Panel] SCRAPE_CONVERSATION failed:', err); }
     }, 3000); // Wait for SPA navigation to load the conversation
   }
 }
 
+/**
+ * Load and render the thread-detail profile card (avatar, attribute chips,
+ * photos, star rating, notes) for a contact, wiring the per-profile photo-sync
+ * button when no avatar is present.
+ *
+ * WHY: runs GET_THREAD_META + GET_CONTACT in parallel. On failure it just
+ * deactivates the card (logged) rather than throwing out of openThread.
+ *
+ * @param {string} contactId - Contact whose profile to render.
+ * @returns {Promise<void>}
+ */
 async function loadProfileInfo(contactId) {
   const el = document.getElementById('profile-info');
   try {
@@ -1287,17 +1510,28 @@ async function loadProfileInfo(contactId) {
             // Wait a bit for async ADAPTER_CONTACTS → upsertContact to complete
             // The CONTACTS_UPDATED listener will also trigger a refresh
             setTimeout(() => loadProfileInfo(contactId), 2000);
-          } catch {
+          } catch (err) {
+            console.error('[Panel] SYNC_PROFILE_PICS failed:', err);
             syncBtn.textContent = '📷 Failed — try opening their profile manually';
           }
         }, 4000);
       });
     }
-  } catch {
+  } catch (err) {
+    console.error('[Panel] loadProfileInfo failed:', contactId, err);
     el.classList.remove('active');
   }
 }
 
+/**
+ * Request sentiment + preference + summary analysis for the open thread's last
+ * 50 messages from the SW and render the three result panels.
+ *
+ * WHY: no-op unless a thread is open with messages. Analysis failures are
+ * non-fatal (warn-logged) — the panels simply don't update.
+ *
+ * @returns {Promise<void>}
+ */
 async function loadThreadAnalysis() {
   if (!currentThread || !currentMessages.length) return;
 
@@ -1321,9 +1555,16 @@ async function loadThreadAnalysis() {
   } catch (err) { console.warn('[Panel] Analysis error:', err); }
 }
 
+/**
+ * Render the sentiment panel (interest/engaged/commit bars + signal chips).
+ * Pure formatting helper — no-op when `s` is falsy.
+ * @param {{interest:number,engagement:number,commitment:number,signals?:string[]}} s
+ * @returns {void}
+ */
 function renderSentiment(s) {
   if (!s) return;
   const el = document.getElementById('sentiment-display');
+  /** Build one labeled sentiment bar. @param {string} label @param {number} value 0-1 @returns {string} */
   const barHtml = (label, value) => {
     const pct = Math.round(value * 100);
     const cls = pct > 65 ? 'high' : pct > 35 ? 'medium' : 'low';
@@ -1338,6 +1579,12 @@ function renderSentiment(s) {
     (s.signals?.length ? `<div class="sentiment-signals">${s.signals.slice(0, 3).map(esc).join(' | ')}</div>` : '');
 }
 
+/**
+ * Render the match-preference score panel (percentage + like/neutral/dislike
+ * label + low-confidence hint). Pure formatting helper; no-op when `p` falsy.
+ * @param {{score:number,confidence:number}} p
+ * @returns {void}
+ */
 function renderPreference(p) {
   if (!p) return;
   const el = document.getElementById('preference-display');
@@ -1348,6 +1595,12 @@ function renderPreference(p) {
     (p.confidence < 0.3 ? `<div class="pref-confidence">Low confidence (need more feedback)</div>` : '');
 }
 
+/**
+ * Render the conversation summary text and the commitments list (shown only
+ * when present). Pure formatting helper; no-op when `summary` is falsy.
+ * @param {{text?:string,commitments?:string[]}} summary
+ * @returns {void}
+ */
 function renderSummary(summary) {
   if (!summary) return;
   const el = document.getElementById('convo-summary');
@@ -1366,22 +1619,53 @@ function renderSummary(summary) {
 document.getElementById('pref-like').addEventListener('click', () => recordPrefAction(true));
 document.getElementById('pref-dislike').addEventListener('click', () => recordPrefAction(false));
 
+/**
+ * Record an explicit like/dislike preference for the open thread and re-run
+ * the analysis so the preference panel reflects the new feedback.
+ *
+ * WHY: user-driven training signal. No-op when no thread is open. The SW
+ * round-trip is try/caught so a failure logs instead of rejecting the handler.
+ *
+ * @param {boolean} liked - True for like, false for dislike.
+ * @returns {Promise<void>}
+ */
 async function recordPrefAction(liked) {
   if (!currentThread) return;
-  await chrome.runtime.sendMessage({
-    type: 'RECORD_PREFERENCE',
-    contactId: currentThread.contactId,
-    platform: currentThread.platform,
-    liked,
-  });
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'RECORD_PREFERENCE',
+      contactId: currentThread.contactId,
+      platform: currentThread.platform,
+      liked,
+    });
+  } catch (err) {
+    console.error('[Panel] recordPrefAction failed:', err);
+  }
   loadThreadAnalysis();
 }
 
+/**
+ * Render the thread-detail header action toolbar (bookmark, notes, dossier,
+ * reminder, archive, hide, greet, autorespond) honoring the toolbar display
+ * mode, and wire each icon's click handler.
+ *
+ * WHY: notes/reminder/dossier toggle their inline sections locally; the rest
+ * delegate to handleAction against the current thread.
+ *
+ * @returns {void}
+ */
 function renderHeaderActions() {
   const container = document.getElementById('header-actions');
   const m = currentMeta || {};
   // Toolbar display mode: icon, icon-text, or text
   const mode = prefToolbarMode;
+  /**
+   * Build one toolbar-button HTML string honoring the current display mode.
+   * @param {string} icon - Emoji/icon glyph.
+   * @param {string} label - Human label; also lowercased into `data-action`.
+   * @param {string} [extra=''] - Extra class fragment (e.g. ' active').
+   * @returns {string} The button markup.
+   */
   function tb(icon, label, extra = '') {
     if (mode === 'text') return `<span class="action-icon toolbar-text${extra}" data-action="${label.toLowerCase()}" title="${label}">${label}</span>`;
     if (mode === 'icon-text') return `<span class="action-icon toolbar-icon-text${extra}" data-action="${label.toLowerCase()}" title="${label}">${icon} ${label}</span>`;
@@ -1435,6 +1719,19 @@ function readHiddenMsgIds() {
   }
 }
 
+/**
+ * Render the message list for the open thread (chronological), with date
+ * separators, direction bubbles, per-message hide toggles, and global-chat
+ * layout when the thread has many distinct senders.
+ *
+ * WHY: hot render path — pure DOM building plus handler wiring, so it does not
+ * log. Persisted hidden-message ids are read/written through the guarded
+ * readHiddenMsgIds/localStorage helpers so bad state can't blank the view.
+ * Respects auto-scroll lock (only scrolls to bottom when already near it).
+ *
+ * @param {Array<object>} messages - UnifiedMessage-shaped objects to render.
+ * @returns {void}
+ */
 function renderMessages(messages) {
   const container = document.getElementById('message-list');
   if (!messages?.length) {
@@ -1516,6 +1813,12 @@ function renderMessages(messages) {
   });
 }
 
+/**
+ * Heuristic: does this message set come from 3+ distinct senders (i.e. a
+ * group/global chat rather than a 1:1 DM)? Pure helper. Short-circuits at 3.
+ * @param {Array<object>} messages - Messages to inspect.
+ * @returns {boolean} True if 3+ distinct sender ids are seen.
+ */
 function isMultiSenderThread(messages) {
   // If there are 3+ distinct sender IDs in metadata, it's probably a group/global chat
   const senders = new Set();
@@ -1527,6 +1830,12 @@ function isMultiSenderThread(messages) {
   return false;
 }
 
+/**
+ * Build the HTML for a single global/group-chat message row (sender avatar,
+ * attribute line, time/distance, body). Pure formatting helper.
+ * @param {object} msg - A UnifiedMessage from a multi-sender thread.
+ * @returns {string} The row markup.
+ */
 function renderGlobalChatMessage(msg) {
   const md = msg.metadata || {};
   const senderId = md.profileId || md.senderId || '';
@@ -1566,6 +1875,15 @@ function renderGlobalChatMessage(msg) {
 
 // ── Draft review ────────────────────────────────────────────────────────────
 
+/**
+ * Fetch pending auto-response drafts from the SW and toggle the draft bar +
+ * count badge accordingly.
+ *
+ * WHY: drives the "N drafts awaiting review" affordance. On failure it logs
+ * and returns an empty list so callers can treat "no drafts" uniformly.
+ *
+ * @returns {Promise<Array<object>>} The drafts (empty array on error).
+ */
 async function loadDrafts() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_DRAFTS' });
@@ -1579,12 +1897,21 @@ async function loadDrafts() {
       document.getElementById('draft-panel').style.display = 'none';
     }
     return drafts;
-  } catch { return []; }
+  } catch (err) { console.error('[Panel] loadDrafts failed:', err); return []; }
 }
 
 // Draft bar click handler
 document.getElementById('draft-bar').addEventListener('click', toggleDraftPanel);
 
+/**
+ * Toggle the draft-review panel: build a card per pending draft with editable
+ * body + approve/reject buttons, or collapse when open/empty.
+ *
+ * WHY: approve sends the (possibly edited) text via APPROVE_DRAFT; reject
+ * discards via REJECT_DRAFT. Both refresh the draft list afterward.
+ *
+ * @returns {Promise<void>}
+ */
 async function toggleDraftPanel() {
   const panel = document.getElementById('draft-panel');
   if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
@@ -1646,7 +1973,7 @@ document.getElementById('btn-resync').addEventListener('click', async () => {
         type: 'GET_MESSAGES_BY_CONTACT', contactId: currentThread.contactId, limit: 500,
       });
       if (res?.ok) { currentMessages = res.messages || []; renderMessages(currentMessages); }
-    } catch {}
+    } catch (err) { console.error('[Panel] resync message reload failed:', err); }
     btn.textContent = '↻ Resync';
     btn.disabled = false;
   }, 4000);
@@ -1693,6 +2020,12 @@ document.getElementById('btn-clear-thread').addEventListener('click', async () =
   renderMessages([]);
 });
 
+/**
+ * Return from thread-detail to the inbox: clear thread state, swap view
+ * classes, reset the header title to the version tag, reload the inbox, and
+ * restore the saved scroll position.
+ * @returns {void}
+ */
 function goBack() {
   currentThread = null; currentMessages = []; currentMeta = null;
   document.body.classList.remove('view-thread');
@@ -1716,15 +2049,25 @@ document.getElementById('notes-input').addEventListener('input', () => {
 });
 document.getElementById('notes-input').addEventListener('blur', saveNotes);
 
+/**
+ * Persist the notes textarea for the open thread (debounced input + blur).
+ * WHY: no-op when no thread is open. The SW write is guarded so a failed save
+ * logs instead of surfacing as an unhandled rejection from the input handler.
+ * @returns {Promise<void>}
+ */
 async function saveNotes() {
   if (!currentThread) return;
   const notes = document.getElementById('notes-input').value;
-  await chrome.runtime.sendMessage({
-    type: 'UPSERT_THREAD_META',
-    contactId: currentThread.contactId,
-    platform: currentThread.platform,
-    updates: { notes },
-  });
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'UPSERT_THREAD_META',
+      contactId: currentThread.contactId,
+      platform: currentThread.platform,
+      updates: { notes },
+    });
+  } catch (err) {
+    console.error('[Panel] saveNotes failed:', err);
+  }
 }
 
 // ── Dossier ─────────────────────────────────────────────────────────────────
@@ -1756,6 +2099,15 @@ const DOSSIER_FIELDS = [
   { key: 'partnerNames', label: 'Partners', type: 'text', isArray: true },
 ];
 
+/**
+ * Load the per-contact dossier and render the editable field grid (from
+ * DOSSIER_FIELDS), including auto-extracted badges and expand/collapse state.
+ *
+ * WHY: each field auto-saves on change/blur via saveDossierField. On failure
+ * the section is hidden (logged) rather than left half-rendered.
+ *
+ * @returns {Promise<void>}
+ */
 async function loadDossier() {
   if (!currentThread) return;
   const section = document.getElementById('dossier-section');
@@ -1796,11 +2148,20 @@ async function loadDossier() {
       el.addEventListener('change', saveDossierField);
       el.addEventListener('blur', saveDossierField);
     });
-  } catch {
+  } catch (err) {
+    console.error('[Panel] loadDossier failed:', err);
     section.style.display = 'none';
   }
 }
 
+/**
+ * Persist a single edited dossier field, coercing array (comma-split) and
+ * boolean (Yes/No) values to their stored shapes first.
+ * WHY: change/blur auto-save handler for each dossier input. Guarded so a
+ * failed write logs rather than rejecting out of the DOM event.
+ * @param {Event} e - The change/blur event; `e.target` carries the value.
+ * @returns {Promise<void>}
+ */
 async function saveDossierField(e) {
   if (!currentThread) return;
   const el = e.target;
@@ -1816,12 +2177,16 @@ async function saveDossierField(e) {
   if (value === 'Yes') value = true;
   if (value === 'No') value = false;
 
-  await chrome.runtime.sendMessage({
-    type: 'UPSERT_DOSSIER',
-    contactId: currentThread.contactId,
-    platform: currentThread.platform,
-    updates: { [field]: value },
-  });
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'UPSERT_DOSSIER',
+      contactId: currentThread.contactId,
+      platform: currentThread.platform,
+      updates: { [field]: value },
+    });
+  } catch (err) {
+    console.error('[Panel] saveDossierField failed:', field, err);
+  }
 }
 
 document.getElementById('dossier-extract').addEventListener('click', async () => {
@@ -1842,7 +2207,8 @@ document.getElementById('dossier-extract').addEventListener('click', async () =>
     } else {
       btn.textContent = 'Failed';
     }
-  } catch {
+  } catch (err) {
+    console.error('[Panel] EXTRACT_DOSSIER failed:', err);
     btn.textContent = 'Error';
   }
   setTimeout(() => { btn.textContent = 'Auto-fill from chat'; btn.disabled = false; }, 2000);
@@ -1867,11 +2233,24 @@ document.getElementById('reminder-save').addEventListener('click', async () => {
   loadReminders();
 });
 
+/**
+ * Load and render the reminder list for the open thread, wiring per-item
+ * delete buttons.
+ * WHY: no-op when no thread is open. A failed fetch logs and clears the list
+ * (guarded so it can't reject out of openThread's fire-and-forget call).
+ * @returns {Promise<void>}
+ */
 async function loadReminders() {
   if (!currentThread) return;
-  const res = await chrome.runtime.sendMessage({
-    type: 'GET_REMINDERS', opts: { contactId: currentThread.contactId },
-  });
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({
+      type: 'GET_REMINDERS', opts: { contactId: currentThread.contactId },
+    });
+  } catch (err) {
+    console.error('[Panel] loadReminders failed:', err);
+    res = null;
+  }
   const list = document.getElementById('reminder-list');
   if (!res?.ok || !res.reminders?.length) { list.innerHTML = ''; return; }
   list.innerHTML = res.reminders.map(r => `
@@ -1890,6 +2269,15 @@ async function loadReminders() {
 
 // ── Suggestions ─────────────────────────────────────────────────────────────
 
+/**
+ * Ask the SW to generate reply suggestions from the last 30 messages and
+ * render them as clickable chips that populate the response input.
+ *
+ * WHY: no-op unless a thread with messages is open. On failure it shows an
+ * inline error label (logged) rather than throwing from the click handler.
+ *
+ * @returns {Promise<void>}
+ */
 async function generateSuggestions() {
   if (!currentThread || !currentMessages.length) return;
   const btn = document.getElementById('suggest-btn');
@@ -1914,6 +2302,7 @@ async function generateSuggestions() {
       });
     });
   } catch (err) {
+    console.error('[Panel] generateSuggestions failed:', err);
     suggestionsEl.innerHTML = '<div class="label">Error generating suggestions</div>';
     suggestionsEl.classList.add('active');
   }
@@ -1929,6 +2318,13 @@ document.getElementById('filter-toggle').addEventListener('click', () => {
   document.getElementById('filter-toggle').setAttribute('aria-expanded', expanded ? 'true' : 'false');
 });
 
+/**
+ * Read every filter control into the global `filters` state, update the
+ * active-filter count badge, and reload the inbox.
+ * WHY: single sync point between the filter UI and the client-side applyFilters
+ * pass. Debounced upstream for the search input (see the input listener).
+ * @returns {void}
+ */
 function readFilters() {
   filters.searchText = document.getElementById('filter-search').value.trim();
   filters.bodyType = Array.from(document.getElementById('filter-body').selectedOptions).map(o => o.value);
@@ -1994,6 +2390,12 @@ document.getElementById('back-btn').addEventListener('click', () => {
   if (settingsOpen) closeSettings();
   else goBack();
 });
+/**
+ * Sync each platform chip's `aria-pressed` attribute to its `.active` class.
+ * WHY: keeps the toggle chips accessible to screen readers after any
+ * selection change. Pure DOM helper.
+ * @returns {void}
+ */
 function syncPlatformChipPressedState() {
   document.querySelectorAll('.platform-chip[data-platform]').forEach(chip => {
     chip.setAttribute('aria-pressed', chip.classList.contains('active') ? 'true' : 'false');
@@ -2135,6 +2537,20 @@ chrome.runtime.onMessage.addListener((message) => {
 
 const nicknameQueue = new Set();
 
+/**
+ * Request an LLM-generated nickname for a contact and, on success, refresh the
+ * inbox so the new name shows. De-duped and capped (FIFO, 50) via nicknameQueue.
+ *
+ * WHY: nickname generation is expensive, so it's only called after 10+ inbound
+ * messages and never runs twice concurrently for the same contact. Failures are
+ * swallowed by the inner try/catch — a missing nickname is non-fatal.
+ *
+ * @param {string} contactId - Contact to name.
+ * @param {string} platform - Platform id.
+ * @param {object|null} contact - Contact record (for metadata/avatar), or null.
+ * @param {object} [lastMessage] - Most recent message (body used as a hint).
+ * @returns {Promise<void>}
+ */
 async function generateNickname(contactId, platform, contact, lastMessage) {
   if (nicknameQueue.has(contactId)) return;
   // v0.57.28: cap at 50 with FIFO eviction to prevent memory leak
@@ -2160,7 +2576,11 @@ async function generateNickname(contactId, platform, contact, lastMessage) {
       // Refresh the thread list to show the new nickname
       loadThreads();
     }
-  } catch {}
+  } catch (err) {
+    // Non-fatal — a missing nickname just falls back to the stats line.
+    // console.warn stays local (only console.error forwards to the SW log).
+    console.warn('[Panel] generateNickname failed:', contactId, err);
+  }
   nicknameQueue.delete(contactId);
 }
 
@@ -2179,22 +2599,49 @@ globalARCheckbox.addEventListener('change', async () => {
   }
 });
 
+/**
+ * Enable or disable auto-respond across every known thread (union of summaries
+ * and thread meta), skipping the global-chat broadcast feed, then persist the
+ * global flag and reload the inbox.
+ *
+ * WHY: backs the "auto-respond to everyone" master switch. Wrapped so a failed
+ * SW round-trip mid-sweep is logged instead of surfacing as an unhandled
+ * rejection from the checkbox handler.
+ *
+ * @param {boolean} enabled - Target auto-respond state for all threads.
+ * @returns {Promise<void>}
+ */
 async function toggleAllAutoRespond(enabled) {
-  const metaRes = await chrome.runtime.sendMessage({ type: 'GET_ALL_THREAD_META' });
-  const summRes = await chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} });
-  const allContacts = new Set();
-  for (const s of summRes?.summaries || []) allContacts.add(s.contactId + ':' + s.platform);
-  for (const m of metaRes?.metas || []) allContacts.add(m.contactId + ':' + m.platform);
-  for (const key of allContacts) {
-    const [contactId, platform] = [key.substring(0, key.lastIndexOf(':')), key.substring(key.lastIndexOf(':') + 1)];
-    // Never enable auto-respond on global chat — it's a broadcast feed
-    if (contactId.endsWith(':global-chat')) continue;
-    await chrome.runtime.sendMessage({ type: 'TOGGLE_AUTO_RESPOND', contactId, platform, enabled });
+  try {
+    const metaRes = await chrome.runtime.sendMessage({ type: 'GET_ALL_THREAD_META' });
+    const summRes = await chrome.runtime.sendMessage({ type: 'GET_THREAD_SUMMARIES', opts: {} });
+    const allContacts = new Set();
+    for (const s of summRes?.summaries || []) allContacts.add(s.contactId + ':' + s.platform);
+    for (const m of metaRes?.metas || []) allContacts.add(m.contactId + ':' + m.platform);
+    for (const key of allContacts) {
+      const [contactId, platform] = [key.substring(0, key.lastIndexOf(':')), key.substring(key.lastIndexOf(':') + 1)];
+      // Never enable auto-respond on global chat — it's a broadcast feed
+      if (contactId.endsWith(':global-chat')) continue;
+      await chrome.runtime.sendMessage({ type: 'TOGGLE_AUTO_RESPOND', contactId, platform, enabled });
+    }
+    await chrome.storage.local.set({ aggregaytor_global_autorespond: enabled });
+  } catch (err) {
+    console.error('[Panel] toggleAllAutoRespond failed:', err);
+    showSpToast('Failed to update auto-respond for all threads', 'error');
   }
-  await chrome.storage.local.set({ aggregaytor_global_autorespond: enabled });
   loadThreads();
 }
 
+/**
+ * Show the "start auto-respond session" confirmation dialog, populated with
+ * calendar availability slots and an LLM-generated preference summary.
+ *
+ * WHY: gates the global auto-respond toggle behind a review step. Both the
+ * slot lookup and the summary generation degrade to friendly fallbacks (each
+ * logged) if the SW/calendar/LLM is unavailable.
+ *
+ * @returns {Promise<void>}
+ */
 async function showSessionDialog() {
   const dialog = document.getElementById('session-dialog');
   dialog.style.display = '';
@@ -2212,7 +2659,8 @@ async function showSessionDialog() {
     } else {
       slotsEl.innerHTML = '<span style="color:#6b7280">No calendar connected or all slots free</span>';
     }
-  } catch {
+  } catch (err) {
+    console.warn('[Panel] GET_AVAILABLE_SLOTS failed:', err);
     slotsEl.innerHTML = '<span style="color:#6b7280">Calendar not connected</span>';
   }
 
@@ -2226,11 +2674,18 @@ async function showSessionDialog() {
     } else {
       summaryEl.textContent = 'Ready to auto-respond to all active conversations.';
     }
-  } catch {
+  } catch (err) {
+    console.warn('[Panel] GENERATE_SESSION_SUMMARY failed:', err);
     summaryEl.textContent = 'Ready to auto-respond to all active conversations.';
   }
 }
 
+/**
+ * Compute the auto-respond session deadline in hours from the deadline select.
+ * "Tonight" (0) → hours until midnight; "No deadline" (-1) → 24; else the
+ * numeric value (default 2). Pure helper.
+ * @returns {number} Deadline horizon in hours (>=1).
+ */
 function getDeadlineHours() {
   const val = document.getElementById('session-deadline').value;
   if (val === '0') { // "Tonight" — calculate hours until midnight
@@ -2267,12 +2722,30 @@ chrome.storage.local.get('aggregaytor_global_autorespond').then(data => {
 const PLATFORM_LABELS = {
   sniffies: 'S', grindr: 'G', doublelist: 'DL', adam4adam: 'A4A', gmail: 'GM', yahoo: 'Y',
 };
+/**
+ * Return the small platform badge markup (S/G/DL/A4A/GM/Y) for a platform id.
+ * Pure formatting helper.
+ * @param {string} platform - Platform id.
+ * @returns {string} Badge HTML.
+ */
 function platformIcon(platform) {
   const label = PLATFORM_LABELS[platform] || platform?.charAt(0)?.toUpperCase() || '?';
   return `<span class="platform-icon ${esc(platform)}">${label}</span>`;
 }
 
+/**
+ * Strip a leading `platform:` prefix from a contact id. Pure helper.
+ * @param {string} id - e.g. "sniffies:abc123".
+ * @returns {string} The id without the prefix (e.g. "abc123").
+ */
 function stripPrefix(id) { return String(id || '').replace(/^[a-z]+:/, ''); }
+/**
+ * Truncate a string to `len` characters, appending an ellipsis when cut.
+ * Pure helper.
+ * @param {string} str - Input string.
+ * @param {number} len - Max length before truncation.
+ * @returns {string} The (possibly truncated) string.
+ */
 function truncate(str, len) { return !str ? '' : str.length > len ? str.slice(0, len) + '...' : str; }
 // SECURITY: this is the only escaper used before interpolating
 // platform-derived strings (displayName, avatarUrl, contactId, message
@@ -2289,6 +2762,13 @@ function truncate(str, len) { return !str ? '' : str.length > len ? str.slice(0,
 // and inline <script>, so this was HTML injection rather than script
 // execution, but it is still attacker-controlled markup in a privileged
 // extension page. Escape the quotes explicitly.
+/**
+ * HTML-escape a value for safe interpolation into innerHTML in BOTH text and
+ * quoted-attribute contexts (escapes & < > " '). See the security note above
+ * for why quote-escaping is mandatory here.
+ * @param {*} text - Any value; coerced via `|| ''` (0/false → '') then escaped.
+ * @returns {string} The escaped string.
+ */
 function esc(text) {
   // NOTE: `|| ''` (not `?? ''`) is deliberate — it preserves the previous
   // implementation's coercion of 0/false to '' so no call site's output shifts.
@@ -2340,6 +2820,12 @@ function buildStatsLine(metadata) {
   const line = parts.join(', ');
   return line.length > 50 ? line.slice(0, 47) + '...' : line;
 }
+/**
+ * Format an ISO timestamp for the thread-list row, honoring the absolute-vs-
+ * relative timestamp preference. Pure formatting helper.
+ * @param {string} iso - ISO timestamp (empty → '').
+ * @returns {string} e.g. "5m", "2h", "Yesterday", or a locale date.
+ */
 function formatTime(iso) {
   if (!iso) return '';
   const d = new Date(iso);
@@ -2357,6 +2843,12 @@ function formatTime(iso) {
   const days = Math.floor(h / 24); if (days < 7) return days + 'd';
   return d.toLocaleDateString();
 }
+/**
+ * Format an ISO timestamp as a message-list date separator label
+ * (Today/Yesterday/weekday/short date). Pure formatting helper.
+ * @param {string} iso - ISO timestamp (empty → '').
+ * @returns {string} The date-separator label.
+ */
 function formatDate(iso) {
   if (!iso) return ''; const d = new Date(iso), now = new Date();
   const diff = Math.round((new Date(now.getFullYear(), now.getMonth(), now.getDate()) - new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 86400000);
@@ -2364,6 +2856,12 @@ function formatDate(iso) {
   if (diff < 7) return d.toLocaleDateString([], { weekday: 'long' });
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
+/**
+ * Format an ISO timestamp for a message bubble time label (relative for the
+ * last 2h, absolute time otherwise). Pure formatting helper.
+ * @param {string} iso - ISO timestamp (empty → '').
+ * @returns {string} e.g. "just now", "5m ago", or a locale time.
+ */
 function formatMsgTime(iso) {
   if (!iso) return '';
   // #16 Relative timestamps for recent messages
@@ -2375,6 +2873,11 @@ function formatMsgTime(iso) {
   // Older than 2h — show full time
   return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
+/**
+ * Show/hide and set the total-unread header badge. Pure DOM helper.
+ * @param {number} count - Total unread across all threads.
+ * @returns {void}
+ */
 function updateTotalUnread(count) {
   const b = document.getElementById('total-unread');
   if (count > 0) { b.textContent = count; b.style.display = ''; } else { b.style.display = 'none'; }
@@ -2384,6 +2887,17 @@ function updateTotalUnread(count) {
 
 // ── Photo gallery ───────────────────────────────────────────────────────────
 
+/**
+ * Open the photo gallery overlay for a contact, gathering images from the
+ * contact avatar, metadata photos, and image links in the dossier.
+ *
+ * WHY: uses O(1) GET_CONTACT + GET_DOSSIER instead of scanning all summaries.
+ * A collection failure is logged and yields the "no photos" empty state.
+ *
+ * @param {string} contactId - Contact whose photos to show.
+ * @param {string} displayName - Title label (falls back to stripped id).
+ * @returns {Promise<void>}
+ */
 async function openGallery(contactId, displayName) {
   const overlay = document.getElementById('gallery-overlay');
   const grid = document.getElementById('gallery-grid');
@@ -2406,7 +2920,7 @@ async function openGallery(contactId, displayName) {
         if (/\.(jpg|jpeg|png|webp|gif)/i.test(link) && !pics.includes(link)) pics.push(link);
       }
     }
-  } catch {}
+  } catch (err) { console.error('[Panel] openGallery photo lookup failed:', err); }
 
   if (!pics.length) {
     grid.innerHTML = '<div class="gallery-empty">No photos synced yet.<br>Open their profile and click 📷 to sync.</div>';
@@ -2456,7 +2970,8 @@ document.getElementById('sync-pics-header').addEventListener('click', async () =
     if (res?.count) loadThreads();
     // If in thread detail, reload profile info
     if (currentThread) loadProfileInfo(currentThread.contactId);
-  } catch {
+  } catch (err) {
+    console.error('[Panel] SYNC_PROFILE_PICS (header) failed:', err);
     btn.textContent = '❌';
   }
   setTimeout(() => { btn.textContent = '📷'; btn.disabled = false; }, 3000);
@@ -2474,6 +2989,11 @@ document.getElementById('open-settings').addEventListener('click', () => {
   }
 });
 
+/**
+ * Open the inline settings panel: swap view classes, set the header, and
+ * hydrate the panel via loadInlineSettings.
+ * @returns {void}
+ */
 function openSettings() {
   settingsOpen = true;
   document.body.classList.remove('view-inbox', 'view-thread');
@@ -2483,6 +3003,13 @@ function openSettings() {
   loadInlineSettings();
 }
 
+/**
+ * Close the inline settings panel and return to the inbox.
+ * WHY: also stops the Memory tab's 5s auto-refresh — closing the panel
+ * outright previously left it polling GET_MEMORY_BREAKDOWN forever, waking the
+ * SW every 5s for a UI nobody could see.
+ * @returns {void}
+ */
 function closeSettings() {
   settingsOpen = false;
   // The Memory tab's 5s auto-refresh was only stopped by switching to another
@@ -2497,6 +3024,17 @@ function closeSettings() {
   loadThreads();
 }
 
+/**
+ * Hydrate every control in the inline settings panel from the SW + storage:
+ * LLM provider/config, personality preset, rate settings, queue status, log
+ * level, and display preferences.
+ *
+ * WHY: each section is independently try/caught so one failing SW round-trip
+ * leaves the other sections populated. Failures are warn-logged (graceful
+ * degradation — the control just keeps its default value).
+ *
+ * @returns {Promise<void>}
+ */
 async function loadInlineSettings() {
   // Load provider
   try {
@@ -2506,7 +3044,7 @@ async function loadInlineSettings() {
       document.getElementById('sp-apikey').value = res.config.apiKey || '';
       document.getElementById('sp-model').value = res.config.model || '';
     }
-  } catch {}
+  } catch (err) { console.warn('[Panel] GET_LLM_CONFIG failed:', err); }
 
   // Load personality
   try {
@@ -2519,7 +3057,7 @@ async function loadInlineSettings() {
       document.getElementById('sp-preset-desc').textContent = res.presets.find(p => p.id === res.personality.preset)?.description || '';
       document.getElementById('sp-custom-instructions').value = res.personality.customInstructions || '';
     }
-  } catch {}
+  } catch (err) { console.warn('[Panel] GET_PERSONALITY failed:', err); }
 
   // Load rate settings
   try {
@@ -2531,7 +3069,7 @@ async function loadInlineSettings() {
       document.getElementById('sp-feat-suggest').checked = res.settings.enableSuggestions !== false;
       document.getElementById('sp-feat-dossier').checked = res.settings.enableDossierExtract !== false;
     }
-  } catch {}
+  } catch (err) { console.warn('[Panel] GET_LLM_RATE_SETTINGS failed:', err); }
 
   // Load queue status
   try {
@@ -2541,13 +3079,13 @@ async function loadInlineSettings() {
       const usage = Object.entries(s.providerUsage || {}).map(([p, u]) => `${p}: ${u.used}/${u.limit}`).join(', ');
       document.getElementById('sp-queue-status').textContent = `Queue: ${s.queueLength} | Last min: ${s.requestsLastMinute} | ${usage}`;
     }
-  } catch {}
+  } catch (err) { console.warn('[Panel] GET_LLM_QUEUE_STATUS failed:', err); }
 
   // Load log level
   try {
     const data = await chrome.storage.local.get('aggregaytor_log_level');
     if (data.aggregaytor_log_level) document.getElementById('sp-log-level').value = data.aggregaytor_log_level;
-  } catch {}
+  } catch (err) { console.warn('[Panel] log-level load failed:', err); }
   // Load display preferences
   try {
     const prefs = await chrome.storage.local.get(['aggregaytor_timestamp_format', 'aggregaytor_auto_navigate', 'aggregaytor_toolbar_mode', 'aggregaytor_inbox_disabled']);
@@ -2556,7 +3094,7 @@ async function loadInlineSettings() {
     document.getElementById('sp-toolbar-mode').value = prefs.aggregaytor_toolbar_mode || 'icon';
     const inboxCb = document.getElementById('sp-inbox-disabled');
     if (inboxCb) inboxCb.checked = !!prefs.aggregaytor_inbox_disabled;
-  } catch {}
+  } catch (err) { console.warn('[Panel] display-prefs load failed:', err); }
 }
 
 // Settings save handlers
@@ -2671,6 +3209,11 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
 // FREE_CACHE for that single cache so the user can drop the one structure
 // hogging memory without nuking everything via FREE_SW_MEMORY.
 let _memoryAutoRefreshTimer = null;
+/**
+ * Format a byte count as a human string (B/KB/MB/GB). Pure helper.
+ * @param {number} b - Byte count (falsy/negative → '—').
+ * @returns {string}
+ */
 function fmtBytes(b) {
   if (!b || b < 0) return '—';
   if (b < 1024) return `${b}B`;
@@ -2678,12 +3221,31 @@ function fmtBytes(b) {
   if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)}MB`;
   return `${(b / 1024 / 1024 / 1024).toFixed(2)}GB`;
 }
+/**
+ * Format a value as a color-coded percentage of a cap (red >80, amber >60).
+ * Pure helper; returns '' when cap is falsy.
+ * @param {number} n - Numerator.
+ * @param {number} cap - Denominator/cap.
+ * @returns {string} Colored `<span>` HTML or ''.
+ */
 function fmtPct(n, cap) {
   if (!cap) return '';
   const pct = Math.round((n / cap) * 100);
   const color = pct > 80 ? '#f87171' : pct > 60 ? '#fbbf24' : '#9ca3af';
   return `<span style="color:${color}">${pct}%</span>`;
 }
+/**
+ * Fetch and render the granular per-cache memory breakdown (SW caches, content
+ * scripts, chrome.storage keys, IndexedDB estimate) with per-cache Clear
+ * buttons.
+ *
+ * WHY: lets the user drop the single structure hogging memory instead of
+ * nuking everything. Uses defensive defaults + a try/catch around rendering so
+ * a partial/older-SW response or a render exception shows an error in the tab
+ * body rather than leaving it blank.
+ *
+ * @returns {Promise<void>}
+ */
 async function loadMemoryBreakdown() {
   const body = document.getElementById('sp-mem-body');
   const summary = document.getElementById('sp-mem-summary');
@@ -2822,11 +3384,23 @@ async function loadMemoryBreakdown() {
       </details>`;
   }
 }
+/**
+ * Start the Memory tab's 5s auto-refresh (does one immediate load, then polls).
+ * WHY: keeps the live breakdown current while the tab is visible. Idempotent —
+ * clears any prior timer first.
+ * @returns {void}
+ */
 function startMemoryAutoRefresh() {
   loadMemoryBreakdown();
   stopMemoryAutoRefresh();
   _memoryAutoRefreshTimer = setInterval(loadMemoryBreakdown, 5000);
 }
+/**
+ * Stop the Memory tab's auto-refresh timer.
+ * WHY: must be called when leaving the tab/panel so the SW isn't woken every
+ * 5s for a UI nobody can see. No-op when not running.
+ * @returns {void}
+ */
 function stopMemoryAutoRefresh() {
   if (_memoryAutoRefreshTimer) { clearInterval(_memoryAutoRefreshTimer); _memoryAutoRefreshTimer = null; }
 }
@@ -2857,6 +3431,16 @@ document.getElementById('sp-mem-reload-ext')?.addEventListener('click', () => {
 // by docType + (docType:platform), plus tracks the top-10 largest individual
 // docs. Result usually arrives in 1-15s depending on DB size; we show a
 // progressive "Scanning…" state with a spinner.
+/**
+ * Trigger a PouchDB scan (GET_DB_STATS) and render the doc-type / per-platform
+ * / top-largest breakdown, with a progressive "Scanning…" state.
+ *
+ * WHY: lets the user see what's consuming IndexedDB. Counts are exact; byte
+ * values are sampled/estimated by the SW handler (surfaced in the note). Uses
+ * spSend (60s timeout) so a failure shows an inline error instead of hanging.
+ *
+ * @returns {Promise<void>}
+ */
 async function loadDbStats() {
   const body = document.getElementById('sp-db-stats-body');
   const summary = document.getElementById('sp-db-stats-summary');
@@ -2876,6 +3460,7 @@ async function loadDbStats() {
     if (summary) summary.textContent = '';
     return;
   }
+  /** Local compact byte formatter (0/B/KB/MB/GB). @param {number} b @returns {string} */
   const fmtBytesShort = (b) => {
     if (!b) return '0';
     if (b < 1024) return `${b}B`;
@@ -2962,10 +3547,21 @@ document.getElementById('sp-db-stats-scan')?.addEventListener('click', loadDbSta
 // IDB usage exceeds the threshold; here we let the user trigger it
 // manually and surface the last-run summary. Status string format
 // matches what the SW logs to console.
+/**
+ * Format a byte count as whole megabytes ("123 MB"). Pure helper.
+ * @param {number} bytes
+ * @returns {string}
+ */
 function fmtMb(bytes) {
   if (!bytes) return '0 MB';
   return `${(bytes / 1048576).toFixed(0)} MB`;
 }
+/**
+ * Render the "last auto-purge" summary line (when it ran, messages deleted,
+ * before→after size). Silent SW round-trip (spSend `{silent:true}`) — shows
+ * "never run" when no purge has happened.
+ * @returns {Promise<void>}
+ */
 async function loadLastPurge() {
   const summary = document.getElementById('sp-purge-summary');
   if (!summary) return;
@@ -3012,11 +3608,17 @@ startMemoryAutoRefresh = function() {
 };
 
 // Style guide
+/**
+ * Load the derived writing-style guide into the personality tab.
+ * WHY: shows the LLM-derived style summary; degrades to "Not yet derived." A
+ * failed fetch is warn-logged (non-fatal).
+ * @returns {Promise<void>}
+ */
 async function loadStyleGuide() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_PERSONALITY' });
     if (res?.ok) document.getElementById('sp-style-guide').textContent = res.personality.styleGuide || 'Not yet derived.';
-  } catch {}
+  } catch (err) { console.warn('[Panel] loadStyleGuide failed:', err); }
 }
 document.getElementById('sp-derive-style')?.addEventListener('click', async () => {
   const btn = document.getElementById('sp-derive-style');
@@ -3024,7 +3626,7 @@ document.getElementById('sp-derive-style')?.addEventListener('click', async () =
   try {
     const res = await chrome.runtime.sendMessage({ type: 'DERIVE_STYLE_GUIDE' });
     if (res?.ok) document.getElementById('sp-style-guide').textContent = res.styleGuide;
-  } catch {}
+  } catch (err) { console.error('[Panel] DERIVE_STYLE_GUIDE failed:', err); }
   btn.textContent = 'Analyze my writing style'; btn.disabled = false;
 });
 
@@ -3037,6 +3639,15 @@ document.getElementById('sp-derive-style')?.addEventListener('click', async () =
 // per-row addEventListener which made dead buttons indistinguishable
 // from "no rules in the DB." Now a failed request shows an error toast
 // and a successful one shows a confirmation toast.
+/**
+ * Load and render the block-rule list with per-row Enable/Disable/Delete
+ * buttons (handled via one delegated listener on the list).
+ *
+ * WHY: uses spSend so a failed GET surfaces a toast + inline error rather than
+ * leaving dead buttons indistinguishable from "no rules."
+ *
+ * @returns {Promise<void>}
+ */
 async function loadBlockRules() {
   const list = document.getElementById('sp-rule-list');
   if (!list) { console.warn('[Panel] sp-rule-list not in DOM'); return; }
@@ -3116,6 +3727,12 @@ document.getElementById('sp-add-rule')?.addEventListener('click', async () => {
 });
 
 // Pictures
+/**
+ * Load and render the picture library grid (thumbnails + tag + send/response/
+ * like stats), wiring per-item delete buttons.
+ * WHY: a failed fetch is logged (non-fatal) and leaves the grid unchanged.
+ * @returns {Promise<void>}
+ */
 async function loadPictures() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_ALL_PICTURES' });
@@ -3131,11 +3748,13 @@ async function loadPictures() {
     `).join('');
     grid.querySelectorAll('[data-del-pic]').forEach(btn => {
       btn.addEventListener('click', async () => {
-        await chrome.runtime.sendMessage({ type: 'DELETE_PICTURE', id: btn.dataset.delPic });
+        try {
+          await chrome.runtime.sendMessage({ type: 'DELETE_PICTURE', id: btn.dataset.delPic });
+        } catch (err) { console.error('[Panel] DELETE_PICTURE failed:', err); }
         loadPictures();
       });
     });
-  } catch {}
+  } catch (err) { console.warn('[Panel] loadPictures failed:', err); }
 }
 document.getElementById('sp-pic-upload')?.addEventListener('change', async (e) => {
   const file = e.target.files?.[0];
@@ -3191,6 +3810,12 @@ document.getElementById('sp-google-connect')?.addEventListener('click', async ()
 });
 
 // Check Google auth status on settings open
+/**
+ * Query current Google auth status and reflect it in the connect button.
+ * WHY: called when the Sync tab opens. A failed status check is warn-logged
+ * and leaves the button in its default (disconnected) state.
+ * @returns {Promise<void>}
+ */
 async function checkGoogleAuth() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GOOGLE_AUTH_STATUS' });
@@ -3203,7 +3828,7 @@ async function checkGoogleAuth() {
       status.textContent = 'Google account connected.';
       status.style.color = '#22c55e';
     }
-  } catch {}
+  } catch (err) { console.warn('[Panel] GOOGLE_AUTH_STATUS failed:', err); }
 }
 
 // Google Drive backup/restore
@@ -3251,6 +3876,12 @@ document.getElementById('sp-sync-pics')?.addEventListener('click', async () => {
 });
 
 // Calendar
+/**
+ * Load calendar/booking settings into the Sync tab controls.
+ * WHY: hydrates booking URL + prep/travel minutes. A failed fetch is
+ * warn-logged and leaves the controls at their defaults.
+ * @returns {Promise<void>}
+ */
 async function loadCalendarStatus() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_CALENDAR_SETTINGS' });
@@ -3265,7 +3896,7 @@ async function loadCalendarStatus() {
         document.getElementById('sp-cal-status').style.color = '#34d399';
       }
     }
-  } catch {}
+  } catch (err) { console.warn('[Panel] GET_CALENDAR_SETTINGS failed:', err); }
 }
 document.getElementById('sp-cal-save')?.addEventListener('click', async () => {
   const bookingUrl = (document.getElementById('sp-cal-booking-url')?.value || '').trim();
@@ -3349,6 +3980,17 @@ document.getElementById('sp-toggle-devlog').addEventListener('click', () => {
 });
 
 // ── Blocklists — unhide all per platform ───────────────────────────────────
+/**
+ * Clear the extension's local visual blocklist for a platform (confirmation
+ * gated), report the affected-contacts/tabs summary, and reload the inbox.
+ *
+ * WHY: this only removes Aggregaytor's visual filter — it does NOT contact the
+ * platform to unblock anyone. Errors are surfaced inline (and logged).
+ *
+ * @param {string} platform - Platform id (e.g. 'sniffies').
+ * @param {string} label - Human label for messages (e.g. 'Sniffies').
+ * @returns {Promise<void>}
+ */
 async function unhidePlatform(platform, label) {
   const status = document.getElementById('sp-unhide-status');
   if (!confirm(`Clear the local ${label} blocklist? ` +
@@ -3493,6 +4135,15 @@ document.getElementById('phrase-close')?.addEventListener('click', () => {
   document.getElementById('phrase-panel').style.display = 'none';
 });
 
+/**
+ * Render the quick-phrase panel as clickable buttons that fill the response
+ * input and attempt to auto-send via the platform.
+ *
+ * WHY: uses spSend for the send so the known missing SW handler
+ * (SEND_AUTO_RESPONSE_DIRECT) surfaces a toast instead of failing silently.
+ *
+ * @returns {void}
+ */
 function renderPhrasePanel() {
   const list = document.getElementById('phrase-list');
   if (!quickPhrases.length) {
@@ -3622,6 +4273,17 @@ document.getElementById('sp-retrain-model')?.addEventListener('click', async () 
   } catch (err) { status.textContent = 'Error: ' + err.message; }
 });
 
+/**
+ * Render the blocked-profile enrichment controls + progress line from an
+ * enrichment state object (idle/running/paused/complete), including per-
+ * platform button labels, pause-reason guidance, and an ETA.
+ *
+ * WHY: pure state→DOM projection. No-op if the controls or `state` are absent.
+ *
+ * @param {object} state - Enrichment state (status, platform, processed,
+ *   total, enriched, noFeatures, failed, pauseReason, lastError).
+ * @returns {void}
+ */
 function renderEnrichState(state) {
   const grindrBtn = document.getElementById('sp-enrich-blocked');
   const sniffiesBtn = document.getElementById('sp-enrich-sniffies');
@@ -3681,13 +4343,25 @@ function renderEnrichState(state) {
   }
 }
 
+/**
+ * Poll current enrichment status from the SW and re-render the controls.
+ * WHY: called on tab open and after actions. A failed poll is warn-logged
+ * (non-fatal) and leaves the last render in place.
+ * @returns {Promise<void>}
+ */
 async function refreshEnrichStatus() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'ENRICH_BLOCKED_STATUS' });
     if (res?.ok && res.state) renderEnrichState(res.state);
-  } catch {}
+  } catch (err) { console.warn('[Panel] ENRICH_BLOCKED_STATUS failed:', err); }
 }
 
+/**
+ * Start a blocked-profile enrichment pass for a platform and reflect the result
+ * (error / nothing-to-do / running) in the progress line.
+ * @param {'grindr'|'sniffies'} platform - Platform to enrich.
+ * @returns {Promise<void>}
+ */
 async function startEnrich(platform) {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'ENRICH_BLOCKED_START', platform });
@@ -3720,13 +4394,18 @@ document.getElementById('sp-enrich-stop')?.addEventListener('click', async () =>
   try {
     await chrome.runtime.sendMessage({ type: 'ENRICH_BLOCKED_STOP' });
     await refreshEnrichStatus();
-  } catch {}
+  } catch (err) { console.error('[Panel] ENRICH_BLOCKED_STOP failed:', err); }
 });
 
 // Refresh once on load so a paused run from a previous session shows up
 refreshEnrichStatus();
 
 // ── Grindr Auto-Login Credentials ──────────────────────────────────────────
+/**
+ * Refresh the Grindr credential-status line and sync the auto-login checkbox.
+ * WHY: a failed status check is logged and clears the line (non-fatal).
+ * @returns {Promise<void>}
+ */
 async function refreshGrindrCredStatus() {
   const el = document.getElementById('sp-grindr-cred-status');
   if (!el) return;
@@ -3743,7 +4422,7 @@ async function refreshGrindrCredStatus() {
       el.style.color = '#22c55e';
       document.getElementById('sp-grindr-auto-login').checked = res.autoLogin;
     }
-  } catch { el.textContent = ''; }
+  } catch (err) { console.warn('[Panel] GET_GRINDR_CREDENTIAL_STATUS failed:', err); el.textContent = ''; }
 }
 
 document.getElementById('sp-grindr-cred-save')?.addEventListener('click', async () => {
@@ -3786,7 +4465,7 @@ document.getElementById('sp-grindr-cred-clear')?.addEventListener('click', async
     document.getElementById('sp-grindr-email').value = '';
     document.getElementById('sp-grindr-password').value = '';
     await refreshGrindrCredStatus();
-  } catch {}
+  } catch (err) { console.error('[Panel] clear Grindr credentials failed:', err); }
 });
 
 // When the user changes the auto-login toggle, re-save the same creds with
@@ -3812,7 +4491,7 @@ document.getElementById('sp-grindr-auto-login')?.addEventListener('change', asyn
       autoLogin: !!e.target.checked,
     });
     refreshGrindrCredStatus();
-  } catch {}
+  } catch (err) { console.error('[Panel] update Grindr auto-login failed:', err); }
 });
 
 // Refresh credential status whenever the settings view is opened
@@ -3867,6 +4546,12 @@ document.getElementById('sp-diagnose-training')?.addEventListener('click', async
   }
 });
 
+/**
+ * Load and display the preference-model stats line (sample count, accuracy,
+ * top weighted features).
+ * WHY: a failed fetch is warn-logged (non-fatal) and leaves the line unchanged.
+ * @returns {Promise<void>}
+ */
 async function loadModelStats() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_MODEL_STATS' });
@@ -3877,7 +4562,7 @@ async function loadModelStats() {
         .map(f => `${f.feature}: ${f.weight > 0 ? '+' : ''}${f.weight.toFixed(2)}`).join(', ');
       el.textContent = `${s.trainingCount} samples | ${Math.round(s.accuracy * 100)}% accuracy | Top: ${topFeatures || 'none yet'}`;
     }
-  } catch {}
+  } catch (err) { console.warn('[Panel] GET_MODEL_STATS failed:', err); }
 }
 
 // Load auto-train preference and model stats
@@ -3888,6 +4573,12 @@ chrome.storage.local.get('aggregaytor_auto_train_preferences', (data) => {
 
 // ── Text Expansions ──────────────────────────────────────────────────────────
 
+/**
+ * Populate the text-expansion editor from storage, falling back to the built-in
+ * defaults when nothing is saved, and reflect the enable state (auto-detected:
+ * disabled on macOS where the OS has its own expander).
+ * @returns {void}
+ */
 function loadTextExpansions() {
   chrome.storage.local.get(['aggregaytor_text_substitutions', 'aggregaytor_text_expander_enabled'], (data) => {
     let subs = data.aggregaytor_text_substitutions || [];
@@ -4021,6 +4712,13 @@ document.getElementById('sp-grindr-filter-save')?.addEventListener('click', () =
   if (status) { status.textContent = 'Saved!'; status.style.color = '#22c55e'; }
 });
 
+/**
+ * Hydrate the Grindr map-filter controls from storage (mode selects, keyword
+ * list, ethnicity/gender checkbox sets).
+ * WHY: coerces stored values to numbers before building `[data-eth="…"]`
+ * selectors — a non-numeric value would throw a SyntaxError in this callback.
+ * @returns {void}
+ */
 function loadGrindrFilterSettings() {
   chrome.storage.local.get('aggregaytor_grindr_filter_settings', (data) => {
     const s = data.aggregaytor_grindr_filter_settings || {};
@@ -4140,12 +4838,18 @@ chrome.runtime.onMessage.addListener((message) => {
 // log via GET_ERROR_LOG, triggers a JSON download via EXPORT_ERROR_LOG,
 // and resets via CLEAR_ERROR_LOG. The count refreshes whenever the user
 // opens the Map tab.
+/**
+ * Refresh the error-log entry counter shown in the Map tab.
+ * WHY: polled every 30s while the panel is open; a failed fetch is warn-logged
+ * (non-fatal) and leaves the last count.
+ * @returns {Promise<void>}
+ */
 async function refreshErrorCount() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_ERROR_LOG' });
     const el = document.getElementById('sp-error-count');
     if (el && res?.ok) el.textContent = String(res.count || 0);
-  } catch {}
+  } catch (err) { console.warn('[Panel] GET_ERROR_LOG failed:', err); }
 }
 document.getElementById('sp-export-errors')?.addEventListener('click', async () => {
   const btn = document.getElementById('sp-export-errors');
@@ -4186,6 +4890,7 @@ document.getElementById('sp-clear-errors')?.addEventListener('click', async () =
     if (status) { status.textContent = 'Error log cleared.'; status.style.color = '#22c55e'; }
     refreshErrorCount();
   } catch (err) {
+    console.error('[Panel] CLEAR_ERROR_LOG failed:', err);
     btn.textContent = '✗ Failed';
   }
   setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 3000);
@@ -4207,6 +4912,21 @@ setInterval(refreshErrorCount, 30_000);
 // a terminal state (done | error) regardless of whether the SW dies
 // and respawns. Panel can also be closed and reopened mid-compact —
 // reopening rejoins the existing run.
+/**
+ * Poll the shared compaction/rebuild state machine (via GET_COMPACT_STATUS)
+ * until it reaches a terminal state, updating a button + status element as it
+ * progresses (elapsed time, heartbeats, phase).
+ *
+ * WHY: SW-death-resilient — reads progress from chrome.storage.session so it
+ * survives the worker being killed and respawned mid-operation, and can rejoin
+ * an in-flight run after the panel is reopened. Bounded to ~20 minutes.
+ * Per-poll send errors are treated as transient (res=null) and retried.
+ *
+ * @param {HTMLButtonElement} btn - Button whose label reflects progress.
+ * @param {HTMLElement|null} status - Optional status line element.
+ * @param {string} origLabel - Label to restore when finished.
+ * @returns {Promise<void>}
+ */
 async function pollCompactStatus(btn, status, origLabel) {
   let elapsedTicks = 0;
   while (true) {
@@ -4323,6 +5043,13 @@ document.getElementById('sp-compact-db')?.addEventListener('click', async () => 
 // every 30s and shows lastCompactAt / lastFreeAt / mutations / lastReason.
 // Lets the user see "yes, the extension is taking care of itself" without
 // having to babysit the SW console.
+/**
+ * Poll and render the auto-maintenance status readout (last compact/free,
+ * mutation counter, last decision + reason).
+ * WHY: reassures the user the extension self-maintains without watching the SW
+ * console. A failed fetch is handled by the catch below.
+ * @returns {Promise<void>}
+ */
 async function refreshAutoMaintStatus() {
   const el = document.getElementById('sp-automaint-text');
   if (!el) return;
@@ -4346,7 +5073,8 @@ async function refreshAutoMaintStatus() {
       <div>Last decision: <strong>${ago(s.lastDecisionAt)}</strong></div>
       <div style="color:#6b7280;font-style:italic;margin-top:2px">${esc(s.lastReason || '')}</div>
     `;
-  } catch {
+  } catch (err) {
+    console.warn('[Panel] GET_AUTO_MAINTENANCE failed:', err);
     el.textContent = '(unreachable)';
   }
 }
@@ -4356,6 +5084,11 @@ setInterval(refreshAutoMaintStatus, 30_000);
 // On panel load, check if a compaction is already running (from auto-
 // maintenance or a previous manual click). If so, attach the poller so
 // the user sees live progress instead of a static button.
+/**
+ * On panel load, rejoin an already-running compaction (from auto-maintenance
+ * or a prior click) by attaching the poller so the user sees live progress.
+ * Self-invoking; a failed status check is warn-logged (non-fatal).
+ */
 (async function rejoinRunningCompaction() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_COMPACT_STATUS' });
@@ -4367,7 +5100,7 @@ setInterval(refreshAutoMaintStatus, 30_000);
         pollCompactStatus(btn, status, btn.textContent || 'Compact Database (fix slow scans)');
       }
     }
-  } catch {}
+  } catch (err) { console.warn('[Panel] rejoinRunningCompaction failed:', err); }
 })();
 
 document.getElementById('sp-free-memory')?.addEventListener('click', async () => {
@@ -4435,6 +5168,10 @@ document.getElementById('sp-map-clear-blocked')?.addEventListener('click', () =>
 });
 
 // Load map filter settings when Map tab is opened
+/**
+ * Hydrate the Sniffies map-filter controls (checkboxes + include/exclude term
+ * lists) from storage. @returns {void}
+ */
 function loadMapFilterSettings() {
   chrome.storage.local.get('aggregaytor_map_filter_settings', (data) => {
     const s = data.aggregaytor_map_filter_settings || {};
@@ -4447,6 +5184,14 @@ function loadMapFilterSettings() {
 }
 
 // ── Star Ratings (in thread view) ────────────────────────────────────────────
+/**
+ * Build the 5-star rating widget markup for a contact. Pure formatting helper;
+ * clicks are handled by a delegated document listener.
+ * @param {string} contactId - Contact id (embedded in data attribute).
+ * @param {string} platform - Platform id.
+ * @param {number} currentRating - Current 0-5 rating.
+ * @returns {string} The widget HTML.
+ */
 function renderStarRating(contactId, platform, currentRating) {
   const stars = [1, 2, 3, 4, 5].map(n =>
     `<span class="star-btn ${n <= (currentRating || 0) ? 'active' : ''}" data-star="${n}">★</span>`
@@ -4472,12 +5217,25 @@ document.addEventListener('click', (e) => {
   });
 });
 
+/**
+ * Append a timestamped line to the in-memory developer activity log (bounded to
+ * 200 entries) and re-render if the log is visible.
+ * @param {string} msg - Log message.
+ * @returns {void}
+ */
 function addDevLog(msg) {
   devLogMessages.push(`${new Date().toLocaleTimeString()} ${msg}`);
   if (devLogMessages.length > 200) devLogMessages.shift();
   if (devLogVisible) renderDevLog();
 }
 
+/**
+ * Render the last 50 developer-log lines plus a "Refresh Stats" button that
+ * pulls SW perf + search-index info on demand.
+ * WHY: the stats fetch is try/caught and its failure is written back into the
+ * dev log itself.
+ * @returns {void}
+ */
 function renderDevLog() {
   devLogEl.innerHTML = '<button id="devlog-refresh-stats" style="font-size:10px;margin-bottom:4px;padding:2px 8px;border-radius:4px;border:1px solid rgba(59,130,246,0.4);background:rgba(59,130,246,0.15);color:#93c5fd;cursor:pointer;">Refresh Stats</button>' +
     devLogMessages.slice(-50).map(m => `<div>${esc(m)}</div>`).join('');
@@ -4621,10 +5379,20 @@ let searchDebounce = null;
 // Mirrors Gmail's keyboard shortcuts for inbox and conversation views.
 // Press ? to see all available shortcuts in a help overlay.
 
+/**
+ * Return the current inbox thread-row elements as an array. Pure helper.
+ * @returns {HTMLElement[]}
+ */
 function getThreadItems() {
   return [...document.querySelectorAll('.thread-item')];
 }
 
+/**
+ * Move the keyboard-navigation selection to the given row index (clamped),
+ * updating the `.selected` class and scrolling it into view.
+ * @param {number} index - Target row index (clamped to [-1, len-1]).
+ * @returns {void}
+ */
 function setSelectedThread(index) {
   const items = getThreadItems();
   // Remove previous selection
@@ -4636,6 +5404,10 @@ function setSelectedThread(index) {
   }
 }
 
+/**
+ * Open the currently keyboard-selected thread (simulates a click). No-op when
+ * nothing is selected. @returns {void}
+ */
 function openSelectedThread() {
   const items = getThreadItems();
   if (selectedThreadIndex >= 0 && items[selectedThreadIndex]) {
@@ -4643,6 +5415,12 @@ function openSelectedThread() {
   }
 }
 
+/**
+ * Run an inbox action on the keyboard-selected thread (delegates to
+ * handleAction). No-op when nothing is selected.
+ * @param {string} actionType - Action to run (e.g. 'archive', 'favorite').
+ * @returns {void}
+ */
 function actionOnSelected(actionType) {
   const items = getThreadItems();
   if (selectedThreadIndex < 0 || !items[selectedThreadIndex]) return;
@@ -4653,6 +5431,10 @@ function actionOnSelected(actionType) {
 }
 
 let hotkeyHelpVisible = false;
+/**
+ * Toggle the keyboard-shortcut help overlay. No-op if the overlay is absent.
+ * @returns {void}
+ */
 function toggleHotkeyHelp() {
   const overlay = document.getElementById('hotkey-help');
   if (!overlay) return;
@@ -4769,6 +5551,11 @@ document.getElementById('open-tasks')?.addEventListener('click', () => toggleTas
 // profile snapshot (name, avatar, key preferences) captured when the
 // reminder was created. Snapshot lookup happens at create time in the SW;
 // here we just render what's persisted.
+/**
+ * Format an ISO timestamp relative to now ("in 5m" / "3h ago"). Pure helper.
+ * @param {string} iso - ISO timestamp.
+ * @returns {string}
+ */
 function fmtRelative(iso) {
   const ms = new Date(iso).getTime() - Date.now();
   const past = ms < 0;
@@ -4780,6 +5567,16 @@ function fmtRelative(iso) {
   const days = Math.round(hours / 24);
   return past ? `${days}d ago` : `in ${days}d`;
 }
+/**
+ * Load and render the cross-contact reminders overlay (overdue + upcoming),
+ * each row showing the profile snapshot captured at reminder-create time.
+ *
+ * WHY: the only surface listing every reminder across all contacts. Uses
+ * spSend so a failure shows an inline error; card click opens the thread and
+ * the ✕ button deletes the reminder.
+ *
+ * @returns {Promise<void>}
+ */
 async function loadAllReminders() {
   const body = document.getElementById('reminders-body');
   if (!body) return;
@@ -4795,6 +5592,7 @@ async function loadAllReminders() {
     body.innerHTML = '<div class="settings-info">No reminders yet. Set one from a profile\'s ⏰ Remind button.</div>';
     return;
   }
+  /** Build one reminder card (avatar, name, prefs, due). @param {object} r @returns {string} */
   const renderRow = (r) => {
     const snap = r.contactSnapshot || {};
     const meta = snap.metadata || {};
@@ -4888,7 +5686,7 @@ document.getElementById('task-sync-btn')?.addEventListener('click', async () => 
     } else {
       btn.textContent = '!';
     }
-  } catch { btn.textContent = '!'; }
+  } catch (err) { console.error('[Panel] SYNC_TASKS failed:', err); btn.textContent = '!'; }
   btn.disabled = false;
   setTimeout(() => { btn.textContent = '↻'; }, 3000);
 });
@@ -4908,15 +5706,23 @@ document.getElementById('task-save-btn')?.addEventListener('click', async () => 
     platform: editingTaskPlatform || undefined,
   };
   // Use Google Tasks API if authenticated, with local fallback
-  if (googleAuthenticated) {
-    await chrome.runtime.sendMessage({ type: 'GOOGLE_TASKS_CREATE', ...taskData });
-  } else {
-    await chrome.runtime.sendMessage({ type: 'CREATE_TASK', ...taskData });
+  try {
+    if (googleAuthenticated) {
+      await chrome.runtime.sendMessage({ type: 'GOOGLE_TASKS_CREATE', ...taskData });
+    } else {
+      await chrome.runtime.sendMessage({ type: 'CREATE_TASK', ...taskData });
+    }
+  } catch (err) {
+    console.error('[Panel] task create failed:', err);
+    showSpToast('Failed to create task', 'error');
   }
   hideTaskForm();
   loadTasks();
 });
 
+/**
+ * Toggle the task panel open/closed, loading tasks when opening. @returns {void}
+ */
 function toggleTaskPanel() {
   const panel = document.getElementById('task-panel');
   taskPanelOpen = !taskPanelOpen;
@@ -4924,6 +5730,14 @@ function toggleTaskPanel() {
   if (taskPanelOpen) loadTasks();
 }
 
+/**
+ * Show and reset the task-creation form, optionally pre-linking a contact and
+ * pre-filling the title.
+ * @param {string} [contactId] - Contact to link the task to.
+ * @param {string} [platform] - Contact's platform.
+ * @param {string} [prefillTitle] - Initial title text.
+ * @returns {void}
+ */
 function showTaskForm(contactId, platform, prefillTitle) {
   editingTaskContactId = contactId || null;
   editingTaskPlatform = platform || null;
@@ -4938,12 +5752,20 @@ function showTaskForm(contactId, platform, prefillTitle) {
   document.getElementById('task-title').focus();
 }
 
+/**
+ * Hide the task form and clear the edit-linking state. @returns {void}
+ */
 function hideTaskForm() {
   document.getElementById('task-form').style.display = 'none';
   editingTaskContactId = null;
   editingTaskPlatform = null;
 }
 
+/**
+ * Open the task panel (if closed) and prefill a "Follow up with <name>" task
+ * linked to the currently open thread. No-op when no thread is open.
+ * @returns {void}
+ */
 function createTaskFromThread() {
   if (!currentThread) return;
   const name = document.getElementById('header-title')?.textContent || stripPrefix(currentThread.contactId);
@@ -4951,8 +5773,21 @@ function createTaskFromThread() {
   showTaskForm(currentThread.contactId, currentThread.platform, `Follow up with ${name}`);
 }
 
+/**
+ * Load and render the task list with completion checkboxes, delete buttons, and
+ * contact links, wiring each handler.
+ * WHY: a failed fetch is logged and shows the empty state (guarded so it can't
+ * reject out of toggleTaskPanel's fire-and-forget call).
+ * @returns {Promise<void>}
+ */
 async function loadTasks() {
-  const res = await chrome.runtime.sendMessage({ type: 'GET_TASKS', opts: {} });
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({ type: 'GET_TASKS', opts: {} });
+  } catch (err) {
+    console.error('[Panel] GET_TASKS failed:', err);
+    res = null;
+  }
   const list = document.getElementById('task-list');
   if (!res?.ok || !res.tasks?.length) {
     list.innerHTML = '<div class="task-empty">No tasks yet. Click + New to add one.</div>';
@@ -5004,6 +5839,10 @@ async function loadTasks() {
   });
 }
 
+/**
+ * Toggle the global message-search bar open/closed (focusing the input on open,
+ * clearing it on close). @returns {void}
+ */
 function toggleGlobalSearch() {
   const bar = document.getElementById('search-bar');
   const results = document.getElementById('search-results');
@@ -5024,6 +5863,14 @@ document.getElementById('search-input').addEventListener('input', (e) => {
   searchDebounce = setTimeout(() => performGlobalSearch(e.target.value.trim()), 300);
 });
 
+/**
+ * Run a full-text message search (SEARCH_MESSAGES) and render highlighted
+ * results, each opening the matching thread on click.
+ * WHY: debounced by the input listener. A failed search shows an inline
+ * "Search failed" state (logged); queries under 2 chars are ignored.
+ * @param {string} query - Search text.
+ * @returns {Promise<void>}
+ */
 async function performGlobalSearch(query) {
   const results = document.getElementById('search-results');
   if (!query || query.length < 2) { results.style.display = 'none'; return; }
@@ -5056,12 +5903,18 @@ async function performGlobalSearch(query) {
         openThread(el.dataset.contactId, el.dataset.platform, stripPrefix(el.dataset.contactId));
       });
     });
-  } catch {
+  } catch (err) {
+    console.error('[Panel] SEARCH_MESSAGES failed:', err);
     results.innerHTML = '<div class="empty-state"><p>Search failed</p></div>';
     results.style.display = '';
   }
 }
 
+/**
+ * Escape a string for safe use inside a RegExp. Pure helper.
+ * @param {string} str
+ * @returns {string} The regex-escaped string.
+ */
 function escRegex(str) { return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 // ── Thread search ───────────────────────────────────────────────────────────
@@ -5119,6 +5972,16 @@ if (localStorage.getItem('aggregaytor_compact') === '1') {
 // is a full PouchDB read that can't just be ignored by the SW when things are
 // quiet. Re-runs once on `visibilitychange` so the dot is fresh the moment
 // the panel comes back into view.
+/**
+ * Update the header connection-status dot by probing the SW (GET_UNREAD_COUNT).
+ *
+ * WHY: visibility-gated (skips when the panel is hidden) so we don't force a
+ * PouchDB read every 30s for a UI nobody can see. The catch deliberately stays
+ * silent — a failed probe simply means "disconnected" (expected when the SW is
+ * asleep), and logging it every tick would be noise.
+ *
+ * @returns {Promise<void>}
+ */
 async function checkConnectionStatus() {
   if (document.visibilityState === 'hidden') return;
   const dot = document.getElementById('connection-dot');
@@ -5127,6 +5990,7 @@ async function checkConnectionStatus() {
     const res = await chrome.runtime.sendMessage({ type: 'GET_UNREAD_COUNT' });
     dot.className = 'connection-dot ' + (res?.ok ? 'connected' : 'disconnected');
   } catch {
+    // Intentionally silent — see WHY above.
     dot.className = 'connection-dot disconnected';
   }
 }
@@ -5152,6 +6016,10 @@ let aiQueryBusy = false;
 
 document.getElementById('open-ai-query').addEventListener('click', toggleAIQuery);
 
+/**
+ * Toggle the natural-language AI query bar, hiding/showing the thread list
+ * behind it and resetting the query state on close. @returns {void}
+ */
 function toggleAIQuery() {
   const bar = document.getElementById('ai-query-bar');
   const results = document.getElementById('ai-query-results');
@@ -5192,6 +6060,17 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+/**
+ * Run a natural-language contact query (QUERY_CONTACTS) and render ranked
+ * matches with avatars, names, and per-match reasons; each opens its thread.
+ *
+ * WHY: guarded by `aiQueryBusy` so overlapping runs are ignored; hides the
+ * thread list while showing results. Per-match GET_CONTACT lookups are
+ * individually try/caught (a missing contact just renders without an avatar),
+ * and the whole query is wrapped so a failure shows an inline error (logged).
+ *
+ * @returns {Promise<void>}
+ */
 async function runAIQuery() {
   const input = document.getElementById('ai-query-input');
   const status = document.getElementById('ai-query-status');
@@ -5271,6 +6150,7 @@ async function runAIQuery() {
       });
     });
   } catch (err) {
+    console.error('[Panel] QUERY_CONTACTS failed:', err);
     status.textContent = String(err?.message || 'Query failed');
     status.className = 'ai-query-status error';
     threadList.style.display = '';
@@ -5281,6 +6161,16 @@ async function runAIQuery() {
 // ── Deprecation Advisory Banner ─────────────────────────────────────────────
 // v0.57.20: surface LLM-provider deprecations to the user in-panel so they
 // can pin a different provider before the auto-fallback kicks in.
+/**
+ * Fetch LLM-provider deprecation warnings and render the dismissible advisory
+ * banner for the first non-permanently-dismissed warning.
+ *
+ * WHY: lets the user pin a different provider before auto-fallback kicks in.
+ * Dismissal is permanent per-warning-id (stored in localStorage, guarded).
+ * A failed fetch hides the banner (warn-logged).
+ *
+ * @returns {Promise<void>}
+ */
 async function loadAdvisoryBanner() {
   const banner = document.getElementById('advisory-banner');
   if (!banner) return;
@@ -5319,7 +6209,8 @@ async function loadAdvisoryBanner() {
       try { localStorage.setItem('aggregaytor_advisory_dismissed', JSON.stringify(next)); } catch {}
       banner.style.display = 'none';
     });
-  } catch {
+  } catch (err) {
+    console.warn('[Panel] loadAdvisoryBanner failed:', err);
     banner.style.display = 'none';
   }
 }
@@ -5329,6 +6220,13 @@ loadAdvisoryBanner();
 // list, renders one row per suggestion with Apply/Dismiss, plus a manual
 // "Check now" button and the auto-apply toggle. Refreshes when the
 // AI tab opens or after any user action.
+/**
+ * Poll the model auto-updater state and render suggestion rows (Apply/Dismiss),
+ * the last-check line, and the auto-apply toggle.
+ * WHY: refreshed on AI-tab open, after actions, and on a 60s interval. A failed
+ * fetch shows an inline "(error fetching state)" line (warn-logged).
+ * @returns {Promise<void>}
+ */
 async function refreshModelUpdaterUI() {
   const statusEl = document.getElementById('sp-mu-status');
   const sugEl = document.getElementById('sp-mu-suggestions');
@@ -5381,7 +6279,8 @@ async function refreshModelUpdaterUI() {
         refreshModelUpdaterUI();
       });
     });
-  } catch {
+  } catch (err) {
+    console.warn('[Panel] GET_MODEL_UPDATE_STATE failed:', err);
     statusEl.textContent = '(error fetching state)';
   }
 }
@@ -5392,7 +6291,7 @@ document.getElementById('sp-mu-check')?.addEventListener('click', async () => {
   try {
     await chrome.runtime.sendMessage({ type: 'CHECK_MODEL_UPDATES' });
     refreshModelUpdaterUI();
-  } catch {}
+  } catch (err) { console.error('[Panel] CHECK_MODEL_UPDATES failed:', err); }
   btn.disabled = false; btn.textContent = orig;
 });
 document.getElementById('sp-mu-auto-apply')?.addEventListener('change', async (e) => {
@@ -5414,8 +6313,14 @@ const ffCheckbox = document.getElementById('finder-checkbox');
 let ffPollTimer = null;
 let ffCurrentCandidates = [];
 
+/** Show the Friend Finder overlay. @returns {void} */
 function ffShow() { ffOverlay.style.display = 'flex'; }
+/** Hide the Friend Finder overlay and stop its poll timer. @returns {void} */
 function ffHide() { ffOverlay.style.display = 'none'; if (ffPollTimer) { clearInterval(ffPollTimer); ffPollTimer = null; } }
+/**
+ * Show one Friend Finder wizard step (filters | approve | running), hiding the
+ * others. @param {'filters'|'approve'|'running'} name @returns {void}
+ */
 function ffStep(name) {
   for (const id of ['ff-step-filters', 'ff-step-approve', 'ff-step-running']) {
     document.getElementById(id).style.display = (id === `ff-step-${name}`) ? '' : 'none';
@@ -5436,10 +6341,16 @@ ffCheckbox?.addEventListener('change', async () => {
         return;
       }
     }
-  } catch {}
+  } catch (err) { console.warn('[Panel] FF_GET_STATE failed:', err); }
   ffShow(); ffStep('filters');
 });
 
+/**
+ * Populate the Friend Finder filter form controls from a persisted filter
+ * object. Pure DOM helper.
+ * @param {object} f - Persisted filter state.
+ * @returns {void}
+ */
 function ffPopulateFilters(f) {
   document.getElementById('ff-inherit-map').checked = !!f.inheritMapFilters;
   document.getElementById('ff-never-chatted').checked = !!f.requireNeverChatted;
@@ -5454,6 +6365,11 @@ function ffPopulateFilters(f) {
   document.getElementById('ff-pace-sec').value = f.paceSeconds;
 }
 
+/**
+ * Read the Friend Finder filter form into a filter object for the SW.
+ * Pure DOM-read helper.
+ * @returns {object} The filter settings.
+ */
 function ffReadFilters() {
   return {
     inheritMapFilters: document.getElementById('ff-inherit-map').checked,
@@ -5516,6 +6432,10 @@ document.getElementById('ff-build')?.addEventListener('click', async () => {
   }
 });
 
+/**
+ * Render the Friend Finder candidate list (checkbox rows with avatar/name/
+ * stats) and wire selection-count updates. @returns {void}
+ */
 function ffRenderCandidates() {
   const wrap = document.getElementById('ff-candidates');
   document.getElementById('ff-total-count').textContent = ffCurrentCandidates.length;
@@ -5535,6 +6455,10 @@ function ffRenderCandidates() {
   ffUpdateSelectedCount();
 }
 
+/**
+ * Update the Friend Finder "selected candidates" count from checked rows.
+ * @returns {void}
+ */
 function ffUpdateSelectedCount() {
   const n = document.querySelectorAll('#ff-candidates .ff-cb:checked').length;
   document.getElementById('ff-selected-count').textContent = n;
@@ -5567,12 +6491,21 @@ document.getElementById('ff-stop')?.addEventListener('click', async () => {
   setTimeout(() => ffPoll(), 200);
 });
 
+/**
+ * Start polling the Friend Finder run state every 5s (does one immediate poll).
+ * Idempotent — clears any prior timer first. @returns {void}
+ */
 function ffStartPolling() {
   if (ffPollTimer) clearInterval(ffPollTimer);
   ffPoll();
   ffPollTimer = setInterval(ffPoll, 5000);
 }
 
+/**
+ * Poll the Friend Finder run state and update the running-step UI (progress,
+ * counts, stop control). See body for terminal-state handling.
+ * @returns {Promise<void>}
+ */
 async function ffPoll() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'FF_GET_RUN_STATE' });
@@ -5609,10 +6542,18 @@ async function ffPoll() {
     if (run.state === 'done' || run.state === 'stopped' || run.state === 'idle') {
       if (ffPollTimer) { clearInterval(ffPollTimer); ffPollTimer = null; }
     }
-  } catch {}
+  } catch {
+    // Intentionally silent — this fires every 5s and a transient failure
+    // (SW asleep mid-run) is expected; the next tick recovers. Logging here
+    // would spam the SW error log.
+  }
 }
 
-// On panel load — if a run is already going, restore the running view
+/**
+ * On panel load, if a Friend Finder run is already going, flip the indicator
+ * checkbox on (without auto-opening the modal). Self-invoking; a failed check
+ * is warn-logged (non-fatal).
+ */
 (async function ffRehydrate() {
   try {
     const res = await chrome.runtime.sendMessage({ type: 'FF_GET_RUN_STATE' });
@@ -5620,5 +6561,5 @@ async function ffPoll() {
       // Light-weight resume — toggle the indicator on but DON'T auto-open the modal
       if (ffCheckbox) ffCheckbox.checked = true;
     }
-  } catch {}
+  } catch (err) { console.warn('[Panel] ffRehydrate failed:', err); }
 })();

@@ -6,7 +6,18 @@ import { showFloatingPanel, hideFloatingPanel } from './floating-actions.js';
 
 const LOG = '[Aggregaytor:Bridge:Grindr]';
 
-// v0.57.44: forward bridge errors to the SW's rolling error log.
+/**
+ * v0.57.44: forward a bridge error to the service worker's rolling error log.
+ *
+ * WHY: uncaught errors in an ISOLATED content script are otherwise invisible
+ * unless DevTools is open on this exact frame. Both the rejected promise and the
+ * synchronous `sendMessage` throw (dead context) are swallowed so the reporter
+ * can never itself throw.
+ *
+ * @param level - Origin: window `error`, promise `rejection`, or manual `error`.
+ * @param message - Human-readable error message.
+ * @param stack - Optional stack trace.
+ */
 function _forwardError(level: 'unhandled' | 'rejection' | 'error', message: string, stack?: string): void {
   try {
     chrome.runtime.sendMessage({
@@ -28,11 +39,34 @@ window.addEventListener('unhandledrejection', (ev) => {
 let contextValid = true;
 const MAIN_WORLD_RESPONSE_EVENT = '__aggregaytor_grindr_bridge_response';
 
+/**
+ * Probe whether this content script's extension context is still live.
+ *
+ * WHY: after an extension reload/update `chrome.runtime.id` throws in orphaned
+ * content scripts; gating `chrome.*` work on this stops a stale bridge from
+ * spamming exceptions. Logs the transition exactly once.
+ *
+ * @returns `true` while the context is usable; `false` once invalidated.
+ */
 function checkContext(): boolean {
   try { void chrome.runtime.id; return true; }
   catch { if (contextValid) { console.warn(`${LOG} Context invalidated`); contextValid = false; } return false; }
 }
 
+/**
+ * Bridge a request that only the MAIN world can service (it holds the captured
+ * Grindr auth) into a request/response round-trip. Dispatches a CustomEvent with
+ * a unique `requestId`, waits for the matching
+ * `__aggregaytor_grindr_bridge_response`, and forwards the payload to
+ * `sendResponse`. Always resolves: on timeout it replies `{ ok: false, error:
+ * 'timeout' }` so the SW's `sendMessage` callback never hangs.
+ *
+ * @param eventType - MAIN-world event to dispatch (e.g. the import/fetch request).
+ * @param detail - Extra fields merged into the event detail alongside `requestId`.
+ * @param sendResponse - The `chrome.runtime.onMessage` responder to fulfill.
+ * @param timeoutMs - Max wait before replying with a timeout error (default 120s).
+ * @returns `true` — signals async `sendResponse` to the messaging runtime.
+ */
 function relayMainWorldRequest(
   eventType: string,
   detail: Record<string, unknown>,
@@ -81,6 +115,11 @@ window.addEventListener('__aggregaytor_message', ((event: CustomEvent) => {
   catch { contextValid = false; }
 }) as EventListener);
 
+// Service-worker command handler (trusted sender): SPA navigation, auto-send,
+// filter/text-expander/log-level settings relay, floating panel, training-data
+// import, profile fetch, and avatar scraping. Registration is wrapped in
+// try/catch because `onMessage` throws synchronously if the context was
+// invalidated before this ran; each `localStorage.setItem` inside is guarded.
 try {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === 'SPA_NAVIGATE') {
@@ -186,6 +225,19 @@ try {
 // which calls e.preventDefault() inside any strategy that succeeds —
 // strategies that bail out leave the default (new-tab / context menu)
 // alone so unrelated clicks aren't hijacked.
+/**
+ * Resolve the profileId for a middle-click / Shift+right-click target and start
+ * a block, trying five escalating strategies (URL → container attrs → /chat/
+ * href → photo-hash lookup in MAIN world → attribute scan → React fiber walk).
+ *
+ * WHY the escalation: Grindr's DOM rarely exposes profileIds directly, and the
+ * ISOLATED world can't read MAIN-world maps or React fibers — so the harder
+ * strategies hand off to MAIN via CustomEvent. Calls `e.preventDefault()` ONLY
+ * inside a strategy that actually fires, so unrelated clicks keep their native
+ * behavior (new tab / context menu). A total miss is logged as a diagnostic.
+ *
+ * @param e - The middle-click (`mousedown`/`auxclick`) or Shift+`contextmenu` event.
+ */
 function attemptBlock(e: MouseEvent): void {
   if (!contextValid || !checkContext()) return;
 
@@ -369,6 +421,12 @@ function attemptBlock(e: MouseEvent): void {
 const MIDDLE_CLICK_DEDUPE_MS = 150;
 let _grindrLastMiddleAt = 0;
 
+/**
+ * Middle-click dispatcher shared by the `mousedown` and `auxclick` capture
+ * listeners. Filters to button 1 and dedupes within
+ * {@link MIDDLE_CLICK_DEDUPE_MS} so a mouse that fires both events runs
+ * {@link attemptBlock} exactly once.
+ */
 function onMiddleClick(e: MouseEvent): void {
   if (e.button !== 1) return; // middle-click only
   if (Date.now() - _grindrLastMiddleAt < MIDDLE_CLICK_DEDUPE_MS) return;
@@ -396,6 +454,12 @@ let keepaliveInterval: ReturnType<typeof setInterval> | null = null;
 
 let keepaliveSkipCount = 0;
 
+/**
+ * Start the session keepalive that periodically (every 4 min) refires
+ * focus/visibility events and pings `/api/v3/me` to stop Grindr logging the user
+ * out for inactivity. Skips a few cycles while the tab is hidden. Idempotent;
+ * the fetch failure is swallowed (keepalive is best-effort).
+ */
 function startSessionKeepalive(): void {
   if (keepaliveInterval) return;
   keepaliveInterval = setInterval(() => {
@@ -423,6 +487,11 @@ startSessionKeepalive();
 
 // Watch for URL changes (user opening conversations on Grindr web)
 let lastUrl = location.href;
+/**
+ * Detect Grindr SPA navigation to a `/chat/{conversationId}` view and notify the
+ * SW which profile is now active. Polled (3s) and on `popstate`; no-ops on an
+ * unchanged URL or dead context. The `sendMessage` is double-guarded.
+ */
 function checkUrlChange() {
   if (!contextValid) return;
   const url = location.href;

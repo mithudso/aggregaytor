@@ -7,6 +7,17 @@
 import { estimateSignatureSimilarity, estimateTokenJaccard } from './lsh.js';
 import type { ContextRecord, DedupeOptions, DedupeResult } from './types.js';
 
+/**
+ * Scores how "specific"/information-rich a record is, so the richest of a set
+ * of duplicates is the one kept.
+ *
+ * Weights body length highest, then summary, then keyword count, then recency
+ * (as a raw epoch-ms tiebreaker). Records are sorted by this descending before
+ * the dedup pass, making the survivor deterministic.
+ *
+ * @param record - Record to score.
+ * @returns A non-negative comparable score (higher = keep in preference).
+ */
 function recordSpecificityScore(record: ContextRecord): number {
   return [
     String(record.body || '').length * 3,
@@ -16,6 +27,24 @@ function recordSpecificityScore(record: ContextRecord): number {
   ].reduce((sum, value) => sum + value, 0);
 }
 
+/**
+ * Removes exact and near-duplicate records, keeping the most specific instance
+ * of each and mapping every dropped record to its survivor.
+ *
+ * Two-stage: exact matches collapse by `exact_hash`; remaining records are
+ * checked for near-duplication against LSH-bucket-sharing candidates using both
+ * the MinHash signature estimate (`nearThreshold`) and the exact token Jaccard
+ * (`tokenThreshold`) — either clearing threshold marks a near-duplicate.
+ * Records are processed most-specific-first so the survivor is the richest one;
+ * the kept set is finally sorted newest-first. Records without an `exact_hash`
+ * are skipped entirely.
+ *
+ * @param records - Records to deduplicate (non-array input is treated as empty).
+ * @param opts - `nearThreshold` (MinHash similarity, default 0.9) and
+ *   `tokenThreshold` (token Jaccard, default 0.88).
+ * @returns `{ records }` (the kept records, newest-first) and `duplicates` (a
+ *   map of dropped-record id → `{ duplicate_of, duplicate_kind }`).
+ */
 export function dedupeContextRecords(
   records: ContextRecord[],
   opts: DedupeOptions = {},
