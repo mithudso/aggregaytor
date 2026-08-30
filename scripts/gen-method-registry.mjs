@@ -189,9 +189,10 @@ if (process.argv.includes('--check')) {
   let fail = false;
   // Enforce JSDoc on callable units (top-level functions, exported arrows,
   // class methods) of first-party code. Exempt: nested inner closures (their
-  // parent's JSDoc covers them) and the vendored, provenance-pinned grindr-lib
-  // (documented upstream; not ours to hand-edit).
-  const undoc = rows.filter((r) => !r.hasDoc && !r.nested && !r.file.includes('grindr-lib'));
+  // parent's JSDoc covers them) and the vendored, provenance-pinned *-lib
+  // packages (documented upstream; not ours to hand-edit).
+  const isVendored = (f) => /packages\/(grindr|sniffies)-lib\//.test(f);
+  const undoc = rows.filter((r) => !r.hasDoc && !r.nested && !isVendored(r.file));
   if (undoc.length) {
     fail = true;
     console.error(`registry:check — ${undoc.length} callable method(s) missing JSDoc:`);

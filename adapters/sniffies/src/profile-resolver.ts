@@ -26,12 +26,7 @@
  *  6. Any hex string value >= 10 chars -- skip if self (last resort)
  */
 
-/**
- * Regex matching a valid Sniffies profile ID: 6+ lowercase hex characters.
- * Sniffies uses MongoDB ObjectIds which are 24-char hex strings, but we
- * accept 6+ to handle any truncated or alternative ID formats.
- */
-const HEX_ID_RE = /^[0-9a-f]{6,}$/i;
+import { dom } from '@aggregaytor/sniffies-lib';
 
 // ── Key Name Groups (all normalized / lowercased) ───────────────────────────
 //
@@ -70,15 +65,18 @@ const CONVERSATION_KEYS = [
 /**
  * Normalize and validate a candidate profile ID string.
  *
- * Returns the lowercased, trimmed string if it matches the hex-ID pattern
- * (6+ hex characters), otherwise returns "" to signal "not a valid ID".
- * This prevents non-hex strings (usernames, UUIDs with dashes, etc.)
- * from being treated as Sniffies profile IDs.
+ * Now delegates to `@aggregaytor/sniffies-lib` `dom.normalizeProfileId`, which
+ * extracts the FIRST 6+-hex substring (UNANCHORED) and lowercases it, returning
+ * null on no match. This resolver's callers (findLikelyProfileId, the adapter)
+ * require a string, so the lib's null miss-result is coerced back to "".
+ *
+ * NOTE (intentional behavior adoption): the old implementation anchored the
+ * whole cleaned string (`^[0-9a-f]{6,}$`), so a value like "abc123def/chat" or a
+ * dashed UUID returned "". The library's unanchored extraction instead returns
+ * the first hex run (e.g. "abc123def"). This is an accepted change.
  */
 export function normalizeProfileId(id: string | null | undefined): string {
-  if (!id) return '';
-  const cleaned = String(id).trim().toLowerCase();
-  return HEX_ID_RE.test(cleaned) ? cleaned : '';
+  return dom.normalizeProfileId(id) || '';
 }
 
 /**
@@ -91,8 +89,10 @@ export function normalizeProfileId(id: string | null | undefined): string {
  * @returns The normalized profile ID, or "" if no match.
  */
 export function extractProfileIdFromUrl(url: string): string {
-  const match = String(url || '').match(/\/profile\/([0-9a-f]{6,})(?:\/chat)?/i);
-  return match ? normalizeProfileId(match[1]) : '';
+  // Delegates to @aggregaytor/sniffies-lib `dom.profileIdFromHref` (same
+  // `/profile/<6+hex>` capture, lowercased). Coerce its null miss-result back
+  // to '' to preserve this resolver's public API.
+  return dom.profileIdFromHref(url) || '';
 }
 
 // ── Profile ID Extraction ───────────────────────────────────────────────────
@@ -211,7 +211,8 @@ export function findLikelyProfileId(
  * @returns  The normalized profile ID, or "" if the pattern does not match.
  */
 export function extractProfileIdFromBackground(bg: string): string {
-  if (!bg) return '';
-  const match = bg.match(/profile\.sniffiesassets\.com\/([0-9a-f]{6,})\//i);
-  return match ? normalizeProfileId(match[1]) : '';
+  // Delegates to @aggregaytor/sniffies-lib `dom.profileIdFromAssetUrl` (byte-
+  // identical `profile.sniffiesassets.com/<6+hex>/` regex, lowercased). Coerce
+  // its null miss-result back to '' to preserve this resolver's public API.
+  return dom.profileIdFromAssetUrl(bg) || '';
 }

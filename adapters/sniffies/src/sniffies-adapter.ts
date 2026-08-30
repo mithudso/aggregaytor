@@ -887,17 +887,19 @@ export class SniffiesAdapter extends BaseAdapter {
     }
 
     const endWsFrame = perf.start('parseWebSocketFrame');
+    // Frame decode now delegates to @aggregaytor/sniffies-lib via parseSocketIOFrame;
+    // the returned shape is the library's { event, data } (field is `event`).
     const frame = parseSocketIOFrame(text);
     if (!frame) { endWsFrame(); return []; }
 
     // ── Presence events: skip for messages but extract contacts ──────────
-    if (isPresenceEvent(frame.eventName)) {
+    if (isPresenceEvent(frame.event)) {
       // userJoined events carry a full profile payload (avatar, attributes)
       // that we can use to populate the contact list. THROTTLED: these fire
       // hundreds of times per minute on busy maps. We process each profileId
       // at most once every 60 seconds (see userJoinedThrottle) to avoid
       // CPU-intensive recursive avatar searches on every presence event.
-      if (frame.eventName === 'userJoined' && frame.data && typeof frame.data === 'object') {
+      if (frame.event === 'userJoined' && frame.data && typeof frame.data === 'object') {
         const obj = frame.data as Record<string, unknown>;
         const profileId = normalizeProfileId(String(obj._id || ''));
         if (profileId && !this.selfIds.ids.has(profileId)) {
@@ -958,15 +960,15 @@ export class SniffiesAdapter extends BaseAdapter {
     if (!frame.data) { endWsFrame(); return []; }
 
     // ── Global chat events: route with synthetic [ws-global] URL ─────────
-    if (isGlobalChatEvent(frame.eventName)) {
-      log.debug(`WS global event: "${frame.eventName}"`);
+    if (isGlobalChatEvent(frame.event)) {
+      log.debug(`WS global event: "${frame.event}"`);
       const result = this.parseApiResponse('[ws-global]', frame.data);
       endWsFrame(); return result;
     }
 
     // Log unknown non-presence event names at debug level for discovery
-    if (frame.eventName) {
-      log.debug(`WS event: "${frame.eventName}"`);
+    if (frame.event) {
+      log.debug(`WS event: "${frame.event}"`);
     }
 
     // ── Default: assume DM traffic ──────────────────────────────────────

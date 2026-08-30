@@ -22,9 +22,13 @@
     "@aggregaytor/adapter-core": "workspace:*",
     "@aggregaytor/context-engine": "workspace:*"
   },
+  "dependencies": {
+    "@aggregaytor/sniffies-lib": "workspace:*"
+  },
   "devDependencies": {
     "@aggregaytor/adapter-core": "workspace:*",
     "@aggregaytor/context-engine": "workspace:*",
+    "@aggregaytor/sniffies-lib": "workspace:*",
     "tsup": "^8.4.0",
     "typescript": "^5.7.0",
     "vitest": "^3.1.0"

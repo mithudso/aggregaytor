@@ -23,6 +23,14 @@
  *  6. Inject the MAIN world script into the page on startup
  */
 
+// Profile-id / marker / global-chat / carousel / route resolution now delegates
+// to the vendored @aggregaytor/sniffies-lib DOM helpers in place of this bridge's
+// bespoke broad-fallback class selectors and inline regexes. (This ISOLATED-world
+// bridge builds as an ES module, so a static import is fine.) Every CustomEvent
+// name, the `event.source !== window` guards, the two-worlds protocol, and the
+// localStorage keys are preserved unchanged.
+import { dom } from '@aggregaytor/sniffies-lib';
+
 const LOG = '[Aggregaytor:Bridge:Sniffies]';
 
 // v0.57.44: forward every uncaught error / unhandled promise rejection
@@ -473,17 +481,18 @@ try {
       // the map, so markers are .maplibregl-marker elements with background-image
       // styles pointing to sniffiesassets.com CDN URLs.
       let count = 0;
-      document.querySelectorAll('[style*="sniffiesassets"], .maplibregl-marker, .marker-avatar-image').forEach(el => {
+      // Marker root selection now uses the lib's observed marker selectors.
+      document.querySelectorAll(`[style*="sniffiesassets"], ${dom.MARKER_ROOT_SELECTOR}, ${dom.MARKER_AVATAR_IMAGE_SELECTOR}`).forEach(el => {
         const bg = (el as HTMLElement).style?.backgroundImage || '';
         // Extract the actual URL from the CSS background-image value
         const match = bg.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/i);
         if (!match) return;
         const url = match[1];
-        // Extract the hex profile ID from the CDN URL path
-        // e.g., https://profile.sniffiesassets.com/abc123def456/photo.jpg -> abc123def456
-        const idMatch = url.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
-        if (!idMatch) return; // skip non-profile images (site assets, defaults)
-        const profileId = idMatch[1].toLowerCase();
+        // Extract the hex profile ID from the CDN URL path — delegates to the
+        // lib's dom.profileIdFromAssetUrl (canonical profile.sniffiesassets.com/
+        // <hex>/ pattern, lowercased). Returns null for non-profile images.
+        const profileId = dom.profileIdFromAssetUrl(url);
+        if (!profileId) return; // skip non-profile images (site assets, defaults)
         // Send each avatar as a contact update to the service worker
         chrome.runtime.sendMessage({
           type: 'ADAPTER_CONTACTS',
@@ -570,8 +579,10 @@ try {
           // Fallback: generate a pseudo-ID by base64-encoding the attributes string.
           // This ensures each unique profile gets a stable-ish contactId.
           let profileId = '';
-          const idFromAvatar = (avatarUrl || bgAvatar).match(/\/([0-9a-f]{6,})\//i);
-          if (idFromAvatar) profileId = idFromAvatar[1].toLowerCase();
+          // Prefer the lib's dom.profileIdFromAssetUrl (canonical avatar-CDN
+          // pattern, lowercased) over an ad-hoc path regex.
+          const idFromAvatar = dom.profileIdFromAssetUrl(avatarUrl || bgAvatar);
+          if (idFromAvatar) profileId = idFromAvatar;
           // btoa() throws on any code point above U+00FF, so an emoji or
           // accented character anywhere in the attrs line used to drop the
           // whole feed item via the per-item catch. Hash the string instead —
@@ -2736,10 +2747,11 @@ function checkUrlChange() {
   if (url === lastUrl) return;
   lastUrl = url;
 
-  // Check if the new URL is a profile page: /profile/{hexId} or /profile/{hexId}/chat
-  const match = url.match(/\/profile\/([0-9a-f]{6,})(?:\/chat)?/i);
-  if (match) {
-    const profileId = match[1].toLowerCase();
+  // Check if the new URL is a profile page: /profile/{hexId} or /profile/{hexId}/chat.
+  // dom.profileIdFromHref captures the same hex for both shapes (its match stops
+  // at the hex, so a trailing /chat is irrelevant).
+  const profileId = dom.profileIdFromHref(url);
+  if (profileId) {
     const contactId = `sniffies:${profileId}`;
     try {
       chrome.runtime.sendMessage({ type: 'ACTIVE_PROFILE_CHANGED', contactId, platform: 'sniffies' }).catch(() => {});
@@ -3097,10 +3109,10 @@ function activeProfileFromDom(): { contactId: string; container: HTMLElement | n
   // the "Say something..." composer textarea — it's on every chat view.
   // If we see it, a chat is open.
 
-  // 1. Hex URL — authoritative when present.
-  const m = location.pathname.match(/\/profile\/([0-9a-f]{6,})/i);
-  if (m) {
-    return { contactId: `sniffies:${m[1].toLowerCase()}`, container: findProfileContainer() };
+  // 1. Hex URL — authoritative when present. Delegates to dom.profileIdFromHref.
+  const urlId = dom.profileIdFromHref(location.pathname);
+  if (urlId) {
+    return { contactId: `sniffies:${urlId}`, container: findProfileContainer() };
   }
 
   // 2. Composer textarea on screen → a chat is being viewed even without
@@ -3115,9 +3127,9 @@ function activeProfileFromDom(): { contactId: string; container: HTMLElement | n
       root = root.parentElement;
     }
     const html = (root || document.body).outerHTML || '';
-    const avatarHex = html.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+    const avatarHex = dom.profileIdFromAssetUrl(html);
     return {
-      contactId: avatarHex ? `sniffies:${avatarHex[1].toLowerCase()}` : 'sniffies:active-chat',
+      contactId: avatarHex ? `sniffies:${avatarHex}` : 'sniffies:active-chat',
       container: root,
     };
   }
@@ -3125,9 +3137,9 @@ function activeProfileFromDom(): { contactId: string; container: HTMLElement | n
   // 3. Standalone profile container (no chat composer, just a profile card).
   const container = findProfileContainer();
   if (!container) return null;
-  const avatarHex = container.outerHTML.match(/sniffiesassets\.com\/([0-9a-f]{6,})\//i);
+  const avatarHex = dom.profileIdFromAssetUrl(container.outerHTML);
   return {
-    contactId: avatarHex ? `sniffies:${avatarHex[1].toLowerCase()}` : 'sniffies:anonymous-overlay',
+    contactId: avatarHex ? `sniffies:${avatarHex}` : 'sniffies:anonymous-overlay',
     container,
   };
 }
@@ -3344,9 +3356,9 @@ function isChatComposerTarget(target: EventTarget | null): boolean {
  * throw can't escape. @returns true if a greeting was dispatched.
  */
 function dispatchRandomIntroFromGesture(): boolean {
-  const match = location.pathname.match(/\/profile\/([0-9a-f]{6,})/i);
-  if (!match) return false;
-  const contactId = `sniffies:${match[1].toLowerCase()}`;
+  const introId = dom.profileIdFromHref(location.pathname);
+  if (!introId) return false;
+  const contactId = `sniffies:${introId}`;
   try {
     chrome.runtime.sendMessage({ type: 'SEND_GREETING', contactId, platform: 'sniffies' }).then((res: any) => {
       const delaySec = Math.round(((res?.delay) || 0) / 1000);
