@@ -13,10 +13,12 @@
  *
  * SECURITY: `OPS_RUN` is gated exactly like `DEBUG_COMMAND` (sender-origin
  * check in the service worker — extension pages only, content scripts refused).
- * On top of that, operations whose name matches a MUTATING verb are classified
- * `write` and refused unless the caller passes `confirmWrite: true` (or a valid
- * debug token). Reads run freely for a trusted origin. No operation is exposed
- * to a content script or an external page.
+ * On top of that, read/write classification is FAIL-CLOSED: an operation runs
+ * without `confirmWrite` ONLY when its name is a confident read (see
+ * {@link classifyKind}); every destructive, secret-touching, or ambiguous
+ * operation defaults to `write` and is refused unless the caller passes
+ * `confirmWrite: true` (or a valid debug token). No operation is exposed to a
+ * content script or an external page.
  */
 
 import * as store from '@aggregaytor/store';
@@ -37,8 +39,41 @@ export interface OperationEntry {
   fn: (...args: unknown[]) => unknown;
 }
 
-/** Verbs that mark an exported operation as state-mutating (write-gated). */
-const WRITE_VERB_RE = /^(upsert|delete|remove|put|post|save|write|set|update|purge|clear|drop|sync|block|hide|unblock|share|unshare|create|add|enqueue|reset|import|migrate|record|train|send|toggle|apply|revoke)/i;
+// Read/write classification is FAIL-CLOSED. A denylist of write verbs is unsafe
+// because it fails OPEN: any exported name that doesn't happen to start with a
+// listed verb (e.g. `destroyDB`, `restoreFromOpfsSnapshot`, `closeDB`,
+// `clearIndex`, or the secret-creating `getOrCreateBackupKey`) would be treated
+// as a free-running read. Instead: an operation is a `read` ONLY when its name
+// starts with a conservative read prefix AND is not force-classified as a write;
+// everything else defaults to `write` (needs confirmWrite/token).
+
+/** Names that are always writes even if they start with a read-ish prefix
+ * (e.g. `getOrCreate…` starts with "get" but persists/creates state). Checked
+ * before the read allowlist. */
+const FORCE_WRITE_RE = /^(getOrCreate|destroy|drop|restore|close|clear|wipe|erase|purge|delete|remove|reset|rebuild|compact|install|uninstall|rotate|regenerate|revoke|import|migrate|save|put|post|write|set|update|upsert|sync|block|hide|unblock|share|unshare|create|add|enqueue|record|train|send|toggle|apply|authenticate)/i;
+
+/** Conservative read-verb prefixes — only these run without confirmWrite. */
+const READ_PREFIX_RE = /^(get|list|query|find|search|read|count|is|has|exists|estimate|inspect|peek|fetch|resolve)/i;
+
+/** Belt-and-suspenders: full operation names that must ALWAYS be writes,
+ * regardless of prefix heuristics (destructive or secret-touching). */
+const HARD_WRITE_OPS = new Set<string>([
+  'store.destroyDB', 'store.closeDB', 'store.restoreFromOpfsSnapshot', 'store.restoreFromDrive',
+  'store.importAllData', 'store.importBlocked', 'store.purgeOldestMessages', 'store.getOrCreateBackupKey',
+  'store.getStoredBackupKey', 'store.deleteOpfsSnapshot', 'search.clearIndex', 'llm.clearLLMCaches',
+]);
+
+/**
+ * Classify an operation as read or write, fail-closed.
+ * @param fullName namespaced operation name (e.g. `store.getAllContacts`)
+ * @param key the bare exported function name
+ * @returns 'read' only for a confidently side-effect-free operation; 'write' otherwise
+ */
+function classifyKind(fullName: string, key: string): 'read' | 'write' {
+  if (HARD_WRITE_OPS.has(fullName)) return 'write';
+  if (FORCE_WRITE_RE.test(key)) return 'write';
+  return READ_PREFIX_RE.test(key) ? 'read' : 'write';
+}
 
 const REGISTRY = new Map<string, OperationEntry>();
 
@@ -61,7 +96,7 @@ function registerModule(moduleName: string, mod: Record<string, unknown>): numbe
     REGISTRY.set(name, {
       name,
       module: moduleName,
-      kind: WRITE_VERB_RE.test(key) ? 'write' : 'read',
+      kind: classifyKind(name, key),
       fn: value as (...args: unknown[]) => unknown,
     });
     count += 1;

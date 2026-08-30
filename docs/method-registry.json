@@ -2656,9 +2656,25 @@
     "reachableVia": "OPS_RUN"
   },
   {
+    "name": "classifyKind",
+    "file": "extensions/aggregaytor/background/operations-registry.ts",
+    "line": 72,
+    "kind": "function",
+    "exported": false,
+    "async": false,
+    "nested": false,
+    "hasDoc": true,
+    "summary": "Classify an operation as read or write, fail-closed.",
+    "logs": false,
+    "errors": false,
+    "pure": true,
+    "surface": "api",
+    "reachableVia": "OPS_RUN"
+  },
+  {
     "name": "registerModule",
     "file": "extensions/aggregaytor/background/operations-registry.ts",
-    "line": 52,
+    "line": 87,
     "kind": "function",
     "exported": false,
     "async": false,
@@ -2674,7 +2690,7 @@
   {
     "name": "listOperations",
     "file": "extensions/aggregaytor/background/operations-registry.ts",
-    "line": 98,
+    "line": 133,
     "kind": "function",
     "exported": true,
     "async": false,
@@ -2690,7 +2706,7 @@
   {
     "name": "runOperation",
     "file": "extensions/aggregaytor/background/operations-registry.ts",
-    "line": 127,
+    "line": 162,
     "kind": "function",
     "exported": true,
     "async": true,
